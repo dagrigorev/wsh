@@ -63,7 +63,6 @@ PYTHONPATH=./src
 ## Commands
 
 - `alias` - Manage command aliases
-- `theme reload` - Reload current theme
 - `cd` - Change directory (auto-reloads config)
 - `exit` - Quit the shell
 
