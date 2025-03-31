@@ -1,0 +1,28 @@
+# This is a comment
+env production-server
+
+# Environment variables
+PATH=C:\Windows\System32;$PATH
+TERM=xterm-256color
+HOME=C:\users\custom
+
+# Aliases
+alias gs='git status'
+alias ps='powershell'
+alias q='exit'
+
+# Theme configuration
+theme my_custom_theme:
+prompt_fg=214     # Orange prompt
+prompt_bg=32
+text_fg=255       # Bright white text
+error_fg=196      # Bright red errors
+dir_fg=81         # Light blue directories
+highlight_fg=226  # Bright yellow highlights
+prompt_symbol=λ   # Custom prompt symbol
+env_prompt_symbol=$ # Custom env prompt symbol
+
+# Another environment (would need multi-env support)
+env development
+DB_HOST=localhost
+DB_PORT=5432
