@@ -13,6 +13,10 @@ wsh is a lightweight, customizable command shell for Windows that brings Zsh-lik
 - Customizable color themes
 - Cross-version Windows compatibility (Windows 7 through 11)
 
+## Demo
+
+![wsh demo](wsh.gif)
+
 ## Features
 
 ✨ **Zsh-like Experience**:
