@@ -1,4 +1,9 @@
 #include "utils.h"
+#include <istream>
+#include <sstream>
+#include <iostream>
+#include <string>
+#include <Windows.h>
 
 bool IsWindows7OrLater() {
     OSVERSIONINFOEX osvi = { sizeof(OSVERSIONINFOEX) };
@@ -11,4 +16,39 @@ bool IsWindows7OrLater() {
     osvi.dwMinorVersion = 1;
 
     return VerifyVersionInfo(&osvi, VER_MAJORVERSION | VER_MINORVERSION, conditionMask);
+}
+
+/**
+  GetCurrentDirectoryA wrapped method
+ **/
+void GetCurrentWorkDirectory(int max_path, char* cwd) {
+	GetCurrentDirectoryA(max_path, cwd);
+}
+
+std::string Colorize(const std::string& text, const std::string& fg, const std::string& bg) {
+	return "\033[" + bg + ";" + fg + "m" + text + "\033[0m";
+}
+
+void EnableAnsiColors() {
+	// Enable VT processing on Windows 10+
+	HANDLE hOut = GetStdHandle(STD_OUTPUT_HANDLE);
+	if (hOut == INVALID_HANDLE_VALUE) return;
+
+	DWORD dwMode = 0;
+	if (!GetConsoleMode(hOut, &dwMode)) return;
+
+	dwMode |= ENABLE_VIRTUAL_TERMINAL_PROCESSING;
+	SetConsoleMode(hOut, dwMode);
+}
+
+void ReadStdInput(char* ch, unsigned long& chars_read) {
+	*ch = std::cin.get();
+	chars_read = (unsigned long)std::cin.gcount();
+	//ReadConsole(GetStdHandle(STD_INPUT_HANDLE), ch, 1, &chars_read, NULL);
+}
+
+std::string GetCurrentDir() {
+	char cwd[MAX_PATH];
+	GetCurrentDirectoryA(MAX_PATH, cwd);
+	return cwd;
 }
