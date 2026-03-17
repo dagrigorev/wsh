@@ -49,15 +49,8 @@ target_include_directories(wsh_vt PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/vt/include
 )
 
-target_link_libraries(wsh_vt PUBLIC
-  wsh_common
-  wsh_terminal
-)
-
-wsh_set_project_warnings(wsh_vt)
-
-target_include_directories(wsh_vt PUBLIC
-  ${CMAKE_CURRENT_SOURCE_DIR}/vt/include
+target_include_directories(wsh_vt PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/terminal/include
 )
 
 target_link_libraries(wsh_vt PUBLIC
@@ -80,17 +73,6 @@ target_link_libraries(wsh_terminal PUBLIC
   wsh_common
   wsh_vt
   wsh_conpty
-)
-
-wsh_set_project_warnings(wsh_terminal)
-
-target_include_directories(wsh_terminal PUBLIC
-  ${CMAKE_CURRENT_SOURCE_DIR}/terminal/include
-)
-
-target_link_libraries(wsh_terminal PUBLIC
-  wsh_common
-  wsh_vt
 )
 
 wsh_set_project_warnings(wsh_terminal)

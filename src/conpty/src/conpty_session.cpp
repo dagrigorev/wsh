@@ -47,6 +47,9 @@ wsh::common::Result<void> ConptySession::Start(const std::wstring& commandLine, 
         return pseudoConsole.GetError();
     }
 
+    input.read.reset();
+    output.write.reset();
+
     wsh::platform::windows::StartupAttributeList attributeList;
     auto initAttributes = attributeList.Initialize(1);
     if (!initAttributes.HasValue())
@@ -55,17 +58,18 @@ wsh::common::Result<void> ConptySession::Start(const std::wstring& commandLine, 
         return initAttributes.GetError();
     }
 
+    auto pseudoConsoleValue = pseudoConsole.Value();
     if (!UpdateProcThreadAttribute(
             attributeList.get(),
             0,
             PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE,
-            pseudoConsole.Value(),
-            sizeof(pseudoConsole.Value()),
+            pseudoConsoleValue,
+            sizeof(pseudoConsoleValue),
             nullptr,
             nullptr))
     {
         const auto error = wsh::platform::windows::GetLastErrorMessage("UpdateProcThreadAttribute failed");
-        wsh::platform::windows::ClosePseudoConsoleHandle(pseudoConsole.Value());
+        wsh::platform::windows::ClosePseudoConsoleHandle(pseudoConsoleValue);
         return wsh::common::Error{error};
     }
 
@@ -76,20 +80,16 @@ wsh::common::Result<void> ConptySession::Start(const std::wstring& commandLine, 
     auto launch = wsh::platform::windows::LaunchProcess(commandLine, startupInfo, false);
     if (!launch.HasValue())
     {
-        wsh::platform::windows::ClosePseudoConsoleHandle(pseudoConsole.Value());
+        wsh::platform::windows::ClosePseudoConsoleHandle(pseudoConsoleValue);
         return launch.GetError();
     }
 
-    pseudoConsole_ = pseudoConsole.Value();
+    pseudoConsole_ = pseudoConsoleValue;
     ptyInputWrite_ = std::move(input.write);
     ptyOutputRead_ = std::move(output.read);
     childProcess_ = std::move(launch.Value());
     cols_ = cols;
     rows_ = rows;
-
-    // These ends are now owned by the pseudo console and should not remain open in the parent.
-    input.read.reset();
-    output.write.reset();
 
     return {};
 }
@@ -138,6 +138,12 @@ wsh::common::Result<std::string> ConptySession::ReadOutputChunk()
     DWORD available = 0;
     if (!PeekNamedPipe(ptyOutputRead_.get(), nullptr, 0, nullptr, &available, nullptr))
     {
+        const auto lastError = GetLastError();
+        if (lastError == ERROR_BROKEN_PIPE)
+        {
+            return std::string{};
+        }
+
         return wsh::common::Error{wsh::platform::windows::GetLastErrorMessage("PeekNamedPipe failed")};
     }
 
@@ -150,6 +156,12 @@ wsh::common::Result<std::string> ConptySession::ReadOutputChunk()
     DWORD bytesRead = 0;
     if (!ReadFile(ptyOutputRead_.get(), chunk.data(), available, &bytesRead, nullptr))
     {
+        const auto lastError = GetLastError();
+        if (lastError == ERROR_BROKEN_PIPE)
+        {
+            return std::string{};
+        }
+
         return wsh::common::Error{wsh::platform::windows::GetLastErrorMessage("ReadFile from ConPTY failed")};
     }
 
