@@ -14,6 +14,7 @@ wsh_set_project_warnings(wsh_common)
 
 add_library(wsh_platform_windows
   platform/windows/src/win_error.cpp
+  platform/windows/src/handle.cpp
   platform/windows/src/pipe.cpp
   platform/windows/src/process.cpp
   platform/windows/src/environment.cpp
@@ -50,6 +51,17 @@ target_include_directories(wsh_vt PUBLIC
 
 target_link_libraries(wsh_vt PUBLIC
   wsh_common
+  wsh_terminal
+)
+
+wsh_set_project_warnings(wsh_vt)
+
+target_include_directories(wsh_vt PUBLIC
+  ${CMAKE_CURRENT_SOURCE_DIR}/vt/include
+)
+
+target_link_libraries(wsh_vt PUBLIC
+  wsh_common
 )
 
 wsh_set_project_warnings(wsh_vt)
@@ -59,6 +71,18 @@ add_library(wsh_terminal
   terminal/src/screen_buffer.cpp
   terminal/src/scrollback_buffer.cpp
 )
+
+target_include_directories(wsh_terminal PUBLIC
+  ${CMAKE_CURRENT_SOURCE_DIR}/terminal/include
+)
+
+target_link_libraries(wsh_terminal PUBLIC
+  wsh_common
+  wsh_vt
+  wsh_conpty
+)
+
+wsh_set_project_warnings(wsh_terminal)
 
 target_include_directories(wsh_terminal PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/terminal/include

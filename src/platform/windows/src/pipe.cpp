@@ -2,40 +2,10 @@
 
 #include <windows.h>
 
+#include "wsh/platform/windows/win_error.h"
+
 namespace wsh::platform::windows
 {
-UniqueHandle::~UniqueHandle()
-{
-    reset();
-}
-
-UniqueHandle::UniqueHandle(UniqueHandle&& other) noexcept : handle_(other.release()) {}
-
-UniqueHandle& UniqueHandle::operator=(UniqueHandle&& other) noexcept
-{
-    if (this != &other)
-    {
-        reset(other.release());
-    }
-    return *this;
-}
-
-HANDLE UniqueHandle::release() noexcept
-{
-    HANDLE value = handle_;
-    handle_ = nullptr;
-    return value;
-}
-
-void UniqueHandle::reset(HANDLE handle) noexcept
-{
-    if (valid())
-    {
-        CloseHandle(handle_);
-    }
-    handle_ = handle;
-}
-
 wsh::common::Result<PipePair> CreatePipePair()
 {
     SECURITY_ATTRIBUTES attributes{};
@@ -47,7 +17,7 @@ wsh::common::Result<PipePair> CreatePipePair()
 
     if (!CreatePipe(&readHandle, &writeHandle, &attributes, 0))
     {
-        return wsh::common::Error{"CreatePipe failed"};
+        return wsh::common::Error{GetLastErrorMessage("CreatePipe failed")};
     }
 
     return PipePair{UniqueHandle{readHandle}, UniqueHandle{writeHandle}};

@@ -2,6 +2,10 @@
 
 #include "wsh/config/settings_loader.h"
 
+void RunStringsTests();
+void RunUnicodeTests();
+void RunTokenizerTests();
+
 void RunSettingsTests()
 {
     const wsh::config::SettingsLoader loader;

@@ -1,18 +1,21 @@
 #include "wsh/parser/tokenizer.h"
 
 #include <sstream>
+#include <string>
 
 namespace wsh::parser
 {
-std::vector<Token> Tokenizer::Tokenize(std::string_view input) const
-{
-    std::vector<Token> tokens;
-    std::istringstream stream(std::string(input));
-    std::string item;
-    while (stream >> item)
+    std::vector<Token> Tokenizer::Tokenize(std::string_view input) const
     {
-        tokens.push_back({item});
+        std::vector<Token> tokens;
+        std::istringstream stream{ std::string{input} };
+        std::string item;
+
+        while (stream >> item)
+        {
+            tokens.push_back(Token{ item });
+        }
+
+        return tokens;
     }
-    return tokens;
-}
 } // namespace wsh::parser
