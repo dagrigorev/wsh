@@ -28,6 +28,7 @@ namespace wsh::terminal
         std::wstring textBuffer_;
         bool inEscape_ = false;
         bool inCsi_ = false;
+        bool sawEscapePrefix_ = false;
         bool inOsc_ = false;
         bool oscSawEscape_ = false;
         std::wstring csiBuffer_;

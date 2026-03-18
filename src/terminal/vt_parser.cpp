@@ -121,6 +121,7 @@ namespace wsh::terminal
             {
                 inCsi_ = true;
                 csiBuffer_.clear();
+                sawEscapePrefix_ = false;
                 return;
             }
 
@@ -132,16 +133,37 @@ namespace wsh::terminal
                 return;
             }
 
+            if (ch == L'7')
+            {
+                buffer_.SaveCursor();
+                inEscape_ = false;
+                return;
+            }
+
+            if (ch == L'8')
+            {
+                buffer_.RestoreCursor();
+                inEscape_ = false;
+                return;
+            }
+
             inEscape_ = false;
             return;
         }
 
         csiBuffer_.push_back(ch);
+        if (!sawEscapePrefix_ && (ch == L'?' || ch == L'>' || ch == L'!'))
+        {
+            sawEscapePrefix_ = true;
+            return;
+        }
+
         if ((ch >= L'@' && ch <= L'~') || std::iswalpha(ch))
         {
             HandleCsi(csiBuffer_);
             inCsi_ = false;
             inEscape_ = false;
+            sawEscapePrefix_ = false;
         }
     }
 
@@ -195,6 +217,7 @@ namespace wsh::terminal
 
         const wchar_t command = sequence.back();
         const std::wstring paramsText = sequence.substr(0, sequence.size() - 1);
+        const bool privateMode = !paramsText.empty() && (paramsText.front() == L'?' || paramsText.front() == L'>');
 
         auto parse_param = [](std::wstring item) -> int
         {
@@ -253,13 +276,10 @@ namespace wsh::terminal
             buffer_.MoveCursor(buffer_.GetCursor().row, buffer_.GetCursor().column - std::max(1, params[0]));
             break;
         case L'J':
-            if (params[0] == 2)
-            {
-                buffer_.ClearScreen();
-            }
+            buffer_.ClearDisplay(params[0]);
             break;
         case L'K':
-            buffer_.ClearLineFromCursor();
+            buffer_.ClearLine(params[0]);
             break;
         case L'm':
             for (const int value : params)
@@ -277,6 +297,24 @@ namespace wsh::terminal
                 else if (value >= 90 && value <= 97) buffer_.SetForeground(BasicColor(value - 90, true));
                 else if (value >= 40 && value <= 47) buffer_.SetBackground(BasicColor(value - 40, false));
                 else if (value >= 100 && value <= 107) buffer_.SetBackground(BasicColor(value - 100, true));
+            }
+            break;
+        case L's':
+            buffer_.SaveCursor();
+            break;
+        case L'u':
+            buffer_.RestoreCursor();
+            break;
+        case L'h':
+            if (privateMode && !params.empty() && params[0] == 25)
+            {
+                buffer_.SetCursorVisible(true);
+            }
+            break;
+        case L'l':
+            if (privateMode && !params.empty() && params[0] == 25)
+            {
+                buffer_.SetCursorVisible(false);
             }
             break;
         default:

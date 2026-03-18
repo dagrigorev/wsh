@@ -5,10 +5,12 @@
 #include "platform/clipboard.h"
 
 #include <algorithm>
+#include <cwctype>
 #include <format>
 #include <string>
 #include <unordered_map>
 #include <windowsx.h>
+#include <dwmapi.h>
 
 using Microsoft::WRL::ComPtr;
 
@@ -18,6 +20,14 @@ namespace wsh::app
     {
         constexpr wchar_t kWindowClassName[] = L"WSH.Terminal.MainWindow";
         constexpr UINT kProfileMenuBase = 40000;
+        constexpr int kResizeBorder = 8;
+
+        enum WindowControlId
+        {
+            kControlMinimize = 0,
+            kControlMaximize = 1,
+            kControlClose = 2
+        };
 
         bool IsCtrlPressed() noexcept { return (::GetKeyState(VK_CONTROL) & 0x8000) != 0; }
         bool IsShiftPressed() noexcept { return (::GetKeyState(VK_SHIFT) & 0x8000) != 0; }
@@ -36,6 +46,7 @@ namespace wsh::app
 
         WNDCLASSEXW windowClass{};
         windowClass.cbSize = sizeof(windowClass);
+        windowClass.style = CS_HREDRAW | CS_VREDRAW | CS_DBLCLKS;
         windowClass.lpfnWndProc = &MainWindow::WindowProc;
         windowClass.hInstance = instance;
         windowClass.hCursor = ::LoadCursorW(nullptr, IDC_ARROW);
@@ -45,10 +56,10 @@ namespace wsh::app
         ::RegisterClassExW(&windowClass);
 
         hwnd_ = ::CreateWindowExW(
-            0,
+            WS_EX_APPWINDOW,
             kWindowClassName,
             L"WSH Terminal",
-            WS_OVERLAPPEDWINDOW | WS_VISIBLE,
+            WS_POPUP | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_VISIBLE,
             CW_USEDEFAULT,
             CW_USEDEFAULT,
             1280,
@@ -62,6 +73,11 @@ namespace wsh::app
         {
             return false;
         }
+
+        const auto cornerPref = DWM_WINDOW_CORNER_PREFERENCE::DWMWCP_ROUND;
+        ::DwmSetWindowAttribute(hwnd_, DWMWA_WINDOW_CORNER_PREFERENCE, &cornerPref, sizeof(cornerPref));
+        const BOOL darkMode = TRUE;
+        ::DwmSetWindowAttribute(hwnd_, DWMWA_USE_IMMERSIVE_DARK_MODE, &darkMode, sizeof(darkMode));
 
         ::ShowWindow(hwnd_, showCommand);
         ::UpdateWindow(hwnd_);
@@ -95,6 +111,40 @@ namespace wsh::app
     {
         switch (message)
         {
+        case WM_NCCALCSIZE:
+            return 0;
+        case WM_NCHITTEST:
+        {
+            POINT point{ GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+            RECT windowRect{};
+            ::GetWindowRect(hwnd_, &windowRect);
+
+            const bool onLeft = point.x >= windowRect.left && point.x < windowRect.left + kResizeBorder;
+            const bool onRight = point.x < windowRect.right && point.x >= windowRect.right - kResizeBorder;
+            const bool onTop = point.y >= windowRect.top && point.y < windowRect.top + kResizeBorder;
+            const bool onBottom = point.y < windowRect.bottom && point.y >= windowRect.bottom - kResizeBorder;
+
+            if (onTop && onLeft) return HTTOPLEFT;
+            if (onTop && onRight) return HTTOPRIGHT;
+            if (onBottom && onLeft) return HTBOTTOMLEFT;
+            if (onBottom && onRight) return HTBOTTOMRIGHT;
+            if (onLeft) return HTLEFT;
+            if (onRight) return HTRIGHT;
+            if (onTop) return HTTOP;
+            if (onBottom) return HTBOTTOM;
+
+            POINT clientPoint = point;
+            ::ScreenToClient(hwnd_, &clientPoint);
+            if (HitTestWindowControl(clientPoint.x, clientPoint.y).has_value())
+            {
+                return HTCLIENT;
+            }
+            if (IsPointInDraggableHeader(clientPoint.x, clientPoint.y))
+            {
+                return HTCAPTION;
+            }
+            return HTCLIENT;
+        }
         case WM_CREATE:
             OnCreate();
             return 0;
@@ -119,14 +169,28 @@ namespace wsh::app
         case WM_MOUSEMOVE:
             OnMouseMove(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam), wParam);
             return 0;
+        case WM_LBUTTONDBLCLK:
+            OnLeftButtonDoubleClick(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam));
+            return 0;
         case WM_MOUSELEAVE:
             OnMouseLeave();
             return 0;
         case WM_SETCURSOR:
-            UpdateCursor();
-            return TRUE;
+            if (LOWORD(lParam) == HTCLIENT)
+            {
+                POINT point{};
+                ::GetCursorPos(&point);
+                ::ScreenToClient(hwnd_, &point);
+                UpdateHoverState(point.x, point.y);
+                UpdateCursor();
+                return TRUE;
+            }
+            break;
         case WM_LBUTTONUP:
             OnLeftButtonUp(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam));
+            return 0;
+        case WM_MBUTTONDOWN:
+            OnMiddleButtonDown(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam));
             return 0;
         case WM_MBUTTONUP:
             OnMiddleButtonUp(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam));
@@ -228,8 +292,8 @@ namespace wsh::app
         ::GetClientRect(hwnd_, &rect);
         const int clientWidth = static_cast<int>(rect.right - rect.left);
         const int clientHeight = static_cast<int>(rect.bottom - rect.top);
-        const int width = std::max(100, clientWidth - 2 * padding_);
-        const int height = std::max(100, clientHeight - tabBarHeight_ - statusBarHeight_ - 2 * padding_);
+        const int width = std::max(100, clientWidth - 2 * padding_ - 28);
+        const int height = std::max(100, clientHeight - appHeaderHeight_ - tabBarHeight_ - statusBarHeight_ - 54);
         terminalColumns_ = std::max(20, static_cast<int>(width / charWidth_));
         terminalRows_ = std::max(8, static_cast<int>(height / lineHeight_));
 
@@ -269,6 +333,8 @@ namespace wsh::app
         renderTarget_->BeginDraw();
         renderTarget_->Clear(settings_.theme.background);
 
+        DrawHeader();
+        DrawWindowControls();
         DrawTabs();
         DrawTerminal();
         DrawStatusBar();
@@ -311,11 +377,166 @@ namespace wsh::app
         {
             return text;
         }
-        if (maxChars <= 1)
+        if (maxChars <= 4)
         {
             return text.substr(0, maxChars);
         }
+
+        const auto slashPos = text.find_last_of(L"\/");
+        if (slashPos != std::wstring::npos)
+        {
+            const std::wstring tail = text.substr(slashPos + 1);
+            if (tail.size() + 4 <= maxChars)
+            {
+                const size_t headCount = maxChars - tail.size() - 1;
+                return L"…" + text.substr(slashPos - std::min(slashPos, headCount) + 1, std::min(slashPos, headCount)) + L"\"" + tail;
+            }
+
+            if (tail.size() + 1 < maxChars)
+            {
+                return L"…\"" + tail.substr(tail.size() - (maxChars - 2));
+            }
+        }
+
         return text.substr(0, maxChars - 1) + L"…";
+    }
+
+    void MainWindow::DrawHeader()
+    {
+        RECT rect{};
+        ::GetClientRect(hwnd_, &rect);
+
+        D2D1_GRADIENT_STOP stops[] = {
+            {0.0f, D2D1::ColorF(0.11f, 0.14f, 0.24f, 1.0f)},
+            {0.36f, D2D1::ColorF(0.08f, 0.11f, 0.20f, 1.0f)},
+            {1.0f, D2D1::ColorF(0.03f, 0.05f, 0.10f, 1.0f)}
+        };
+        ComPtr<ID2D1GradientStopCollection> stopCollection;
+        renderTarget_->CreateGradientStopCollection(stops, 3, stopCollection.GetAddressOf());
+        ComPtr<ID2D1LinearGradientBrush> gradient;
+        renderTarget_->CreateLinearGradientBrush(
+            D2D1::LinearGradientBrushProperties(D2D1::Point2F(0.0f, 0.0f), D2D1::Point2F(static_cast<float>(rect.right), static_cast<float>(rect.bottom))),
+            stopCollection.Get(), gradient.GetAddressOf());
+        renderTarget_->FillRectangle(MakeRect(0.0f, 0.0f, static_cast<float>(rect.right), static_cast<float>(rect.bottom)), gradient.Get());
+
+        ComPtr<ID2D1SolidColorBrush> brush;
+        renderTarget_->CreateSolidColorBrush(settings_.theme.foreground, brush.GetAddressOf());
+
+        const auto drawSoftPanel = [&](const D2D1_RECT_F& panel, const float radius, const float fillAlpha, const float shadowAlpha)
+        {
+            brush->SetColor(D2D1::ColorF(0.01f, 0.02f, 0.05f, shadowAlpha));
+            renderTarget_->FillRoundedRectangle(D2D1::RoundedRect(MakeRect(panel.left, panel.top + 11.0f, panel.right, panel.bottom + 12.0f), radius + 1.5f, radius + 1.5f), brush.Get());
+            brush->SetColor(D2D1::ColorF(0.12f, 0.16f, 0.29f, fillAlpha));
+            renderTarget_->FillRoundedRectangle(D2D1::RoundedRect(panel, radius, radius), brush.Get());
+            brush->SetColor(D2D1::ColorF(1, 1, 1, 0.085f));
+            renderTarget_->DrawRoundedRectangle(D2D1::RoundedRect(panel, radius, radius), brush.Get(), 1.0f);
+            brush->SetColor(D2D1::ColorF(0.67f, 0.79f, 1.0f, 0.07f));
+            renderTarget_->FillRoundedRectangle(D2D1::RoundedRect(MakeRect(panel.left + 1.0f, panel.top + 1.0f, panel.right - 1.0f, panel.top + 24.0f), radius - 1.0f, radius - 1.0f), brush.Get());
+            brush->SetColor(D2D1::ColorF(0.00f, 0.00f, 0.00f, 0.12f));
+            renderTarget_->DrawLine(D2D1::Point2F(panel.left + 6.0f, panel.bottom - 1.0f), D2D1::Point2F(panel.right - 6.0f, panel.bottom - 1.0f), brush.Get(), 1.0f);
+        };
+
+        const D2D1_RECT_F headerPanel = MakeRect(10.0f, 10.0f, static_cast<float>(rect.right) - 10.0f, static_cast<float>(appHeaderHeight_) - 8.0f);
+        drawSoftPanel(headerPanel, 19.0f, 0.70f, 0.16f);
+
+        brush->SetColor(D2D1::ColorF(1, 1, 1, 0.03f));
+        renderTarget_->DrawLine(D2D1::Point2F(0.0f, static_cast<float>(appHeaderHeight_) + 1.0f), D2D1::Point2F(static_cast<float>(rect.right), static_cast<float>(appHeaderHeight_) + 1.0f), brush.Get(), 1.0f);
+        brush->SetColor(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.18f));
+        renderTarget_->DrawLine(D2D1::Point2F(0.0f, static_cast<float>(appHeaderHeight_) + 2.0f), D2D1::Point2F(static_cast<float>(rect.right), static_cast<float>(appHeaderHeight_) + 2.0f), brush.Get(), 1.0f);
+
+        const D2D1_RECT_F brandRect = MakeRect(18.0f, 18.0f, 50.0f, 50.0f);
+        brush->SetColor(D2D1::ColorF(0.27f, 0.16f, 0.68f, 1.0f));
+        renderTarget_->FillRoundedRectangle(D2D1::RoundedRect(brandRect, 10.0f, 10.0f), brush.Get());
+        brush->SetColor(D2D1::ColorF(0.34f, 0.75f, 1.0f, 1.0f));
+        renderTarget_->FillRoundedRectangle(D2D1::RoundedRect(MakeRect(18.0f, 18.0f, 50.0f, 33.0f), 10.0f, 10.0f), brush.Get());
+        brush->SetColor(D2D1::ColorF(1, 1, 1, 0.11f));
+        renderTarget_->DrawRoundedRectangle(D2D1::RoundedRect(brandRect, 10.0f, 10.0f), brush.Get(), 1.0f);
+
+        ComPtr<IDWriteTextFormat> titleFormat;
+        dwriteFactory_->CreateTextFormat(L"Segoe UI", nullptr, DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, 19.0f, L"en-US", titleFormat.GetAddressOf());
+        titleFormat->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+        ComPtr<IDWriteTextFormat> subtitleFormat;
+        dwriteFactory_->CreateTextFormat(L"Segoe UI", nullptr, DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, 12.5f, L"en-US", subtitleFormat.GetAddressOf());
+        subtitleFormat->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+
+        brush->SetColor(D2D1::ColorF(0.98f, 0.99f, 1.0f, 1.0f));
+        renderTarget_->DrawTextW(L"WSH", 3, titleFormat.Get(), MakeRect(64.0f, 16.0f, 130.0f, 48.0f), brush.Get());
+
+        std::wstring context = L"~/projects/wsh  •  PowerShell 7 | Admin";
+        if (workspace_ && workspace_->ActiveTab())
+        {
+            const std::wstring active = workspace_->ActiveTab()->TitleSnapshot();
+            if (!active.empty())
+            {
+                context = Ellipsize(active, 54);
+            }
+        }
+        brush->SetColor(D2D1::ColorF(0.82f, 0.87f, 0.95f, 0.86f));
+        renderTarget_->DrawTextW(context.c_str(), static_cast<UINT32>(context.size()), subtitleFormat.Get(), MakeRect(152.0f, 20.0f, static_cast<float>(rect.right) - 230.0f, 48.0f), brush.Get());
+    }
+
+    void MainWindow::DrawWindowControls()
+    {
+        RECT rect{};
+        ::GetClientRect(hwnd_, &rect);
+
+        ComPtr<ID2D1SolidColorBrush> brush;
+        renderTarget_->CreateSolidColorBrush(settings_.theme.foreground, brush.GetAddressOf());
+
+        const float buttonSize = 31.0f;
+        const float gap = 7.0f;
+        const float top = 17.5f;
+        float left = static_cast<float>(rect.right) - (buttonSize * 3.0f + gap * 2.0f) - 18.0f;
+
+        for (int i = 0; i < 3; ++i)
+        {
+            const bool hovered = hoveredWindowControl_ && *hoveredWindowControl_ == i;
+            const bool pressed = pressedWindowControl_ && *pressedWindowControl_ == i;
+            const D2D1_RECT_F r = MakeRect(left, top, left + buttonSize, top + buttonSize);
+
+            const D2D1_COLOR_F fill = i == kControlClose
+                ? (pressed ? D2D1::ColorF(0.74f, 0.25f, 0.31f, 0.98f) : hovered ? D2D1::ColorF(0.78f, 0.28f, 0.34f, 0.94f) : D2D1::ColorF(0.17f, 0.20f, 0.30f, 0.92f))
+                : (pressed ? D2D1::ColorF(0.18f, 0.22f, 0.36f, 0.98f) : hovered ? D2D1::ColorF(0.19f, 0.24f, 0.38f, 0.95f) : D2D1::ColorF(0.13f, 0.16f, 0.25f, 0.88f));
+            const D2D1_COLOR_F stroke = i == kControlClose
+                ? D2D1::ColorF(1, 1, 1, hovered ? 0.16f : 0.09f)
+                : D2D1::ColorF(1, 1, 1, hovered ? 0.13f : 0.07f);
+
+            brush->SetColor(D2D1::ColorF(0.01f, 0.02f, 0.05f, 0.14f));
+            renderTarget_->FillRoundedRectangle(D2D1::RoundedRect(MakeRect(r.left, r.top + 6.0f, r.right, r.bottom + 6.0f), 10.0f, 10.0f), brush.Get());
+            brush->SetColor(fill);
+            renderTarget_->FillRoundedRectangle(D2D1::RoundedRect(r, 10.0f, 10.0f), brush.Get());
+            brush->SetColor(stroke);
+            renderTarget_->DrawRoundedRectangle(D2D1::RoundedRect(r, 10.0f, 10.0f), brush.Get(), 1.0f);
+            brush->SetColor(D2D1::ColorF(1, 1, 1, hovered ? 0.075f : 0.04f));
+            renderTarget_->FillRoundedRectangle(D2D1::RoundedRect(MakeRect(r.left + 1.0f, r.top + 1.0f, r.right - 1.0f, r.top + 10.0f), 9.0f, 9.0f), brush.Get());
+
+            brush->SetColor(D2D1::ColorF(0.96f, 0.98f, 1.0f, 0.98f));
+            const float cx = (r.left + r.right) * 0.5f;
+            const float cy = (r.top + r.bottom) * 0.5f;
+            switch (i)
+            {
+            case kControlMinimize:
+                renderTarget_->DrawLine(D2D1::Point2F(cx - 5.5f, cy + 4.0f), D2D1::Point2F(cx + 5.5f, cy + 4.0f), brush.Get(), 1.7f);
+                break;
+            case kControlMaximize:
+                if (::IsZoomed(hwnd_))
+                {
+                    renderTarget_->DrawRectangle(MakeRect(cx - 5.0f, cy - 2.5f, cx + 4.0f, cy + 6.5f), brush.Get(), 1.3f);
+                    renderTarget_->DrawRectangle(MakeRect(cx - 2.0f, cy - 5.5f, cx + 7.0f, cy + 3.5f), brush.Get(), 1.3f);
+                }
+                else
+                {
+                    renderTarget_->DrawRectangle(MakeRect(cx - 5.5f, cy - 5.5f, cx + 5.5f, cy + 5.5f), brush.Get(), 1.45f);
+                }
+                break;
+            case kControlClose:
+                renderTarget_->DrawLine(D2D1::Point2F(cx - 5.0f, cy - 5.0f), D2D1::Point2F(cx + 5.0f, cy + 5.0f), brush.Get(), 1.75f);
+                renderTarget_->DrawLine(D2D1::Point2F(cx + 5.0f, cy - 5.0f), D2D1::Point2F(cx - 5.0f, cy + 5.0f), brush.Get(), 1.75f);
+                break;
+            }
+
+            left += buttonSize + gap;
+        }
     }
 
     void MainWindow::DrawTabs()
@@ -328,11 +549,30 @@ namespace wsh::app
         ComPtr<ID2D1SolidColorBrush> brush;
         renderTarget_->CreateSolidColorBrush(settings_.theme.muted, brush.GetAddressOf());
 
+        const D2D1_RECT_F stripRect = MakeRect(static_cast<float>(padding_) - 4.0f, static_cast<float>(appHeaderHeight_ + 8), static_cast<float>(padding_) + 784.0f, static_cast<float>(appHeaderHeight_ + tabBarHeight_ - 2));
+        brush->SetColor(D2D1::ColorF(1, 1, 1, 0.026f));
+        renderTarget_->FillRoundedRectangle(D2D1::RoundedRect(stripRect, 18.0f, 18.0f), brush.Get());
+        brush->SetColor(D2D1::ColorF(0.66f, 0.78f, 1.0f, 0.05f));
+        renderTarget_->FillRoundedRectangle(D2D1::RoundedRect(MakeRect(stripRect.left + 1.0f, stripRect.top + 1.0f, stripRect.right - 1.0f, stripRect.top + 15.0f), 17.0f, 17.0f), brush.Get());
+
+        const auto drawPill = [&](const D2D1_RECT_F& r, const D2D1_COLOR_F& fill, const D2D1_COLOR_F& stroke, const float glowAlpha, const bool active)
+        {
+            brush->SetColor(D2D1::ColorF(0.01f, 0.02f, 0.05f, glowAlpha));
+            renderTarget_->FillRoundedRectangle(D2D1::RoundedRect(MakeRect(r.left, r.top + 7.0f, r.right, r.bottom + 8.0f), 16.0f, 16.0f), brush.Get());
+            brush->SetColor(fill);
+            renderTarget_->FillRoundedRectangle(D2D1::RoundedRect(r, 16.0f, 16.0f), brush.Get());
+            brush->SetColor(stroke);
+            renderTarget_->DrawRoundedRectangle(D2D1::RoundedRect(r, 16.0f, 16.0f), brush.Get(), 1.0f);
+            brush->SetColor(active ? D2D1::ColorF(0.70f, 0.56f, 1.0f, 0.17f) : D2D1::ColorF(1, 1, 1, 0.035f));
+            renderTarget_->FillRoundedRectangle(D2D1::RoundedRect(MakeRect(r.left + 1.0f, r.top + 1.0f, r.right - 1.0f, r.top + 12.0f), 15.0f, 15.0f), brush.Get());
+            brush->SetColor(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.10f));
+            renderTarget_->DrawLine(D2D1::Point2F(r.left + 10.0f, r.bottom - 1.0f), D2D1::Point2F(r.right - 10.0f, r.bottom - 1.0f), brush.Get(), 1.0f);
+        };
+
         float x = static_cast<float>(padding_);
-        const float top = 8.0f;
-        const float height = static_cast<float>(tabBarHeight_ - 10);
-        const float width = 172.0f;
-        const float closeWidth = 24.0f;
+        const float top = static_cast<float>(appHeaderHeight_ + 14);
+        const float height = 44.0f;
+        const float width = 178.0f;
         const auto& tabs = workspace_->Tabs();
 
         for (size_t i = 0; i < tabs.size(); ++i)
@@ -340,26 +580,46 @@ namespace wsh::app
             const bool active = i == workspace_->ActiveIndex();
             const bool hovered = hoveredTab_ && *hoveredTab_ == i;
             const bool closeHovered = hoveredCloseTab_ && *hoveredCloseTab_ == i;
-            brush->SetColor(active ? settings_.theme.statusBackground : (hovered ? D2D1::ColorF(0.14f, 0.18f, 0.30f, 1.0f) : D2D1::ColorF(0.10f, 0.13f, 0.22f, 1.0f)));
-            renderTarget_->FillRoundedRectangle(D2D1::RoundedRect(MakeRect(x, top, x + width, top + height), 10.0f, 10.0f), brush.Get());
+            const D2D1_RECT_F tabRect = MakeRect(x, top, x + width, top + height);
+            drawPill(tabRect,
+                active ? D2D1::ColorF(0.30f, 0.21f, 0.52f, 0.99f) : (hovered ? D2D1::ColorF(0.16f, 0.19f, 0.29f, 0.98f) : D2D1::ColorF(0.13f, 0.16f, 0.24f, 0.95f)),
+                active ? D2D1::ColorF(0.67f, 0.43f, 1.0f, 0.75f) : D2D1::ColorF(1, 1, 1, hovered ? 0.10f : 0.055f),
+                active ? 0.18f : 0.10f,
+                active);
 
-            brush->SetColor(active ? settings_.theme.accent : (hovered ? D2D1::ColorF(0.38f, 0.60f, 0.96f, 1.0f) : settings_.theme.muted));
-            renderTarget_->FillRectangle(MakeRect(x, top + height - 3.0f, x + width, top + height), brush.Get());
+            brush->SetColor(active ? D2D1::ColorF(0.69f, 0.46f, 1.0f, 0.90f) : D2D1::ColorF(1, 1, 1, 0.03f));
+            renderTarget_->FillRoundedRectangle(D2D1::RoundedRect(MakeRect(x + 10.0f, top + height - 4.0f, x + width - 10.0f, top + height - 1.0f), 2.0f, 2.0f), brush.Get());
 
-            brush->SetColor(settings_.theme.foreground);
-            const std::wstring tabTitle = Ellipsize(BuildTabLabel(i), 16);
-            renderTarget_->DrawTextW(tabTitle.c_str(), static_cast<UINT32>(tabTitle.size()), uiFormat_.Get(), MakeRect(x + 14.0f, top + 7.0f, x + width - closeWidth - 8.0f, top + height), brush.Get());
+            brush->SetColor(active ? D2D1::ColorF(0.98f, 0.99f, 1.0f, 1.0f) : D2D1::ColorF(0.83f, 0.86f, 0.92f, 0.95f));
+            const std::wstring tabTitle = Ellipsize(BuildTabLabel(i), 13);
+            renderTarget_->DrawTextW(tabTitle.c_str(), static_cast<UINT32>(tabTitle.size()), uiFormat_.Get(), MakeRect(x + 18.0f, top + 9.0f, x + width - 48.0f, top + height), brush.Get());
 
-            brush->SetColor(closeHovered ? D2D1::ColorF(1.0f, 0.45f, 0.45f, 1.0f) : (active ? settings_.theme.accent : settings_.theme.muted));
-            renderTarget_->DrawTextW(L"×", 1, uiFormat_.Get(), MakeRect(x + width - closeWidth, top + 5.0f, x + width - 6.0f, top + height), brush.Get());
+            const float closeSize = 22.0f;
+            const float closeLeft = x + width - 34.0f;
+            const float closeTop = top + (height - closeSize) * 0.5f;
+            const D2D1_RECT_F closeRect = MakeRect(closeLeft, closeTop, closeLeft + closeSize, closeTop + closeSize);
+            brush->SetColor(closeHovered ? D2D1::ColorF(0.44f, 0.22f, 0.29f, 0.92f) : D2D1::ColorF(1, 1, 1, active ? 0.055f : 0.032f));
+            renderTarget_->FillRoundedRectangle(D2D1::RoundedRect(closeRect, 11.0f, 11.0f), brush.Get());
+            brush->SetColor(closeHovered ? D2D1::ColorF(1.0f, 0.72f, 0.74f, 1.0f) : D2D1::ColorF(0.82f, 0.85f, 0.92f, 0.92f));
+            const float cx = closeLeft + closeSize * 0.5f;
+            const float cy = closeTop + closeSize * 0.5f;
+            renderTarget_->DrawLine(D2D1::Point2F(cx - 4.0f, cy - 4.0f), D2D1::Point2F(cx + 4.0f, cy + 4.0f), brush.Get(), 1.45f);
+            renderTarget_->DrawLine(D2D1::Point2F(cx + 4.0f, cy - 4.0f), D2D1::Point2F(cx - 4.0f, cy + 4.0f), brush.Get(), 1.45f);
 
-            x += width + 8.0f;
+            x += width + 12.0f;
         }
 
-        brush->SetColor(hoverNewTabButton_ ? D2D1::ColorF(0.14f, 0.18f, 0.30f, 1.0f) : D2D1::ColorF(0.10f, 0.13f, 0.22f, 1.0f));
-        renderTarget_->FillRoundedRectangle(D2D1::RoundedRect(MakeRect(x, top, x + 40.0f, top + height), 10.0f, 10.0f), brush.Get());
-        brush->SetColor(settings_.theme.accent);
-        renderTarget_->DrawTextW(L"+", 1, uiFormat_.Get(), MakeRect(x + 12.0f, top + 5.0f, x + 28.0f, top + height), brush.Get());
+        const D2D1_RECT_F newRect = MakeRect(x, top, x + 44.0f, top + height);
+        drawPill(newRect,
+            hoverNewTabButton_ ? D2D1::ColorF(0.17f, 0.20f, 0.30f, 0.96f) : D2D1::ColorF(0.13f, 0.16f, 0.24f, 0.92f),
+            D2D1::ColorF(1, 1, 1, hoverNewTabButton_ ? 0.10f : 0.055f),
+            0.10f,
+            false);
+        brush->SetColor(D2D1::ColorF(0.97f, 0.99f, 1.0f, 1.0f));
+        const float cx = x + 22.0f;
+        const float cy = top + height * 0.5f;
+        renderTarget_->DrawLine(D2D1::Point2F(cx - 5.0f, cy), D2D1::Point2F(cx + 5.0f, cy), brush.Get(), 1.7f);
+        renderTarget_->DrawLine(D2D1::Point2F(cx, cy - 5.0f), D2D1::Point2F(cx, cy + 5.0f), brush.Get(), 1.7f);
     }
 
     void MainWindow::DrawTerminal()
@@ -370,12 +630,34 @@ namespace wsh::app
             return;
         }
 
-        const float left = static_cast<float>(padding_);
-        const float top = static_cast<float>(tabBarHeight_ + padding_);
+        const float cardLeft = static_cast<float>(padding_);
+        const float cardTop = static_cast<float>(appHeaderHeight_ + tabBarHeight_ + 22);
+        const float cardRight = cardLeft + terminalColumns_ * charWidth_ + 32.0f;
+        const float cardBottom = cardTop + terminalRows_ * lineHeight_ + statusBarHeight_ + 42.0f;
+        const float left = cardLeft + 18.0f;
+        const float top = cardTop + 18.0f;
         const float bottom = top + terminalRows_ * lineHeight_ + 8.0f;
 
         ComPtr<ID2D1SolidColorBrush> brush;
         renderTarget_->CreateSolidColorBrush(settings_.theme.foreground, brush.GetAddressOf());
+
+        brush->SetColor(D2D1::ColorF(0.01f, 0.02f, 0.05f, 0.16f));
+        renderTarget_->FillRoundedRectangle(D2D1::RoundedRect(MakeRect(cardLeft, cardTop + 12.0f, cardRight, cardBottom + 12.0f), 24.0f, 24.0f), brush.Get());
+        brush->SetColor(D2D1::ColorF(0.09f, 0.12f, 0.21f, 0.94f));
+        renderTarget_->FillRoundedRectangle(D2D1::RoundedRect(MakeRect(cardLeft, cardTop, cardRight, cardBottom), 24.0f, 24.0f), brush.Get());
+        brush->SetColor(D2D1::ColorF(1, 1, 1, 0.065f));
+        renderTarget_->DrawRoundedRectangle(D2D1::RoundedRect(MakeRect(cardLeft, cardTop, cardRight, cardBottom), 24.0f, 24.0f), brush.Get(), 1.0f);
+        brush->SetColor(D2D1::ColorF(0.66f, 0.78f, 1.0f, 0.030f));
+        renderTarget_->FillRoundedRectangle(D2D1::RoundedRect(MakeRect(cardLeft + 1.0f, cardTop + 1.0f, cardRight - 1.0f, cardTop + 24.0f), 23.0f, 23.0f), brush.Get());
+        brush->SetColor(D2D1::ColorF(1, 1, 1, 0.025f));
+        renderTarget_->DrawRoundedRectangle(D2D1::RoundedRect(MakeRect(cardLeft + 1.0f, cardTop + 1.0f, cardRight - 1.0f, cardBottom - 1.0f), 23.0f, 23.0f), brush.Get(), 1.0f);
+
+        brush->SetColor(D2D1::ColorF(0.04f, 0.07f, 0.13f, 0.99f));
+        renderTarget_->FillRoundedRectangle(D2D1::RoundedRect(MakeRect(left - 8.0f, top - 8.0f, left + terminalColumns_ * charWidth_ + 12.0f, bottom + 8.0f), 18.0f, 18.0f), brush.Get());
+        brush->SetColor(D2D1::ColorF(1, 1, 1, 0.035f));
+        renderTarget_->DrawRoundedRectangle(D2D1::RoundedRect(MakeRect(left - 8.0f, top - 8.0f, left + terminalColumns_ * charWidth_ + 12.0f, bottom + 8.0f), 18.0f, 18.0f), brush.Get(), 1.0f);
+
+        renderTarget_->PushAxisAlignedClip(MakeRect(left, top, left + terminalColumns_ * charWidth_, top + terminalRows_ * lineHeight_), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
 
         const auto selectionLeft = selectionStart_ && selectionEnd_ ? std::min(*selectionStart_, *selectionEnd_) : wsh::terminal::SelectionPoint{};
         const auto selectionRight = selectionStart_ && selectionEnd_ ? std::max(*selectionStart_, *selectionEnd_) : wsh::terminal::SelectionPoint{};
@@ -414,7 +696,7 @@ namespace wsh::app
 
                 if (selected)
                 {
-                    brush->SetColor(settings_.theme.selection);
+                    brush->SetColor(D2D1::ColorF(0.28f, 0.46f, 0.86f, 0.82f));
                     renderTarget_->FillRectangle(MakeRect(x, y, x + charWidth_, y + lineHeight_), brush.Get());
                     foreground = D2D1::ColorF(1.0f, 1.0f, 1.0f, 1.0f);
                 }
@@ -440,36 +722,56 @@ namespace wsh::app
             {
                 const float x = left + cursor.column * charWidth_;
                 const float y = top + relativeRow * lineHeight_;
-                renderTarget_->FillRectangle(MakeRect(x, y + lineHeight_ - 3.0f, x + charWidth_, y + lineHeight_ - 1.0f), brush.Get());
+                switch (settings_.cursorStyle)
+                {
+                case config::CursorStyle::Block:
+                    renderTarget_->DrawRectangle(MakeRect(x + 0.5f, y + 0.5f, x + charWidth_ - 0.5f, y + lineHeight_ - 0.5f), brush.Get(), 1.5f);
+                    break;
+                case config::CursorStyle::Underline:
+                    renderTarget_->FillRectangle(MakeRect(x, y + lineHeight_ - 3.0f, x + charWidth_, y + lineHeight_ - 1.0f), brush.Get());
+                    break;
+                case config::CursorStyle::Bar:
+                default:
+                    renderTarget_->FillRectangle(MakeRect(x, y + 2.0f, x + 2.0f, y + lineHeight_ - 2.0f), brush.Get());
+                    break;
+                }
             }
         }
 
-        brush->SetColor(D2D1::ColorF(1, 1, 1, 0.05f));
-        renderTarget_->DrawRectangle(MakeRect(left - 4.0f, top - 4.0f, left + terminalColumns_ * charWidth_ + 4.0f, bottom), brush.Get(), 1.0f);
+        renderTarget_->PopAxisAlignedClip();
     }
 
     void MainWindow::DrawStatusBar()
     {
-        auto* tab = workspace_ ? workspace_->ActiveTab() : nullptr;
-        if (tab == nullptr)
-        {
-            return;
-        }
-
         RECT rect{};
         ::GetClientRect(hwnd_, &rect);
-        const float top = static_cast<float>(rect.bottom - statusBarHeight_);
+
+        const float cardLeft = static_cast<float>(padding_) - 4.0f;
+        const float cardTop = static_cast<float>(appHeaderHeight_ + tabBarHeight_ + 14);
+        const float cardRight = static_cast<float>(rect.right - padding_ + 4);
+        const float cardBottom = static_cast<float>(rect.bottom - padding_ + 2);
+        const D2D1_RECT_F cardRect = MakeRect(cardLeft, cardTop, cardRight, cardBottom);
 
         ComPtr<ID2D1SolidColorBrush> brush;
-        renderTarget_->CreateSolidColorBrush(settings_.theme.statusBackground, brush.GetAddressOf());
-        renderTarget_->FillRectangle(MakeRect(0.0f, top, static_cast<float>(rect.right), static_cast<float>(rect.bottom)), brush.Get());
+        renderTarget_->CreateSolidColorBrush(settings_.theme.foreground, brush.GetAddressOf());
 
-        brush->SetColor(settings_.theme.foreground);
-        const std::wstring activeTitle = Ellipsize(tab->TitleSnapshot(), 70);
-        const std::wstring profileLabel = BuildTabLabel(workspace_->ActiveIndex());
-        std::wstring text = std::format(L"Профиль: {}    {}x{}    Вкладки: {}    Активно: {}    Ctrl+Shift+C/V • Ctrl+T • Ctrl+Shift+T • MMB-close",
-            profileLabel, terminalColumns_, terminalRows_, workspace_->Tabs().size(), activeTitle);
-        renderTarget_->DrawTextW(text.c_str(), static_cast<UINT32>(text.size()), uiFormat_.Get(), MakeRect(12.0f, top + 6.0f, static_cast<float>(rect.right) - 12.0f, static_cast<float>(rect.bottom) - 4.0f), brush.Get());
+        brush->SetColor(D2D1::ColorF(0.01f, 0.02f, 0.05f, 0.16f));
+        renderTarget_->FillRoundedRectangle(D2D1::RoundedRect(MakeRect(cardRect.left, cardRect.top + 12.0f, cardRect.right, cardRect.bottom + 10.0f), 24.0f, 24.0f), brush.Get());
+        brush->SetColor(D2D1::ColorF(0.12f, 0.15f, 0.27f, 0.18f));
+        renderTarget_->DrawRoundedRectangle(D2D1::RoundedRect(cardRect, 24.0f, 24.0f), brush.Get(), 1.0f);
+
+        const float statusHeight = 31.0f;
+        const D2D1_RECT_F statusRect = MakeRect(cardRect.left + 12.0f, cardRect.bottom - statusHeight - 10.0f, cardRect.right - 12.0f, cardRect.bottom - 12.0f);
+        brush->SetColor(D2D1::ColorF(0.12f, 0.16f, 0.29f, 0.56f));
+        renderTarget_->FillRoundedRectangle(D2D1::RoundedRect(statusRect, 15.0f, 15.0f), brush.Get());
+        brush->SetColor(D2D1::ColorF(1, 1, 1, 0.035f));
+        renderTarget_->DrawRoundedRectangle(D2D1::RoundedRect(statusRect, 15.0f, 15.0f), brush.Get(), 1.0f);
+        brush->SetColor(D2D1::ColorF(0.66f, 0.78f, 1.0f, 0.035f));
+        renderTarget_->FillRoundedRectangle(D2D1::RoundedRect(MakeRect(statusRect.left + 1.0f, statusRect.top + 1.0f, statusRect.right - 1.0f, statusRect.top + 12.0f), 14.0f, 14.0f), brush.Get());
+
+        std::wstring status = std::format(L"{}  |  UTF-8  |  LF  |  x64  |  Ready  |  main", workspace_ && workspace_->ActiveTab() ? workspace_->ActiveTab()->ProfileName() : L"shell");
+        brush->SetColor(D2D1::ColorF(0.92f, 0.95f, 1.0f, 0.96f));
+        renderTarget_->DrawTextW(status.c_str(), static_cast<UINT32>(status.size()), uiFormat_.Get(), MakeRect(statusRect.left + 12.0f, statusRect.top + 5.0f, statusRect.right - 12.0f, statusRect.bottom), brush.Get());
     }
 
     void MainWindow::OnChar(const wchar_t ch)
@@ -489,7 +791,7 @@ namespace wsh::app
         Invalidate();
     }
 
-    void MainWindow::ShowProfileMenu(const int x, const int y)
+void MainWindow::ShowProfileMenu(const int x, const int y)
     {
         if (!workspace_)
         {
@@ -518,7 +820,7 @@ namespace wsh::app
         }
     }
 
-    void MainWindow::OnKeyDown(const WPARAM key, LPARAM)
+void MainWindow::OnKeyDown(const WPARAM key, LPARAM)
     {
         auto* tab = workspace_ ? workspace_->ActiveTab() : nullptr;
         if (!workspace_ || tab == nullptr)
@@ -528,7 +830,7 @@ namespace wsh::app
 
         if (IsCtrlPressed() && IsShiftPressed() && key == 'T')
         {
-            ShowProfileMenu(padding_ + 24, tabBarHeight_ + 4);
+            ShowProfileMenu(padding_ + 24, appHeaderHeight_ + tabBarHeight_);
             return;
         }
         if (IsCtrlPressed() && key == 'T')
@@ -624,23 +926,72 @@ namespace wsh::app
         Invalidate();
     }
 
-    void MainWindow::OnMouseWheel(const short delta)
+void MainWindow::OnMouseWheel(const short delta)
     {
         if (auto* tab = workspace_ ? workspace_->ActiveTab() : nullptr)
         {
             const int step = std::max(3, terminalRows_ / 8);
             tab->Scroll(delta > 0 ? -step : step);
+            if (selecting_)
+            {
+                POINT point{};
+                ::GetCursorPos(&point);
+                ::ScreenToClient(hwnd_, &point);
+                selectionEnd_ = ClientToBufferPoint(point.x, point.y);
+            }
             Invalidate();
         }
     }
 
     bool MainWindow::IsPointInTerminal(const int x, const int y) const
     {
-        const int left = padding_;
-        const int top = tabBarHeight_ + padding_;
+        const int left = padding_ + 18;
+        const int top = appHeaderHeight_ + tabBarHeight_ + padding_ + 18;
         const int right = left + static_cast<int>(terminalColumns_ * charWidth_);
         const int bottom = top + static_cast<int>(terminalRows_ * lineHeight_);
         return x >= left && x <= right && y >= top && y <= bottom;
+    }
+
+    bool MainWindow::IsPointInDraggableHeader(const int x, const int y) const
+    {
+        if (y < 10 || y > appHeaderHeight_ - 6)
+        {
+            return false;
+        }
+
+        if (HitTestWindowControl(x, y).has_value())
+        {
+            return false;
+        }
+
+        if (x >= padding_ && x <= 360)
+        {
+            return true;
+        }
+
+        return x > 120 && x < 900;
+    }
+
+    std::optional<int> MainWindow::HitTestWindowControl(const int x, const int y) const
+    {
+        RECT rect{};
+        ::GetClientRect(hwnd_, &rect);
+
+        const float buttonSize = 34.0f;
+        const float gap = 10.0f;
+        const float top = 16.0f;
+        float left = static_cast<float>(rect.right) - (buttonSize * 3.0f + gap * 2.0f) - 20.0f;
+
+        for (int i = 0; i < 3; ++i)
+        {
+            if (x >= left && x <= left + buttonSize && y >= top && y <= top + buttonSize)
+            {
+                return i;
+            }
+            left += buttonSize + gap;
+        }
+
+        return std::nullopt;
     }
 
     wsh::terminal::SelectionPoint MainWindow::ClientToBufferPoint(const int x, const int y) const
@@ -651,22 +1002,22 @@ namespace wsh::app
             return {};
         }
 
-        const int column = std::clamp(static_cast<int>((x - padding_) / charWidth_), 0, terminalColumns_ - 1);
-        const int row = std::clamp(static_cast<int>((y - tabBarHeight_ - padding_) / lineHeight_), 0, terminalRows_ - 1);
+        const int column = std::clamp(static_cast<int>((x - padding_ - 18) / charWidth_), 0, terminalColumns_ - 1);
+        const int row = std::clamp(static_cast<int>((y - appHeaderHeight_ - tabBarHeight_ - padding_ - 18) / lineHeight_), 0, terminalRows_ - 1);
         return { tab->Buffer().ViewportTop() + row, column };
     }
 
     std::optional<size_t> MainWindow::HitTestTab(const int x, const int y) const
     {
-        if (!workspace_ || y < 8 || y > tabBarHeight_)
+        if (!workspace_ || y < appHeaderHeight_ || y > appHeaderHeight_ + tabBarHeight_ + 20)
         {
             return std::nullopt;
         }
 
         float left = static_cast<float>(padding_);
-        const float top = 8.0f;
-        const float height = static_cast<float>(tabBarHeight_ - 10);
-        const float width = 172.0f;
+        const float top = static_cast<float>(appHeaderHeight_ + 12);
+        const float height = 44.0f;
+        const float width = 178.0f;
 
         for (size_t i = 0; i < workspace_->Tabs().size(); ++i)
         {
@@ -682,20 +1033,22 @@ namespace wsh::app
 
     std::optional<size_t> MainWindow::HitTestTabClose(const int x, const int y) const
     {
-        if (!workspace_ || y < 8 || y > tabBarHeight_)
+        if (!workspace_ || y < appHeaderHeight_ || y > appHeaderHeight_ + tabBarHeight_ + 20)
         {
             return std::nullopt;
         }
 
         float left = static_cast<float>(padding_);
-        const float top = 8.0f;
-        const float width = 172.0f;
-        const float height = static_cast<float>(tabBarHeight_ - 10);
+        const float top = static_cast<float>(appHeaderHeight_ + 12);
+        const float width = 178.0f;
+        const float height = 44.0f;
         for (size_t i = 0; i < workspace_->Tabs().size(); ++i)
         {
-            const float closeLeft = left + width - 28.0f;
-            const float closeRight = left + width - 6.0f;
-            if (x >= closeLeft && x <= closeRight && y >= top + 4.0f && y <= top + height - 4.0f)
+            const float closeLeft = left + width - 34.0f;
+            const float closeRight = closeLeft + 22.0f;
+            const float closeTop = top + (height - 22.0f) * 0.5f;
+            const float closeBottom = closeTop + 22.0f;
+            if (x >= closeLeft && x <= closeRight && y >= closeTop && y <= closeBottom)
             {
                 return i;
             }
@@ -707,25 +1060,33 @@ namespace wsh::app
 
     bool MainWindow::IsPointInNewTabButton(const int x, const int y) const
     {
-        if (!workspace_ || y < 8 || y > tabBarHeight_)
+        if (!workspace_ || y < appHeaderHeight_ || y > appHeaderHeight_ + tabBarHeight_ + 20)
         {
             return false;
         }
 
         float left = static_cast<float>(padding_);
-        const float width = 172.0f;
+        const float width = 178.0f;
         for (size_t i = 0; i < workspace_->Tabs().size(); ++i)
         {
             left += width + 8.0f;
         }
 
-        return x >= left && x <= left + 40.0f && y >= 8.0f && y <= static_cast<float>(tabBarHeight_ - 2);
+        const float top = static_cast<float>(appHeaderHeight_ + 12);
+        return x >= left && x <= left + 48.0f && y >= top && y <= top + 46.0f;
     }
 
-    void MainWindow::OnLeftButtonDown(const int x, const int y)
+void MainWindow::OnLeftButtonDown(const int x, const int y)
     {
         ::SetFocus(hwnd_);
         UpdateHoverState(x, y);
+
+        if (const auto control = HitTestWindowControl(x, y))
+        {
+            pressedWindowControl_ = control;
+            Invalidate();
+            return;
+        }
 
         if (const auto closeIndex = HitTestTabClose(x, y))
         {
@@ -744,7 +1105,7 @@ namespace wsh::app
 
         if (IsPointInNewTabButton(x, y))
         {
-            ShowProfileMenu(x, tabBarHeight_ + 2);
+            ShowProfileMenu(x, appHeaderHeight_ + tabBarHeight_);
             return;
         }
 
@@ -764,9 +1125,25 @@ namespace wsh::app
             return;
         }
 
+        const auto point = ClientToBufferPoint(x, y);
+        const DWORD now = ::GetTickCount();
+        if (lastDoubleClickPoint_ && point.row == lastDoubleClickPoint_->row && now - lastDoubleClickTick_ <= ::GetDoubleClickTime())
+        {
+            selecting_ = false;
+            ::ReleaseCapture();
+            SelectLineAt(x, y);
+            if (settings_.copyOnSelect)
+            {
+                CopySelection();
+            }
+            lastDoubleClickPoint_.reset();
+            Invalidate();
+            return;
+        }
+
         ::SetCapture(hwnd_);
         selecting_ = true;
-        selectionStart_ = ClientToBufferPoint(x, y);
+        selectionStart_ = point;
         selectionEnd_ = selectionStart_;
         Invalidate();
     }
@@ -778,7 +1155,7 @@ namespace wsh::app
 
         if (selecting_ && (flags & MK_LBUTTON) != 0)
         {
-            selectionEnd_ = ClientToBufferPoint(x, y);
+            UpdateSelectionForDrag(x, y);
             Invalidate();
             return;
         }
@@ -791,6 +1168,32 @@ namespace wsh::app
 
     void MainWindow::OnLeftButtonUp(const int x, const int y)
     {
+        const auto releasedControl = HitTestWindowControl(x, y);
+        if (pressedWindowControl_)
+        {
+            const int pressed = *pressedWindowControl_;
+            pressedWindowControl_.reset();
+            UpdateHoverState(x, y);
+            Invalidate();
+
+            if (releasedControl && *releasedControl == pressed)
+            {
+                switch (pressed)
+                {
+                case kControlMinimize:
+                    ::ShowWindow(hwnd_, SW_MINIMIZE);
+                    break;
+                case kControlMaximize:
+                    ::ShowWindow(hwnd_, ::IsZoomed(hwnd_) ? SW_RESTORE : SW_MAXIMIZE);
+                    break;
+                case kControlClose:
+                    ::PostMessageW(hwnd_, WM_CLOSE, 0, 0);
+                    break;
+                }
+            }
+            return;
+        }
+
         if (!selecting_)
         {
             return;
@@ -800,13 +1203,39 @@ namespace wsh::app
         selectionEnd_ = ClientToBufferPoint(x, y);
         ::ReleaseCapture();
         UpdateHoverState(x, y);
+        if (settings_.copyOnSelect)
+        {
+            CopySelection();
+        }
         Invalidate();
     }
 
-
-    void MainWindow::OnMiddleButtonUp(const int x, const int y)
+    void MainWindow::OnLeftButtonDoubleClick(const int x, const int y)
     {
         ::SetFocus(hwnd_);
+        UpdateHoverState(x, y);
+
+        if (!IsPointInTerminal(x, y))
+        {
+            return;
+        }
+
+        selecting_ = false;
+        ::ReleaseCapture();
+        SelectWordAt(x, y);
+        lastDoubleClickTick_ = ::GetTickCount();
+        lastDoubleClickPoint_ = ClientToBufferPoint(x, y);
+        if (settings_.copyOnSelect)
+        {
+            CopySelection();
+        }
+        Invalidate();
+    }
+
+    void MainWindow::OnMiddleButtonDown(const int x, const int y)
+    {
+        ::SetFocus(hwnd_);
+        UpdateHoverState(x, y);
 
         if (const auto closeIndex = HitTestTab(x, y))
         {
@@ -823,13 +1252,23 @@ namespace wsh::app
         }
     }
 
+    void MainWindow::OnMiddleButtonUp(const int x, const int y)
+    {
+        UpdateHoverState(x, y);
+    }
+
     void MainWindow::OnMouseLeave()
     {
         mouseTracking_ = false;
         hoveredTab_.reset();
         hoveredCloseTab_.reset();
+        hoveredWindowControl_.reset();
         hoverNewTabButton_ = false;
         hoverTerminal_ = false;
+        if ((::GetKeyState(VK_LBUTTON) & 0x8000) == 0)
+        {
+            pressedWindowControl_.reset();
+        }
         UpdateCursor();
         Invalidate();
     }
@@ -838,16 +1277,18 @@ namespace wsh::app
     {
         const auto oldTab = hoveredTab_;
         const auto oldClose = hoveredCloseTab_;
+        const auto oldWindowControl = hoveredWindowControl_;
         const bool oldNew = hoverNewTabButton_;
         const bool oldTerminal = hoverTerminal_;
 
+        hoveredWindowControl_ = HitTestWindowControl(x, y);
         hoveredCloseTab_ = HitTestTabClose(x, y);
         hoveredTab_ = hoveredCloseTab_.has_value() ? hoveredCloseTab_ : HitTestTab(x, y);
         hoverNewTabButton_ = IsPointInNewTabButton(x, y);
         hoverTerminal_ = IsPointInTerminal(x, y);
         UpdateCursor();
 
-        return hoveredTab_ != oldTab || hoveredCloseTab_ != oldClose || hoverNewTabButton_ != oldNew || hoverTerminal_ != oldTerminal;
+        return hoveredTab_ != oldTab || hoveredCloseTab_ != oldClose || hoveredWindowControl_ != oldWindowControl || hoverNewTabButton_ != oldNew || hoverTerminal_ != oldTerminal;
     }
 
     void MainWindow::EnsureMouseTracking()
@@ -881,7 +1322,112 @@ namespace wsh::app
             return;
         }
 
+        if (hoveredWindowControl_.has_value())
+        {
+            ::SetCursor(::LoadCursorW(nullptr, IDC_ARROW));
+            return;
+        }
+
         ::SetCursor(::LoadCursorW(nullptr, IDC_ARROW));
+    }
+
+    void MainWindow::SelectWordAt(const int x, const int y)
+    {
+        auto* tab = workspace_ ? workspace_->ActiveTab() : nullptr;
+        if (tab == nullptr || !IsPointInTerminal(x, y))
+        {
+            return;
+        }
+
+        const auto point = ClientToBufferPoint(x, y);
+        std::scoped_lock lock(tab->Mutex());
+        const auto& lines = tab->Buffer().Lines();
+        if (point.row < 0 || point.row >= static_cast<int>(lines.size()))
+        {
+            return;
+        }
+
+        const auto& line = lines[point.row];
+        if (line.empty())
+        {
+            return;
+        }
+
+        const int anchor = std::clamp(point.column, 0, static_cast<int>(line.size()) - 1);
+        auto isWordChar = [](const wchar_t ch)
+        {
+            return std::iswalnum(ch) || ch == L'_' || ch == L'-' || ch == L'.' || ch == L'/' || ch == L'\\' || ch == L':' || ch == L'~';
+        };
+
+        int left = anchor;
+        int right = anchor;
+
+        if (!isWordChar(line[anchor].glyph))
+        {
+            selectionStart_ = wsh::terminal::SelectionPoint{ point.row, anchor };
+            selectionEnd_ = selectionStart_;
+            return;
+        }
+
+        while (left > 0 && isWordChar(line[left - 1].glyph))
+        {
+            --left;
+        }
+        while (right + 1 < static_cast<int>(line.size()) && isWordChar(line[right + 1].glyph))
+        {
+            ++right;
+        }
+
+        selectionStart_ = wsh::terminal::SelectionPoint{ point.row, left };
+        selectionEnd_ = wsh::terminal::SelectionPoint{ point.row, right };
+    }
+
+    void MainWindow::SelectLineAt(const int x, const int y)
+    {
+        auto* tab = workspace_ ? workspace_->ActiveTab() : nullptr;
+        if (tab == nullptr || !IsPointInTerminal(x, y))
+        {
+            return;
+        }
+
+        const auto point = ClientToBufferPoint(x, y);
+        std::scoped_lock lock(tab->Mutex());
+        const auto& lines = tab->Buffer().Lines();
+        if (point.row < 0 || point.row >= static_cast<int>(lines.size()))
+        {
+            return;
+        }
+
+        int right = static_cast<int>(lines[point.row].size()) - 1;
+        while (right > 0 && (lines[point.row][right].glyph == L' ' || lines[point.row][right].glyph == L'\0'))
+        {
+            --right;
+        }
+
+        selectionStart_ = wsh::terminal::SelectionPoint{ point.row, 0 };
+        selectionEnd_ = wsh::terminal::SelectionPoint{ point.row, std::max(0, right) };
+    }
+
+    void MainWindow::UpdateSelectionForDrag(const int x, const int y)
+    {
+        auto* tab = workspace_ ? workspace_->ActiveTab() : nullptr;
+        if (tab == nullptr)
+        {
+            return;
+        }
+
+        const int terminalTop = tabBarHeight_ + padding_;
+        const int terminalBottom = terminalTop + static_cast<int>(terminalRows_ * lineHeight_);
+        if (y < terminalTop)
+        {
+            tab->Scroll(-1);
+        }
+        else if (y > terminalBottom)
+        {
+            tab->Scroll(1);
+        }
+
+        selectionEnd_ = ClientToBufferPoint(x, y);
     }
 
     void MainWindow::CopySelection()

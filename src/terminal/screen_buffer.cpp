@@ -124,11 +124,57 @@ namespace wsh::terminal
         FollowBottom();
     }
 
-    void ScreenBuffer::ClearLineFromCursor()
+    void ScreenBuffer::ClearDisplay(const int mode)
+    {
+        if (mode == 2)
+        {
+            ClearScreen();
+            return;
+        }
+
+        const int rowCount = static_cast<int>(lines_.size());
+        if (rowCount == 0)
+        {
+            return;
+        }
+
+        if (mode == 0)
+        {
+            ClearLine(0);
+            for (int row = cursor_.row + 1; row < rowCount; ++row)
+            {
+                for (int column = 0; column < columns_; ++column)
+                {
+                    lines_[row][column] = currentStyle_;
+                    lines_[row][column].glyph = L' ';
+                }
+            }
+        }
+        else if (mode == 1)
+        {
+            for (int row = 0; row < cursor_.row; ++row)
+            {
+                for (int column = 0; column < columns_; ++column)
+                {
+                    lines_[row][column] = currentStyle_;
+                    lines_[row][column].glyph = L' ';
+                }
+            }
+            ClearLine(1);
+        }
+    }
+
+    void ScreenBuffer::ClearLine(const int mode)
     {
         auto& line = lines_[cursor_.row];
-        for (int i = cursor_.column; i < columns_; ++i)
+        const int first = (mode == 1) ? 0 : cursor_.column;
+        const int last = (mode == 0) ? (columns_ - 1) : ((mode == 1) ? cursor_.column : (columns_ - 1));
+        for (int i = first; i <= last && i < columns_; ++i)
         {
+            if (i < 0)
+            {
+                continue;
+            }
             line[i] = currentStyle_;
             line[i].glyph = L' ';
         }
@@ -174,6 +220,22 @@ namespace wsh::terminal
         currentStyle_.inverse = value;
     }
 
+    void ScreenBuffer::SaveCursor()
+    {
+        savedCursor_ = cursor_;
+    }
+
+    void ScreenBuffer::RestoreCursor()
+    {
+        cursor_ = savedCursor_;
+        EnsureCursorInBounds();
+    }
+
+    void ScreenBuffer::SetCursorVisible(const bool value)
+    {
+        cursor_.visible = value;
+    }
+
     void ScreenBuffer::ScrollViewport(const int deltaRows)
     {
         const int maxTop = std::max(0, static_cast<int>(lines_.size()) - rows_);
@@ -215,3 +277,5 @@ namespace wsh::terminal
         return result;
     }
 }
+
+

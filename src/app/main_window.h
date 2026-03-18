@@ -31,6 +31,8 @@ namespace wsh::app
         void OnLeftButtonDown(int x, int y);
         void OnMouseMove(int x, int y, WPARAM flags);
         void OnLeftButtonUp(int x, int y);
+        void OnLeftButtonDoubleClick(int x, int y);
+        void OnMiddleButtonDown(int x, int y);
         void OnMiddleButtonUp(int x, int y);
         void OnMouseLeave();
         void OpenProfile(size_t index);
@@ -39,14 +41,21 @@ namespace wsh::app
         void RecomputeMetrics();
         void ResizeTerminalToClient();
         void Invalidate();
+        void DrawHeader();
+        void DrawWindowControls();
         void DrawTabs();
         void DrawTerminal();
         void DrawStatusBar();
         bool IsPointInTerminal(int x, int y) const;
+        bool IsPointInDraggableHeader(int x, int y) const;
+        std::optional<int> HitTestWindowControl(int x, int y) const;
         std::optional<size_t> HitTestTab(int x, int y) const;
         std::optional<size_t> HitTestTabClose(int x, int y) const;
         bool IsPointInNewTabButton(int x, int y) const;
         wsh::terminal::SelectionPoint ClientToBufferPoint(int x, int y) const;
+        void SelectWordAt(int x, int y);
+        void SelectLineAt(int x, int y);
+        void UpdateSelectionForDrag(int x, int y);
         void CopySelection();
         void PasteClipboard();
         void CloseActiveTab();
@@ -73,17 +82,22 @@ namespace wsh::app
         float lineHeight_ = 20.0f;
         int terminalColumns_ = 80;
         int terminalRows_ = 24;
-        int tabBarHeight_ = 40;
-        int statusBarHeight_ = 30;
-        int padding_ = 10;
+        int appHeaderHeight_ = 76;
+        int tabBarHeight_ = 56;
+        int statusBarHeight_ = 38;
+        int padding_ = 18;
 
         bool selecting_ = false;
         bool mouseTracking_ = false;
         bool hoverNewTabButton_ = false;
         bool hoverTerminal_ = false;
+        std::optional<int> hoveredWindowControl_;
+        std::optional<int> pressedWindowControl_;
         std::optional<size_t> hoveredTab_;
         std::optional<size_t> hoveredCloseTab_;
         std::optional<wsh::terminal::SelectionPoint> selectionStart_;
         std::optional<wsh::terminal::SelectionPoint> selectionEnd_;
+        DWORD lastDoubleClickTick_ = 0;
+        std::optional<wsh::terminal::SelectionPoint> lastDoubleClickPoint_;
     };
 }

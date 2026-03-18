@@ -25,10 +25,19 @@ namespace wsh::config
         std::vector<std::wstring> arguments;
     };
 
+    enum class CursorStyle
+    {
+        Bar,
+        Block,
+        Underline
+    };
+
     struct Settings
     {
         std::wstring fontFamily = L"Cascadia Mono";
         float fontSize = 18.0f;
+        bool copyOnSelect = true;
+        CursorStyle cursorStyle = CursorStyle::Bar;
         Theme theme;
         std::vector<Profile> profiles;
     };

@@ -30,8 +30,12 @@ namespace wsh::terminal
         void Tab();
         void MoveCursor(int row, int column);
         void ClearScreen();
-        void ClearLineFromCursor();
+        void ClearDisplay(int mode);
+        void ClearLine(int mode);
         void ResetAttributes();
+        void SaveCursor();
+        void RestoreCursor();
+        void SetCursorVisible(bool value);
         void SetForeground(const D2D1_COLOR_F& color);
         void SetBackground(const D2D1_COLOR_F& color);
         void ResetForeground();
@@ -62,6 +66,7 @@ namespace wsh::terminal
         int maxScrollback_ = 5000;
         int viewportTop_ = 0;
         Cursor cursor_{};
+        Cursor savedCursor_{};
         Cell currentStyle_{};
         std::deque<std::vector<Cell>> lines_;
     };

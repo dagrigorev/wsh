@@ -50,6 +50,7 @@ target_link_libraries(wsh-terminal PRIVATE
     shell32
     ole32
     advapi32
+    dwmapi
 )
 
 set_target_properties(wsh-terminal PROPERTIES

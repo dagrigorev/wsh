@@ -3,6 +3,7 @@
 #include <fstream>
 #include <sstream>
 #include <algorithm>
+#include <cwctype>
 #include "core/utf.h"
 
 namespace wsh::config
@@ -43,6 +44,44 @@ namespace wsh::config
             };
 
             return D2D1::ColorF(parse_byte(1), parse_byte(3), parse_byte(5), 1.0f);
+        }
+
+        bool ParseBool(const std::wstring& text, const bool fallback)
+        {
+            std::wstring value = Trim(text);
+            std::transform(value.begin(), value.end(), value.begin(), [](const wchar_t ch)
+            {
+                return static_cast<wchar_t>(std::towlower(ch));
+            });
+
+            if (value == L"true" || value == L"1" || value == L"yes" || value == L"on")
+            {
+                return true;
+            }
+            if (value == L"false" || value == L"0" || value == L"no" || value == L"off")
+            {
+                return false;
+            }
+            return fallback;
+        }
+
+        CursorStyle ParseCursorStyle(const std::wstring& text)
+        {
+            std::wstring value = Trim(Unquote(text));
+            std::transform(value.begin(), value.end(), value.begin(), [](const wchar_t ch)
+            {
+                return static_cast<wchar_t>(std::towlower(ch));
+            });
+
+            if (value == L"block")
+            {
+                return CursorStyle::Block;
+            }
+            if (value == L"underline")
+            {
+                return CursorStyle::Underline;
+            }
+            return CursorStyle::Bar;
         }
 
         std::vector<std::wstring> ParseArray(const std::wstring& text)
@@ -147,6 +186,8 @@ namespace wsh::config
             case Section::Root:
                 if (key == L"font_family") settings.fontFamily = Unquote(value);
                 else if (key == L"font_size") settings.fontSize = std::stof(value);
+                else if (key == L"copy_on_select") settings.copyOnSelect = ParseBool(value, settings.copyOnSelect);
+                else if (key == L"cursor_style") settings.cursorStyle = ParseCursorStyle(value);
                 break;
             case Section::Theme:
                 if (key == L"background") settings.theme.background = ParseColor(value);
