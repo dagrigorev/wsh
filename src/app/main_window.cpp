@@ -29,6 +29,20 @@ namespace wsh::app
             kControlClose = 2
         };
 
+        enum ShellToolbarButtonId
+        {
+            kShellPreviousSession = 0,
+            kShellDuplicateSession = 1,
+            kShellNewWorkspace = 2
+        };
+
+        enum ShellTrafficDotId
+        {
+            kShellCloseSession = 0,
+            kShellMinimizeWindow = 1,
+            kShellMaximizeWindow = 2
+        };
+
         bool IsCtrlPressed() noexcept { return (::GetKeyState(VK_CONTROL) & 0x8000) != 0; }
         bool IsShiftPressed() noexcept { return (::GetKeyState(VK_SHIFT) & 0x8000) != 0; }
 
@@ -443,10 +457,6 @@ namespace wsh::app
             gradient.GetAddressOf());
         renderTarget_->FillRectangle(MakeRect(0.0f, 0.0f, static_cast<float>(rect.right), static_cast<float>(rect.bottom)), gradient.Get());
 
-        brush->SetColor(D2D1::ColorF(0.31f, 0.55f, 1.0f, 0.10f));
-        renderTarget_->FillEllipse(D2D1::Ellipse(D2D1::Point2F(170.0f, 80.0f), 180.0f, 120.0f), brush.Get());
-        brush->SetColor(D2D1::ColorF(0.55f, 0.36f, 0.96f, 0.09f));
-        renderTarget_->FillEllipse(D2D1::Ellipse(D2D1::Point2F(static_cast<float>(rect.right) - 140.0f, 64.0f), 170.0f, 110.0f), brush.Get());
 
         const D2D1_RECT_F titlebar = MakeRect(0.0f, 0.0f, static_cast<float>(rect.right), static_cast<float>(appHeaderHeight_));
         const D2D1_RECT_F sidebar = MakeRect(0.0f, static_cast<float>(appHeaderHeight_), sidebarWidth, static_cast<float>(rect.bottom));
@@ -498,21 +508,24 @@ namespace wsh::app
         pillFormat->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
 
         brush->SetColor(D2D1::ColorF(0.93f, 0.95f, 0.98f, 1.0f));
-        renderTarget_->DrawTextW(L"Workspace", 9, pillStrongFormat.Get(), MakeRect(pillRect.left + 16.0f, pillRect.top + 8.0f, pillRect.left + 112.0f, pillRect.bottom), brush.Get());
+        const std::wstring workspaceName = workspace_ ? workspace_->ActiveWorkspaceName() : L"Workspace";
+        const std::wstring workspaceLabel = Ellipsize(workspaceName, 14);
+        renderTarget_->DrawTextW(workspaceLabel.c_str(), static_cast<UINT32>(workspaceLabel.size()), pillStrongFormat.Get(), MakeRect(pillRect.left + 16.0f, pillRect.top + 8.0f, pillRect.left + 128.0f, pillRect.bottom), brush.Get());
         brush->SetColor(D2D1::ColorF(0.66f, 0.70f, 0.78f, 1.0f));
         renderTarget_->DrawTextW(L"•", 1, pillFormat.Get(), MakeRect(pillRect.left + 118.0f, pillRect.top + 8.0f, pillRect.left + 130.0f, pillRect.bottom), brush.Get());
         const std::wstring mid = L"~/projects/wsh";
-        std::wstring rightText = L"PowerShell 7";
+        std::wstring rightText = L"PowerShell";
         if (workspace_ && workspace_->ActiveTab())
         {
             const auto name = workspace_->ActiveTab()->ProfileName();
             if (!name.empty())
             {
-                rightText = name;
+                rightText = Ellipsize(name, 14);
             }
         }
         brush->SetColor(D2D1::ColorF(0.77f, 0.80f, 0.87f, 1.0f));
-        renderTarget_->DrawTextW(mid.c_str(), static_cast<UINT32>(mid.size()), pillFormat.Get(), MakeRect(pillRect.left + 138.0f, pillRect.top + 8.0f, pillRect.left + 318.0f, pillRect.bottom), brush.Get());
+        const std::wstring midLabel = Ellipsize(mid, 18);
+        renderTarget_->DrawTextW(midLabel.c_str(), static_cast<UINT32>(midLabel.size()), pillFormat.Get(), MakeRect(pillRect.left + 138.0f, pillRect.top + 8.0f, pillRect.left + 318.0f, pillRect.bottom), brush.Get());
         brush->SetColor(D2D1::ColorF(0.66f, 0.70f, 0.78f, 1.0f));
         renderTarget_->DrawTextW(L"•", 1, pillFormat.Get(), MakeRect(pillRect.left + 324.0f, pillRect.top + 8.0f, pillRect.left + 336.0f, pillRect.bottom), brush.Get());
         brush->SetColor(D2D1::ColorF(0.77f, 0.80f, 0.87f, 1.0f));
@@ -652,10 +665,11 @@ namespace wsh::app
         float actionLeft = actionsRight - 3.0f * 40.0f - 8.0f;
         for (int i = 0; i < 3; ++i)
         {
+            const bool hovered = hoveredShellToolbarButton_ && *hoveredShellToolbarButton_ == i;
             const D2D1_RECT_F a = MakeRect(actionLeft, top - 1.0f, actionLeft + 40.0f, top + 39.0f);
-            brush->SetColor(D2D1::ColorF(1, 1, 1, 0.03f));
+            brush->SetColor(D2D1::ColorF(1, 1, 1, hovered ? 0.065f : 0.03f));
             renderTarget_->FillRoundedRectangle(D2D1::RoundedRect(a, 12.0f, 12.0f), brush.Get());
-            brush->SetColor(D2D1::ColorF(1, 1, 1, 0.07f));
+            brush->SetColor(D2D1::ColorF(1, 1, 1, hovered ? 0.12f : 0.07f));
             renderTarget_->DrawRoundedRectangle(D2D1::RoundedRect(a, 12.0f, 12.0f), brush.Get(), 1.0f);
             brush->SetColor(D2D1::ColorF(0.88f, 0.91f, 0.97f, 0.92f));
             const float cx = (a.left + a.right) * 0.5f;
@@ -706,12 +720,13 @@ namespace wsh::app
         renderTarget_->CreateSolidColorBrush(settings_.theme.foreground, brush.GetAddressOf());
 
         const D2D1_RECT_F searchRect = MakeRect(14.0f, appHeaderHeight_ + 16.0f, sidebarWidth - 14.0f, appHeaderHeight_ + 60.0f);
-        brush->SetColor(D2D1::ColorF(1, 1, 1, 0.035f));
+        brush->SetColor(D2D1::ColorF(1, 1, 1, hoverSearchBox_ || searchFocused_ ? 0.055f : 0.035f));
         renderTarget_->FillRoundedRectangle(D2D1::RoundedRect(searchRect, 14.0f, 14.0f), brush.Get());
-        brush->SetColor(D2D1::ColorF(1, 1, 1, 0.06f));
+        brush->SetColor(D2D1::ColorF(1, 1, 1, searchFocused_ ? 0.12f : 0.06f));
         renderTarget_->DrawRoundedRectangle(D2D1::RoundedRect(searchRect, 14.0f, 14.0f), brush.Get(), 1.0f);
-        brush->SetColor(D2D1::ColorF(0.67f, 0.71f, 0.79f, 0.96f));
-        renderTarget_->DrawTextW(L"Search sessions", 15, uiFormat_.Get(), MakeRect(52.0f, appHeaderHeight_ + 29.0f, sidebarWidth - 20.0f, appHeaderHeight_ + 54.0f), brush.Get());
+        brush->SetColor(searchQuery_.empty() ? D2D1::ColorF(0.67f, 0.71f, 0.79f, 0.96f) : D2D1::ColorF(0.88f, 0.92f, 0.98f, 0.98f));
+        const std::wstring searchLabel = searchQuery_.empty() ? L"Search sessions" : Ellipsize(searchQuery_, 20);
+        renderTarget_->DrawTextW(searchLabel.c_str(), static_cast<UINT32>(searchLabel.size()), uiFormat_.Get(), MakeRect(52.0f, appHeaderHeight_ + 29.0f, sidebarWidth - 20.0f, appHeaderHeight_ + 54.0f), brush.Get());
         const float sx = 28.0f;
         const float sy = static_cast<float>(appHeaderHeight_) + 28.0f;
         renderTarget_->DrawEllipse(D2D1::Ellipse(D2D1::Point2F(sx + 7.0f, sy + 7.0f), 6.5f, 6.5f), brush.Get(), 1.4f);
@@ -723,12 +738,12 @@ namespace wsh::app
         brush->SetColor(D2D1::ColorF(0.49f, 0.54f, 0.64f, 1.0f));
         renderTarget_->DrawTextW(L"SESSIONS", 8, smallCaps.Get(), MakeRect(20.0f, appHeaderHeight_ + 78.0f, sidebarWidth - 20.0f, appHeaderHeight_ + 100.0f), brush.Get());
 
-        const std::wstring sessionSubs[] = {L"C:\\projects\\wsh", L"~/src/wsh", L"docker compose up", L"repo maintenance"};
+        auto visibleSessions = workspace_ ? workspace_->FilteredSessionIndices(searchQuery_) : std::vector<size_t>{};
         const D2D1_COLOR_F badgeColors[] = {
             D2D1::ColorF(0.49f, 0.91f, 0.53f, 1.0f),
             D2D1::ColorF(0.31f, 0.55f, 1.0f, 1.0f),
             D2D1::ColorF(0.96f, 0.76f, 0.47f, 1.0f),
-            D2D1::ColorF(0.49f, 0.91f, 0.53f, 1.0f)
+            D2D1::ColorF(0.20f, 0.83f, 0.60f, 1.0f)
         };
         const D2D1_COLOR_F iconColors[] = {
             D2D1::ColorF(0.35f, 0.77f, 1.0f, 1.0f),
@@ -737,29 +752,38 @@ namespace wsh::app
             D2D1::ColorF(0.20f, 0.83f, 0.60f, 1.0f)
         };
 
-        const size_t shown = std::min<size_t>(4, settings_.profiles.size());
-        for (size_t i = 0; i < shown; ++i)
+        const size_t shown = std::min<size_t>(4, visibleSessions.size());
+        for (size_t visualIndex = 0; visualIndex < shown; ++visualIndex)
         {
-            const bool active = workspace_ && i == workspace_->ActiveIndex();
-            const float itemTop = static_cast<float>(appHeaderHeight_) + 108.0f + static_cast<float>(i) * 66.0f;
+            const size_t sessionIndex = visibleSessions[visualIndex];
+            const bool active = workspace_ && sessionIndex == workspace_->ActiveIndex();
+            const bool hovered = hoveredSidebarSession_ && *hoveredSidebarSession_ == sessionIndex;
+            const float itemTop = static_cast<float>(appHeaderHeight_) + 108.0f + static_cast<float>(visualIndex) * 66.0f;
             const D2D1_RECT_F itemRect = MakeRect(14.0f, itemTop, sidebarWidth - 14.0f, itemTop + 58.0f);
-            brush->SetColor(active ? D2D1::ColorF(0.55f, 0.36f, 0.96f, 0.18f) : D2D1::ColorF(1, 1, 1, 0.0f));
+            brush->SetColor(active ? D2D1::ColorF(0.55f, 0.36f, 0.96f, 0.18f) : D2D1::ColorF(1, 1, 1, hovered ? 0.045f : 0.0f));
             renderTarget_->FillRoundedRectangle(D2D1::RoundedRect(itemRect, 16.0f, 16.0f), brush.Get());
-            brush->SetColor(active ? D2D1::ColorF(0.55f, 0.36f, 0.96f, 0.26f) : D2D1::ColorF(1, 1, 1, 0.05f));
+            brush->SetColor(active ? D2D1::ColorF(0.55f, 0.36f, 0.96f, 0.26f) : D2D1::ColorF(1, 1, 1, hovered ? 0.08f : 0.05f));
             renderTarget_->DrawRoundedRectangle(D2D1::RoundedRect(itemRect, 16.0f, 16.0f), brush.Get(), 1.0f);
             const D2D1_RECT_F iconRect = MakeRect(26.0f, itemTop + 12.0f, 60.0f, itemTop + 46.0f);
-            brush->SetColor(iconColors[i]);
+            brush->SetColor(iconColors[sessionIndex % 4]);
             renderTarget_->FillRoundedRectangle(D2D1::RoundedRect(iconRect, 10.0f, 10.0f), brush.Get());
             brush->SetColor(D2D1::ColorF(1, 1, 1, 0.95f));
-            const wchar_t letter = settings_.profiles[i].name.empty() ? L'?' : static_cast<wchar_t>(std::towupper(settings_.profiles[i].name[0]));
+            const auto* sessionTab = workspace_->Tabs()[sessionIndex].get();
+            const wchar_t letter = sessionTab->ProfileName().empty() ? L'?' : static_cast<wchar_t>(std::towupper(sessionTab->ProfileName()[0]));
             const wchar_t one[2] = { letter, 0 };
             renderTarget_->DrawTextW(one, 1, uiFormat_.Get(), MakeRect(37.0f, itemTop + 17.0f, 50.0f, itemTop + 38.0f), brush.Get());
             brush->SetColor(D2D1::ColorF(0.93f, 0.95f, 0.98f, 1.0f));
-            const std::wstring name = Ellipsize(settings_.profiles[i].name, 16);
+            const std::wstring name = Ellipsize(BuildTabLabel(sessionIndex), 16);
             renderTarget_->DrawTextW(name.c_str(), static_cast<UINT32>(name.size()), uiFormat_.Get(), MakeRect(72.0f, itemTop + 10.0f, sidebarWidth - 42.0f, itemTop + 30.0f), brush.Get());
+            std::wstring subtitle = sessionTab->TitleSnapshot();
+            if (subtitle.empty() || subtitle == sessionTab->ProfileName())
+            {
+                subtitle = sessionIndex == 0 ? L"C:\\projects\\wsh" : (sessionIndex == 1 ? L"~/src/wsh" : (sessionIndex == 2 ? L"docker compose up" : L"active shell"));
+            }
+            subtitle = Ellipsize(subtitle, 22);
             brush->SetColor(D2D1::ColorF(0.49f, 0.54f, 0.64f, 0.95f));
-            renderTarget_->DrawTextW(sessionSubs[i].c_str(), static_cast<UINT32>(sessionSubs[i].size()), uiFormat_.Get(), MakeRect(72.0f, itemTop + 28.0f, sidebarWidth - 42.0f, itemTop + 48.0f), brush.Get());
-            brush->SetColor(badgeColors[i]);
+            renderTarget_->DrawTextW(subtitle.c_str(), static_cast<UINT32>(subtitle.size()), uiFormat_.Get(), MakeRect(72.0f, itemTop + 28.0f, sidebarWidth - 42.0f, itemTop + 48.0f), brush.Get());
+            brush->SetColor(badgeColors[sessionIndex % 4]);
             renderTarget_->FillEllipse(D2D1::Ellipse(D2D1::Point2F(sidebarWidth - 30.0f, itemTop + 29.0f), 5.0f, 5.0f), brush.Get());
         }
 
@@ -771,9 +795,11 @@ namespace wsh::app
         brush->SetColor(D2D1::ColorF(1, 1, 1, 0.05f));
         renderTarget_->DrawRoundedRectangle(D2D1::RoundedRect(queueRect, 16.0f, 16.0f), brush.Get(), 1.0f);
         brush->SetColor(D2D1::ColorF(0.93f, 0.95f, 0.98f, 1.0f));
-        renderTarget_->DrawTextW(L"Build queue", 11, uiFormat_.Get(), MakeRect(26.0f, appHeaderHeight_ + 426.0f, 160.0f, appHeaderHeight_ + 444.0f), brush.Get());
+        const std::wstring queueTitle = workspace_ ? Ellipsize(workspace_->ActiveWorkspaceName(), 16) : L"Build queue";
+        renderTarget_->DrawTextW(queueTitle.c_str(), static_cast<UINT32>(queueTitle.size()), uiFormat_.Get(), MakeRect(26.0f, appHeaderHeight_ + 426.0f, 200.0f, appHeaderHeight_ + 444.0f), brush.Get());
         brush->SetColor(D2D1::ColorF(0.49f, 0.54f, 0.64f, 0.96f));
-        renderTarget_->DrawTextW(L"2 running tasks", 15, uiFormat_.Get(), MakeRect(26.0f, appHeaderHeight_ + 444.0f, 180.0f, appHeaderHeight_ + 462.0f), brush.Get());
+        const std::wstring queueSub = std::format(L"{} session(s)", workspace_ ? workspace_->Tabs().size() : 0);
+        renderTarget_->DrawTextW(queueSub.c_str(), static_cast<UINT32>(queueSub.size()), uiFormat_.Get(), MakeRect(26.0f, appHeaderHeight_ + 444.0f, 180.0f, appHeaderHeight_ + 462.0f), brush.Get());
         brush->SetColor(D2D1::ColorF(0.96f, 0.76f, 0.47f, 1.0f));
         renderTarget_->FillEllipse(D2D1::Ellipse(D2D1::Point2F(sidebarWidth - 30.0f, appHeaderHeight_ + 441.0f), 5.0f, 5.0f), brush.Get());
 
@@ -785,9 +811,7 @@ namespace wsh::app
         brush->SetColor(D2D1::ColorF(0.93f, 0.95f, 0.98f, 1.0f));
         renderTarget_->DrawTextW(L"WSH Workspace", 13, uiFormat_.Get(), MakeRect(28.0f, footerRect.top + 16.0f, footerRect.right - 18.0f, footerRect.top + 36.0f), brush.Get());
         brush->SetColor(D2D1::ColorF(0.67f, 0.71f, 0.79f, 0.95f));
-        const std::wstring footerText = L"Material-styled terminal shell with"
-                                         L"sessions, tabs, command palette and"
-                                         L"desktop-oriented window controls.";
+        const std::wstring footerText = workspace_ ? std::format(L"{} workspaces • {} visible sessions", workspace_->Workspaces().size(), visibleSessions.size()) : L"Material styled terminal shell";
         renderTarget_->DrawTextW(footerText.c_str(), static_cast<UINT32>(footerText.size()), uiFormat_.Get(), MakeRect(28.0f, footerRect.top + 42.0f, footerRect.right - 18.0f, footerRect.bottom - 14.0f), brush.Get());
 
         const float shellLeft = contentLeft + terminalWrapPadding;
@@ -817,11 +841,9 @@ namespace wsh::app
         dwriteFactory_->CreateTextFormat(L"Segoe UI", nullptr, DWRITE_FONT_WEIGHT_BOLD, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, 13.0f, L"ru-RU", metaFormat.GetAddressOf());
         metaFormat->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
         brush->SetColor(D2D1::ColorF(0.66f, 0.71f, 0.79f, 0.98f));
-        std::wstring termTitle = L"LOCAL SHELL • ACTIVE SESSION";
-        renderTarget_->DrawTextW(termTitle.c_str(), static_cast<UINT32>(termTitle.size()), metaFormat.Get(), MakeRect(shellLeft + 86.0f, shellTop + 13.0f, shellLeft + 320.0f, shellTop + 34.0f), brush.Get());
-        std::wstring meta = workspace_ && workspace_->ActiveTab() ? Ellipsize(workspace_->ActiveTab()->TitleSnapshot().empty() ? workspace_->ActiveTab()->ProfileName() : workspace_->ActiveTab()->TitleSnapshot(), 36) : L"Ready";
-        brush->SetColor(D2D1::ColorF(0.49f, 0.54f, 0.64f, 0.96f));
-        renderTarget_->DrawTextW(meta.c_str(), static_cast<UINT32>(meta.size()), uiFormat_.Get(), MakeRect(shellRight - 320.0f, shellTop + 13.0f, shellRight - 16.0f, shellTop + 34.0f), brush.Get());
+        std::wstring termTitle = workspace_ && workspace_->ActiveTab() ? std::format(L"{} • ACTIVE SESSION", workspace_->ActiveTab()->ProfileName()) : L"LOCAL SHELL • ACTIVE SESSION";
+        termTitle = Ellipsize(termTitle, 28);
+        renderTarget_->DrawTextW(termTitle.c_str(), static_cast<UINT32>(termTitle.size()), metaFormat.Get(), MakeRect(shellLeft + 86.0f, shellTop + 13.0f, shellRight - 24.0f, shellTop + 34.0f), brush.Get());
 
         const float termOuterLeft = shellLeft + shellInnerMargin;
         const float termOuterTop = shellTop + shellHeaderHeight + shellInnerMargin;
@@ -950,6 +972,16 @@ namespace wsh::app
 
     void MainWindow::OnChar(const wchar_t ch)
     {
+        if (searchFocused_)
+        {
+            if (ch >= 0x20 && ch != 0x7F)
+            {
+                searchQuery_.push_back(ch);
+                Invalidate();
+            }
+            return;
+        }
+
         auto* tab = workspace_ ? workspace_->ActiveTab() : nullptr;
         if (tab == nullptr)
         {
@@ -996,6 +1028,31 @@ void MainWindow::ShowProfileMenu(const int x, const int y)
 
 void MainWindow::OnKeyDown(const WPARAM key, LPARAM)
     {
+        if (searchFocused_)
+        {
+            if (key == VK_ESCAPE)
+            {
+                searchFocused_ = false;
+                Invalidate();
+                return;
+            }
+            if (key == VK_BACK)
+            {
+                if (!searchQuery_.empty())
+                {
+                    searchQuery_.pop_back();
+                    Invalidate();
+                }
+                return;
+            }
+            if (key == VK_RETURN)
+            {
+                searchFocused_ = false;
+                Invalidate();
+                return;
+            }
+        }
+
         auto* tab = workspace_ ? workspace_->ActiveTab() : nullptr;
         if (!workspace_ || tab == nullptr)
         {
@@ -1052,49 +1109,20 @@ void MainWindow::OnKeyDown(const WPARAM key, LPARAM)
 
         switch (key)
         {
-        case VK_HOME:
-            tab->SendInput("\x1b[H");
-            break;
-        case VK_END:
-            tab->SendInput("\x1b[F");
-            break;
-        case VK_DELETE:
-            tab->SendInput("\x1b[3~");
-            break;
-        case VK_ESCAPE:
-            tab->SendInput("\x1b");
-            break;
-        case VK_PRIOR:
-            tab->Scroll(-terminalRows_ / 2);
-            Invalidate();
-            return;
-        case VK_NEXT:
-            tab->Scroll(terminalRows_ / 2);
-            Invalidate();
-            return;
-        case VK_RETURN:
-            tab->SendInput("\r");
-            break;
-        case VK_BACK:
-            tab->SendInput("\b");
-            break;
-        case VK_TAB:
-            tab->SendInput(IsShiftPressed() ? "\x1b[Z" : "\t");
-            break;
-        case VK_LEFT:
-            tab->SendInput("\x1b[D");
-            break;
-        case VK_RIGHT:
-            tab->SendInput("\x1b[C");
-            break;
-        case VK_UP:
-            tab->SendInput("\x1b[A");
-            break;
-        case VK_DOWN:
-            tab->SendInput("\x1b[B");
-            break;
-        default:
-            return;
+        case VK_HOME: tab->SendInput("\x1b[H"); break;
+        case VK_END: tab->SendInput("\x1b[F"); break;
+        case VK_DELETE: tab->SendInput("\x1b[3~"); break;
+        case VK_ESCAPE: tab->SendInput("\x1b"); break;
+        case VK_PRIOR: tab->Scroll(-terminalRows_ / 2); Invalidate(); return;
+        case VK_NEXT: tab->Scroll(terminalRows_ / 2); Invalidate(); return;
+        case VK_RETURN: tab->SendInput("\r"); break;
+        case VK_BACK: tab->SendInput("\b"); break;
+        case VK_TAB: tab->SendInput(IsShiftPressed() ? "\x1b[Z" : "\t"); break;
+        case VK_LEFT: tab->SendInput("\x1b[D"); break;
+        case VK_RIGHT: tab->SendInput("\x1b[C"); break;
+        case VK_UP: tab->SendInput("\x1b[A"); break;
+        case VK_DOWN: tab->SendInput("\x1b[B"); break;
+        default: return;
         }
 
         Invalidate();
@@ -1249,10 +1277,159 @@ void MainWindow::OnMouseWheel(const short delta)
         return x >= left && x <= left + 38.0f && y >= top && y <= top + 38.0f;
     }
 
+    std::optional<size_t> MainWindow::HitTestSidebarSession(const int x, const int y) const
+    {
+        if (!workspace_ || x < 14 || x > 254)
+        {
+            return std::nullopt;
+        }
+        const auto visible = workspace_->FilteredSessionIndices(searchQuery_);
+        const size_t shown = std::min<size_t>(4, visible.size());
+        for (size_t visualIndex = 0; visualIndex < shown; ++visualIndex)
+        {
+            const float top = static_cast<float>(appHeaderHeight_) + 108.0f + static_cast<float>(visualIndex) * 66.0f;
+            if (y >= top && y <= top + 58.0f)
+            {
+                return visible[visualIndex];
+            }
+        }
+        return std::nullopt;
+    }
+
+    std::optional<int> MainWindow::HitTestShellToolbarButton(const int x, const int y) const
+    {
+        if (y < appHeaderHeight_ || y > appHeaderHeight_ + tabBarHeight_)
+        {
+            return std::nullopt;
+        }
+        RECT rect{};
+        ::GetClientRect(hwnd_, &rect);
+        const float top = static_cast<float>(appHeaderHeight_ + 9);
+        float left = static_cast<float>(rect.right) - 12.0f - 3.0f * 40.0f - 8.0f;
+        for (int i = 0; i < 3; ++i)
+        {
+            if (x >= left && x <= left + 40.0f && y >= top && y <= top + 40.0f)
+            {
+                return i;
+            }
+            left += 44.0f;
+        }
+        return std::nullopt;
+    }
+
+    std::optional<int> MainWindow::HitTestShellTrafficDot(const int x, const int y) const
+    {
+        RECT rect{};
+        ::GetClientRect(hwnd_, &rect);
+        const float shellLeft = 268.0f + 14.0f;
+        const float shellTop = static_cast<float>(appHeaderHeight_ + tabBarHeight_) + 14.0f;
+        for (int i = 0; i < 3; ++i)
+        {
+            const float cx = shellLeft + 22.0f + i * 18.0f;
+            const float cy = shellTop + 21.0f;
+            const float dx = static_cast<float>(x) - cx;
+            const float dy = static_cast<float>(y) - cy;
+            if (dx * dx + dy * dy <= 64.0f)
+            {
+                return i;
+            }
+        }
+        return std::nullopt;
+    }
+
+    bool MainWindow::IsPointInSearchBox(const int x, const int y) const
+    {
+        return x >= 14 && x <= 254 && y >= appHeaderHeight_ + 16 && y <= appHeaderHeight_ + 60;
+    }
+
+    bool MainWindow::IsPointInWorkspacePill(const int x, const int y) const
+    {
+        RECT rect{};
+        ::GetClientRect(hwnd_, &rect);
+        const float buttonSize = 40.0f;
+        const float rightControlsWidth = buttonSize * 3.0f + 8.0f + 12.0f;
+        const float centerLeft = 150.0f;
+        const float centerRight = static_cast<float>(rect.right) - rightControlsWidth - 16.0f - 10.0f;
+        const float pillWidth = std::min(760.0f, std::max(360.0f, centerRight - centerLeft - 40.0f));
+        const float pillLeft = centerLeft + (centerRight - centerLeft - pillWidth) * 0.5f;
+        return x >= pillLeft && x <= pillLeft + pillWidth && y >= 13 && y <= 51;
+    }
+
 void MainWindow::OnLeftButtonDown(const int x, const int y)
     {
         ::SetFocus(hwnd_);
         UpdateHoverState(x, y);
+
+        if (IsPointInSearchBox(x, y))
+        {
+            searchFocused_ = true;
+            Invalidate();
+            return;
+        }
+        searchFocused_ = false;
+
+        if (IsPointInWorkspacePill(x, y) && workspace_)
+        {
+            workspace_->NextWorkspace();
+            if (workspace_->Tabs().empty())
+            {
+                OpenProfile(0);
+            }
+            UpdateWindowTitle();
+            Invalidate();
+            return;
+        }
+
+        if (const auto sessionIndex = HitTestSidebarSession(x, y))
+        {
+            workspace_->ActivateTab(*sessionIndex);
+            UpdateWindowTitle();
+            Invalidate();
+            return;
+        }
+
+        if (const auto shellButton = HitTestShellToolbarButton(x, y))
+        {
+            if (*shellButton == kShellPreviousSession)
+            {
+                ShowProfileMenu(x, appHeaderHeight_ + tabBarHeight_ + 40);
+            }
+            else if (*shellButton == kShellDuplicateSession)
+            {
+                const auto active = workspace_->ActiveTab();
+                if (active != nullptr)
+                {
+                    for (size_t i = 0; i < settings_.profiles.size(); ++i)
+                    {
+                        if (settings_.profiles[i].name == active->ProfileName())
+                        {
+                            OpenProfile(i);
+                            break;
+                        }
+                    }
+                }
+            }
+            else if (*shellButton == kShellNewWorkspace)
+            {
+                const size_t newIndex = workspace_->AddWorkspace();
+                workspace_->ActivateWorkspace(newIndex);
+                OpenProfile(0);
+            }
+            UpdateWindowTitle();
+            Invalidate();
+            return;
+        }
+
+        if (const auto traffic = HitTestShellTrafficDot(x, y))
+        {
+            switch (*traffic)
+            {
+            case kShellCloseSession: CloseActiveTab(); break;
+            case kShellMinimizeWindow: ::ShowWindow(hwnd_, SW_MINIMIZE); break;
+            case kShellMaximizeWindow: ::ShowWindow(hwnd_, ::IsZoomed(hwnd_) ? SW_RESTORE : SW_MAXIMIZE); break;
+            }
+            return;
+        }
 
         if (const auto control = HitTestWindowControl(x, y))
         {
@@ -1267,8 +1444,7 @@ void MainWindow::OnLeftButtonDown(const int x, const int y)
             {
                 if (workspace_->Tabs().empty())
                 {
-                    ::PostQuitMessage(0);
-                    return;
+                    OpenProfile(0);
                 }
                 UpdateWindowTitle();
                 Invalidate();
@@ -1436,8 +1612,13 @@ void MainWindow::OnLeftButtonDown(const int x, const int y)
         hoveredTab_.reset();
         hoveredCloseTab_.reset();
         hoveredWindowControl_.reset();
+        hoveredSidebarSession_.reset();
+        hoveredShellToolbarButton_.reset();
+        hoveredShellTrafficDot_.reset();
         hoverNewTabButton_ = false;
         hoverTerminal_ = false;
+        hoverSearchBox_ = false;
+        hoverWorkspacePill_ = false;
         if ((::GetKeyState(VK_LBUTTON) & 0x8000) == 0)
         {
             pressedWindowControl_.reset();
@@ -1451,17 +1632,30 @@ void MainWindow::OnLeftButtonDown(const int x, const int y)
         const auto oldTab = hoveredTab_;
         const auto oldClose = hoveredCloseTab_;
         const auto oldWindowControl = hoveredWindowControl_;
+        const auto oldSidebarSession = hoveredSidebarSession_;
+        const auto oldShellButton = hoveredShellToolbarButton_;
+        const auto oldTraffic = hoveredShellTrafficDot_;
         const bool oldNew = hoverNewTabButton_;
         const bool oldTerminal = hoverTerminal_;
+        const bool oldSearch = hoverSearchBox_;
+        const bool oldWorkspacePill = hoverWorkspacePill_;
 
         hoveredWindowControl_ = HitTestWindowControl(x, y);
         hoveredCloseTab_ = HitTestTabClose(x, y);
         hoveredTab_ = hoveredCloseTab_.has_value() ? hoveredCloseTab_ : HitTestTab(x, y);
+        hoveredSidebarSession_ = HitTestSidebarSession(x, y);
+        hoveredShellToolbarButton_ = HitTestShellToolbarButton(x, y);
+        hoveredShellTrafficDot_ = HitTestShellTrafficDot(x, y);
         hoverNewTabButton_ = IsPointInNewTabButton(x, y);
         hoverTerminal_ = IsPointInTerminal(x, y);
+        hoverSearchBox_ = IsPointInSearchBox(x, y);
+        hoverWorkspacePill_ = IsPointInWorkspacePill(x, y);
         UpdateCursor();
 
-        return hoveredTab_ != oldTab || hoveredCloseTab_ != oldClose || hoveredWindowControl_ != oldWindowControl || hoverNewTabButton_ != oldNew || hoverTerminal_ != oldTerminal;
+        return hoveredTab_ != oldTab || hoveredCloseTab_ != oldClose || hoveredWindowControl_ != oldWindowControl ||
+               hoveredSidebarSession_ != oldSidebarSession || hoveredShellToolbarButton_ != oldShellButton ||
+               hoveredShellTrafficDot_ != oldTraffic || hoverNewTabButton_ != oldNew || hoverTerminal_ != oldTerminal ||
+               hoverSearchBox_ != oldSearch || hoverWorkspacePill_ != oldWorkspacePill;
     }
 
     void MainWindow::EnsureMouseTracking()
@@ -1483,21 +1677,15 @@ void MainWindow::OnLeftButtonDown(const int x, const int y)
 
     void MainWindow::UpdateCursor()
     {
-        if (selecting_ || hoverTerminal_)
+        if (selecting_ || hoverTerminal_ || hoverSearchBox_)
         {
             ::SetCursor(::LoadCursorW(nullptr, IDC_IBEAM));
             return;
         }
 
-        if (hoveredTab_.has_value() || hoveredCloseTab_.has_value() || hoverNewTabButton_)
+        if (hoveredTab_.has_value() || hoveredCloseTab_.has_value() || hoverNewTabButton_ || hoveredSidebarSession_.has_value() || hoveredShellToolbarButton_.has_value() || hoveredShellTrafficDot_.has_value() || hoverWorkspacePill_)
         {
             ::SetCursor(::LoadCursorW(nullptr, IDC_HAND));
-            return;
-        }
-
-        if (hoveredWindowControl_.has_value())
-        {
-            ::SetCursor(::LoadCursorW(nullptr, IDC_ARROW));
             return;
         }
 
@@ -1653,7 +1841,7 @@ void MainWindow::OnLeftButtonDown(const int x, const int y)
         workspace_->CloseActiveTab();
         if (workspace_->Tabs().empty())
         {
-            ::PostQuitMessage(0);
+            OpenProfile(0);
             return;
         }
 
@@ -1665,7 +1853,8 @@ void MainWindow::OnLeftButtonDown(const int x, const int y)
     {
         if (auto* tab = workspace_ ? workspace_->ActiveTab() : nullptr)
         {
-            const std::wstring title = L"WSH Terminal / " + tab->TitleSnapshot();
+            const std::wstring workspaceName = workspace_ ? workspace_->ActiveWorkspaceName() : L"Workspace";
+            const std::wstring title = L"WSH Terminal / " + workspaceName + L" / " + tab->TitleSnapshot();
             ::SetWindowTextW(hwnd_, title.c_str());
         }
     }
