@@ -1,21 +1,17 @@
 #pragma once
 
-#include <cstddef>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace wsh::common
 {
-struct Utf8DecodeResult
-{
-    char32_t codepoint{U'\0'};
-    std::size_t bytesConsumed{0};
-    bool complete{false};
-    bool valid{false};
-};
+std::wstring Utf8ToWide(std::string_view utf8);
+std::string WideToUtf8(std::wstring_view wide);
 
-[[nodiscard]] std::wstring Utf8ToWide(std::string_view value);
-[[nodiscard]] std::string WideToUtf8(std::wstring_view value);
-[[nodiscard]] Utf8DecodeResult DecodeNextUtf8CodePoint(std::string_view value, std::size_t offset = 0) noexcept;
-[[nodiscard]] std::string EncodeUtf8CodePoint(char32_t codepoint);
+// Converts a sequence of Unicode code points to UTF-8.
+std::string CodePointsToUtf8(const std::vector<char32_t>& codePoints);
+
+// Convenience overload for std::u32string-based buffers.
+std::string CodePointsToUtf8(const std::u32string& codePoints);
 } // namespace wsh::common

@@ -14,7 +14,6 @@ wsh_set_project_warnings(wsh_common)
 
 add_library(wsh_platform_windows
   platform/windows/src/win_error.cpp
-  platform/windows/src/handle.cpp
   platform/windows/src/pipe.cpp
   platform/windows/src/process.cpp
   platform/windows/src/environment.cpp
@@ -22,6 +21,8 @@ add_library(wsh_platform_windows
   platform/windows/src/keyboard.cpp
   platform/windows/src/paths.cpp
   platform/windows/src/conpty_api.cpp
+  platform/windows/src/handle.cpp
+  platform/windows/src/execution_helpers.cpp
 )
 
 target_include_directories(wsh_platform_windows PUBLIC
@@ -30,6 +31,8 @@ target_include_directories(wsh_platform_windows PUBLIC
 
 target_link_libraries(wsh_platform_windows PUBLIC
   wsh_common
+  wsh_conpty
+  wsh_terminal
 )
 
 target_compile_definitions(wsh_platform_windows PUBLIC
@@ -38,6 +41,10 @@ target_compile_definitions(wsh_platform_windows PUBLIC
   WIN32_LEAN_AND_MEAN
   NOMINMAX
 )
+
+if(MSVC)
+  target_compile_options(wsh_platform_windows PRIVATE /utf-8)
+endif()
 
 wsh_set_project_warnings(wsh_platform_windows)
 
@@ -71,7 +78,6 @@ target_include_directories(wsh_terminal PUBLIC
 
 target_link_libraries(wsh_terminal PUBLIC
   wsh_common
-  wsh_vt
   wsh_conpty
 )
 
@@ -185,6 +191,10 @@ wsh_set_project_warnings(wsh_ui)
 add_executable(wsh_app
   app/main.cpp
 )
+
+if(MSVC)
+  target_compile_options(wsh_app PRIVATE /utf-8)
+endif()
 
 target_link_libraries(wsh_app PRIVATE
   wsh_common

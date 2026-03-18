@@ -1,17 +1,24 @@
 #pragma once
 
+#include <cstddef>
+#include <deque>
 #include <string>
-#include <vector>
 
 namespace wsh::terminal
 {
 class ScrollbackBuffer
 {
 public:
+    explicit ScrollbackBuffer(std::size_t maxLines = 2000) : maxLines_(maxLines) {}
+
     void AppendLine(std::string line);
-    [[nodiscard]] const std::vector<std::string>& Lines() const noexcept { return lines_; }
+    void Clear();
+
+    [[nodiscard]] const std::deque<std::string>& Lines() const noexcept { return lines_; }
+    [[nodiscard]] std::size_t MaxLines() const noexcept { return maxLines_; }
 
 private:
-    std::vector<std::string> lines_{};
+    std::size_t maxLines_{2000};
+    std::deque<std::string> lines_{};
 };
 } // namespace wsh::terminal

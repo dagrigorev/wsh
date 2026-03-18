@@ -2,11 +2,10 @@
 
 #include <string>
 #include <string_view>
+#include <vector>
 
-namespace wsh::terminal
-{
-class ScreenBuffer;
-}
+#include "wsh/terminal/screen_buffer.h"
+#include "wsh/terminal/terminal_types.h"
 
 namespace wsh::vt
 {
@@ -16,14 +15,9 @@ public:
     void Process(std::string_view data, wsh::terminal::ScreenBuffer& screen);
 
 private:
-    enum class State
-    {
-        Text,
-        Escape,
-        Csi
-    };
+    void HandleCsi(wsh::terminal::ScreenBuffer& screen, char finalByte, const std::vector<int>& params);
+    void ApplySgr(wsh::terminal::ScreenBuffer& screen, const std::vector<int>& params);
 
-    State state_{State::Text};
-    std::string pendingUtf8_{};
+    static wsh::terminal::NamedColor SgrToNamedColor(int sgrCode);
 };
 } // namespace wsh::vt
