@@ -15,6 +15,7 @@ namespace wsh::workspace
 
         bool OpenProfile(size_t profileIndex, int columns, int rows);
         void CloseActiveTab();
+        bool CloseTab(size_t index);
         void NextTab();
         void PreviousTab();
         bool ActivateTab(size_t index);

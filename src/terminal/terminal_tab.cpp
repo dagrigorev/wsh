@@ -1,7 +1,59 @@
 #include "terminal/terminal_tab.h"
 
+#include <algorithm>
+#include <cwctype>
+
 namespace wsh::terminal
 {
+    namespace
+    {
+        std::wstring SanitizeTitle(std::wstring title)
+        {
+            title.erase(std::remove_if(title.begin(), title.end(), [](const wchar_t ch)
+            {
+                return (ch < 0x20 && ch != L' ') || ch == 0x7F;
+            }), title.end());
+
+            for (auto& ch : title)
+            {
+                if (ch == L'\r' || ch == L'\n' || ch == L'\t')
+                {
+                    ch = L' ' ;
+                }
+            }
+
+            std::wstring collapsed;
+            collapsed.reserve(title.size());
+            bool lastSpace = false;
+            for (const wchar_t ch : title)
+            {
+                const bool isSpace = std::iswspace(ch) != 0;
+                if (isSpace)
+                {
+                    if (!lastSpace)
+                    {
+                        collapsed.push_back(L' ');
+                    }
+                    lastSpace = true;
+                }
+                else
+                {
+                    collapsed.push_back(ch);
+                    lastSpace = false;
+                }
+            }
+
+            while (!collapsed.empty() && collapsed.front() == L' ')
+            {
+                collapsed.erase(collapsed.begin());
+            }
+            while (!collapsed.empty() && collapsed.back() == L' ')
+            {
+                collapsed.pop_back();
+            }
+            return collapsed;
+        }
+    }
     TerminalTab::TerminalTab(const wsh::config::Profile& profile, const int columns, const int rows)
         : profile_(profile),
           title_(profile.name),
@@ -52,6 +104,7 @@ namespace wsh::terminal
 
     void TerminalTab::SetTitleUnlocked(std::wstring title)
     {
+        title = SanitizeTitle(std::move(title));
         if (!title.empty())
         {
             title_ = std::move(title);

@@ -31,6 +31,8 @@ namespace wsh::app
         void OnLeftButtonDown(int x, int y);
         void OnMouseMove(int x, int y, WPARAM flags);
         void OnLeftButtonUp(int x, int y);
+        void OnMiddleButtonUp(int x, int y);
+        void OnMouseLeave();
         void OpenProfile(size_t index);
         void EnsureFactories();
         void EnsureRenderTarget();
@@ -42,12 +44,20 @@ namespace wsh::app
         void DrawStatusBar();
         bool IsPointInTerminal(int x, int y) const;
         std::optional<size_t> HitTestTab(int x, int y) const;
+        std::optional<size_t> HitTestTabClose(int x, int y) const;
+        bool IsPointInNewTabButton(int x, int y) const;
         wsh::terminal::SelectionPoint ClientToBufferPoint(int x, int y) const;
         void CopySelection();
         void PasteClipboard();
         void CloseActiveTab();
         void UpdateWindowTitle();
         std::wstring SettingsPath() const;
+        std::wstring BuildTabLabel(size_t index) const;
+        std::wstring Ellipsize(const std::wstring& text, size_t maxChars) const;
+        void ShowProfileMenu(int x, int y);
+        bool UpdateHoverState(int x, int y);
+        void EnsureMouseTracking();
+        void UpdateCursor();
 
         HWND hwnd_ = nullptr;
         HINSTANCE instance_ = nullptr;
@@ -68,6 +78,11 @@ namespace wsh::app
         int padding_ = 10;
 
         bool selecting_ = false;
+        bool mouseTracking_ = false;
+        bool hoverNewTabButton_ = false;
+        bool hoverTerminal_ = false;
+        std::optional<size_t> hoveredTab_;
+        std::optional<size_t> hoveredCloseTab_;
         std::optional<wsh::terminal::SelectionPoint> selectionStart_;
         std::optional<wsh::terminal::SelectionPoint> selectionEnd_;
     };

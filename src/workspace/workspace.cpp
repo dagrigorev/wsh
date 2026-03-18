@@ -27,17 +27,35 @@ namespace wsh::workspace
 
     void Workspace::CloseActiveTab()
     {
-        if (tabs_.empty())
+        CloseTab(activeIndex_);
+    }
+
+    bool Workspace::CloseTab(const size_t index)
+    {
+        if (tabs_.empty() || index >= tabs_.size())
         {
-            return;
+            return false;
         }
 
-        tabs_[activeIndex_]->Stop();
-        tabs_.erase(tabs_.begin() + static_cast<std::ptrdiff_t>(activeIndex_));
-        if (activeIndex_ >= tabs_.size() && !tabs_.empty())
+        tabs_[index]->Stop();
+        tabs_.erase(tabs_.begin() + static_cast<std::ptrdiff_t>(index));
+
+        if (tabs_.empty())
+        {
+            activeIndex_ = 0;
+            return true;
+        }
+
+        if (activeIndex_ > index)
+        {
+            --activeIndex_;
+        }
+        else if (activeIndex_ >= tabs_.size())
         {
             activeIndex_ = tabs_.size() - 1;
         }
+
+        return true;
     }
 
     void Workspace::NextTab()

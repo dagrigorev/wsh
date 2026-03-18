@@ -26,6 +26,7 @@ namespace wsh::terminal
         void Scroll(int deltaRows);
 
         [[nodiscard]] std::wstring TitleSnapshot() const;
+        [[nodiscard]] const std::wstring& ProfileName() const noexcept { return profile_.name; }
         void SetTitle(std::wstring title);
         [[nodiscard]] const ScreenBuffer& Buffer() const noexcept { return buffer_; }
         [[nodiscard]] ScreenBuffer& Buffer() noexcept { return buffer_; }
