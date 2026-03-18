@@ -46,6 +46,7 @@ namespace wsh::app
         void DrawTabs();
         void DrawTerminal();
         void DrawStatusBar();
+        void ShowWorkspaceMenu(int x, int y);
         bool IsPointInTerminal(int x, int y) const;
         bool IsPointInDraggableHeader(int x, int y) const;
         std::optional<int> HitTestWindowControl(int x, int y) const;
@@ -53,6 +54,7 @@ namespace wsh::app
         std::optional<size_t> HitTestTabClose(int x, int y) const;
         bool IsPointInNewTabButton(int x, int y) const;
         std::optional<size_t> HitTestSidebarSession(int x, int y) const;
+        std::optional<int> HitTestSidebarButton(int x, int y) const;
         std::optional<int> HitTestShellToolbarButton(int x, int y) const;
         std::optional<int> HitTestShellTrafficDot(int x, int y) const;
         bool IsPointInSearchBox(int x, int y) const;
@@ -105,6 +107,7 @@ namespace wsh::app
         std::optional<size_t> hoveredTab_;
         std::optional<size_t> hoveredCloseTab_;
         std::optional<size_t> hoveredSidebarSession_;
+        std::optional<int> hoveredSidebarButton_;
         std::optional<int> hoveredShellToolbarButton_;
         std::optional<int> hoveredShellTrafficDot_;
         std::optional<wsh::terminal::SelectionPoint> selectionStart_;

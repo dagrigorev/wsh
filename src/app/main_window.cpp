@@ -43,6 +43,14 @@ namespace wsh::app
             kShellMaximizeWindow = 2
         };
 
+        enum SidebarButtonId
+        {
+            kSidebarNewSession = 0,
+            kSidebarWorkspaceMenu = 1,
+            kSidebarFocusSearch = 2,
+            kSidebarReloadSettings = 3
+        };
+
         bool IsCtrlPressed() noexcept { return (::GetKeyState(VK_CONTROL) & 0x8000) != 0; }
         bool IsShiftPressed() noexcept { return (::GetKeyState(VK_SHIFT) & 0x8000) != 0; }
 
@@ -719,16 +727,58 @@ namespace wsh::app
         ComPtr<ID2D1SolidColorBrush> brush;
         renderTarget_->CreateSolidColorBrush(settings_.theme.foreground, brush.GetAddressOf());
 
-        const D2D1_RECT_F searchRect = MakeRect(14.0f, appHeaderHeight_ + 16.0f, sidebarWidth - 14.0f, appHeaderHeight_ + 60.0f);
+        constexpr float sidebarButtonSize = 40.0f;
+        constexpr float sidebarButtonGap = 10.0f;
+        const float sidebarButtonsTop = static_cast<float>(appHeaderHeight_) + 14.0f;
+        const float sidebarButtonsLeft = 14.0f;
+        for (int i = 0; i < 4; ++i)
+        {
+            const float left = sidebarButtonsLeft + static_cast<float>(i) * (sidebarButtonSize + sidebarButtonGap);
+            const D2D1_RECT_F buttonRect = MakeRect(left, sidebarButtonsTop, left + sidebarButtonSize, sidebarButtonsTop + sidebarButtonSize);
+            const bool hovered = hoveredSidebarButton_ && *hoveredSidebarButton_ == i;
+            brush->SetColor(i == kSidebarNewSession ? D2D1::ColorF(0.44f, 0.26f, 0.82f, hovered ? 0.34f : 0.24f)
+                                                     : D2D1::ColorF(1, 1, 1, hovered ? 0.065f : 0.032f));
+            renderTarget_->FillRoundedRectangle(D2D1::RoundedRect(buttonRect, 13.0f, 13.0f), brush.Get());
+            brush->SetColor(D2D1::ColorF(1, 1, 1, hovered ? 0.11f : 0.06f));
+            renderTarget_->DrawRoundedRectangle(D2D1::RoundedRect(buttonRect, 13.0f, 13.0f), brush.Get(), 1.0f);
+            brush->SetColor(D2D1::ColorF(0.90f, 0.93f, 0.97f, 0.95f));
+            const float cx = (buttonRect.left + buttonRect.right) * 0.5f;
+            const float cy = (buttonRect.top + buttonRect.bottom) * 0.5f;
+            switch (i)
+            {
+            case kSidebarNewSession:
+                renderTarget_->DrawLine(D2D1::Point2F(cx - 6.0f, cy), D2D1::Point2F(cx + 6.0f, cy), brush.Get(), 1.8f);
+                renderTarget_->DrawLine(D2D1::Point2F(cx, cy - 6.0f), D2D1::Point2F(cx, cy + 6.0f), brush.Get(), 1.8f);
+                break;
+            case kSidebarWorkspaceMenu:
+                renderTarget_->DrawRectangle(MakeRect(cx - 6.0f, cy - 6.0f, cx + 6.0f, cy + 6.0f), brush.Get(), 1.5f);
+                renderTarget_->DrawLine(D2D1::Point2F(cx, cy - 6.0f), D2D1::Point2F(cx, cy + 6.0f), brush.Get(), 1.3f);
+                renderTarget_->DrawLine(D2D1::Point2F(cx - 6.0f, cy), D2D1::Point2F(cx + 6.0f, cy), brush.Get(), 1.3f);
+                break;
+            case kSidebarFocusSearch:
+                renderTarget_->DrawEllipse(D2D1::Ellipse(D2D1::Point2F(cx - 2.0f, cy - 1.0f), 5.5f, 5.5f), brush.Get(), 1.5f);
+                renderTarget_->DrawLine(D2D1::Point2F(cx + 2.5f, cy + 3.5f), D2D1::Point2F(cx + 8.0f, cy + 9.0f), brush.Get(), 1.5f);
+                break;
+            case kSidebarReloadSettings:
+                renderTarget_->DrawEllipse(D2D1::Ellipse(D2D1::Point2F(cx, cy), 6.0f, 6.0f), brush.Get(), 1.4f);
+                renderTarget_->DrawLine(D2D1::Point2F(cx, cy - 9.0f), D2D1::Point2F(cx, cy - 6.0f), brush.Get(), 1.4f);
+                renderTarget_->DrawLine(D2D1::Point2F(cx, cy + 6.0f), D2D1::Point2F(cx, cy + 9.0f), brush.Get(), 1.4f);
+                renderTarget_->DrawLine(D2D1::Point2F(cx - 9.0f, cy), D2D1::Point2F(cx - 6.0f, cy), brush.Get(), 1.4f);
+                renderTarget_->DrawLine(D2D1::Point2F(cx + 6.0f, cy), D2D1::Point2F(cx + 9.0f, cy), brush.Get(), 1.4f);
+                break;
+            }
+        }
+
+        const D2D1_RECT_F searchRect = MakeRect(14.0f, appHeaderHeight_ + 68.0f, sidebarWidth - 14.0f, appHeaderHeight_ + 112.0f);
         brush->SetColor(D2D1::ColorF(1, 1, 1, hoverSearchBox_ || searchFocused_ ? 0.055f : 0.035f));
         renderTarget_->FillRoundedRectangle(D2D1::RoundedRect(searchRect, 14.0f, 14.0f), brush.Get());
         brush->SetColor(D2D1::ColorF(1, 1, 1, searchFocused_ ? 0.12f : 0.06f));
         renderTarget_->DrawRoundedRectangle(D2D1::RoundedRect(searchRect, 14.0f, 14.0f), brush.Get(), 1.0f);
         brush->SetColor(searchQuery_.empty() ? D2D1::ColorF(0.67f, 0.71f, 0.79f, 0.96f) : D2D1::ColorF(0.88f, 0.92f, 0.98f, 0.98f));
         const std::wstring searchLabel = searchQuery_.empty() ? L"Search sessions" : Ellipsize(searchQuery_, 20);
-        renderTarget_->DrawTextW(searchLabel.c_str(), static_cast<UINT32>(searchLabel.size()), uiFormat_.Get(), MakeRect(52.0f, appHeaderHeight_ + 29.0f, sidebarWidth - 20.0f, appHeaderHeight_ + 54.0f), brush.Get());
+        renderTarget_->DrawTextW(searchLabel.c_str(), static_cast<UINT32>(searchLabel.size()), uiFormat_.Get(), MakeRect(52.0f, appHeaderHeight_ + 81.0f, sidebarWidth - 20.0f, appHeaderHeight_ + 106.0f), brush.Get());
         const float sx = 28.0f;
-        const float sy = static_cast<float>(appHeaderHeight_) + 28.0f;
+        const float sy = static_cast<float>(appHeaderHeight_) + 80.0f;
         renderTarget_->DrawEllipse(D2D1::Ellipse(D2D1::Point2F(sx + 7.0f, sy + 7.0f), 6.5f, 6.5f), brush.Get(), 1.4f);
         renderTarget_->DrawLine(D2D1::Point2F(sx + 12.0f, sy + 12.0f), D2D1::Point2F(sx + 18.0f, sy + 18.0f), brush.Get(), 1.4f);
 
@@ -736,7 +786,7 @@ namespace wsh::app
         dwriteFactory_->CreateTextFormat(L"Segoe UI", nullptr, DWRITE_FONT_WEIGHT_BOLD, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, 12.0f, L"ru-RU", smallCaps.GetAddressOf());
         smallCaps->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
         brush->SetColor(D2D1::ColorF(0.49f, 0.54f, 0.64f, 1.0f));
-        renderTarget_->DrawTextW(L"SESSIONS", 8, smallCaps.Get(), MakeRect(20.0f, appHeaderHeight_ + 78.0f, sidebarWidth - 20.0f, appHeaderHeight_ + 100.0f), brush.Get());
+        renderTarget_->DrawTextW(L"SESSIONS", 8, smallCaps.Get(), MakeRect(20.0f, appHeaderHeight_ + 130.0f, sidebarWidth - 20.0f, appHeaderHeight_ + 152.0f), brush.Get());
 
         auto visibleSessions = workspace_ ? workspace_->FilteredSessionIndices(searchQuery_) : std::vector<size_t>{};
         const D2D1_COLOR_F badgeColors[] = {
@@ -752,14 +802,17 @@ namespace wsh::app
             D2D1::ColorF(0.20f, 0.83f, 0.60f, 1.0f)
         };
 
-        const size_t shown = std::min<size_t>(4, visibleSessions.size());
+        const float sessionTopStart = static_cast<float>(appHeaderHeight_) + 160.0f;
+        const float sessionStep = 66.0f;
+        const float sessionHeight = 58.0f;
+        const size_t shown = std::min<size_t>(5, visibleSessions.size());
         for (size_t visualIndex = 0; visualIndex < shown; ++visualIndex)
         {
             const size_t sessionIndex = visibleSessions[visualIndex];
             const bool active = workspace_ && sessionIndex == workspace_->ActiveIndex();
             const bool hovered = hoveredSidebarSession_ && *hoveredSidebarSession_ == sessionIndex;
-            const float itemTop = static_cast<float>(appHeaderHeight_) + 108.0f + static_cast<float>(visualIndex) * 66.0f;
-            const D2D1_RECT_F itemRect = MakeRect(14.0f, itemTop, sidebarWidth - 14.0f, itemTop + 58.0f);
+            const float itemTop = sessionTopStart + static_cast<float>(visualIndex) * sessionStep;
+            const D2D1_RECT_F itemRect = MakeRect(14.0f, itemTop, sidebarWidth - 14.0f, itemTop + sessionHeight);
             brush->SetColor(active ? D2D1::ColorF(0.55f, 0.36f, 0.96f, 0.18f) : D2D1::ColorF(1, 1, 1, hovered ? 0.045f : 0.0f));
             renderTarget_->FillRoundedRectangle(D2D1::RoundedRect(itemRect, 16.0f, 16.0f), brush.Get());
             brush->SetColor(active ? D2D1::ColorF(0.55f, 0.36f, 0.96f, 0.26f) : D2D1::ColorF(1, 1, 1, hovered ? 0.08f : 0.05f));
@@ -778,7 +831,7 @@ namespace wsh::app
             std::wstring subtitle = sessionTab->TitleSnapshot();
             if (subtitle.empty() || subtitle == sessionTab->ProfileName())
             {
-                subtitle = sessionIndex == 0 ? L"C:\\projects\\wsh" : (sessionIndex == 1 ? L"~/src/wsh" : (sessionIndex == 2 ? L"docker compose up" : L"active shell"));
+                subtitle = sessionIndex == 0 ? L"C:\projects\wsh" : (sessionIndex == 1 ? L"~/src/wsh" : (sessionIndex == 2 ? L"docker compose up" : L"active shell"));
             }
             subtitle = Ellipsize(subtitle, 22);
             brush->SetColor(D2D1::ColorF(0.49f, 0.54f, 0.64f, 0.95f));
@@ -788,20 +841,20 @@ namespace wsh::app
         }
 
         brush->SetColor(D2D1::ColorF(0.49f, 0.54f, 0.64f, 1.0f));
-        renderTarget_->DrawTextW(L"WORKSPACE", 9, smallCaps.Get(), MakeRect(20.0f, appHeaderHeight_ + 382.0f, sidebarWidth - 20.0f, appHeaderHeight_ + 402.0f), brush.Get());
-        const D2D1_RECT_F queueRect = MakeRect(14.0f, appHeaderHeight_ + 412.0f, sidebarWidth - 14.0f, appHeaderHeight_ + 470.0f);
+        renderTarget_->DrawTextW(L"WORKSPACE", 9, smallCaps.Get(), MakeRect(20.0f, appHeaderHeight_ + 506.0f, sidebarWidth - 20.0f, appHeaderHeight_ + 526.0f), brush.Get());
+        const D2D1_RECT_F queueRect = MakeRect(14.0f, appHeaderHeight_ + 538.0f, sidebarWidth - 14.0f, appHeaderHeight_ + 596.0f);
         brush->SetColor(D2D1::ColorF(1, 1, 1, 0.03f));
         renderTarget_->FillRoundedRectangle(D2D1::RoundedRect(queueRect, 16.0f, 16.0f), brush.Get());
         brush->SetColor(D2D1::ColorF(1, 1, 1, 0.05f));
         renderTarget_->DrawRoundedRectangle(D2D1::RoundedRect(queueRect, 16.0f, 16.0f), brush.Get(), 1.0f);
         brush->SetColor(D2D1::ColorF(0.93f, 0.95f, 0.98f, 1.0f));
         const std::wstring queueTitle = workspace_ ? Ellipsize(workspace_->ActiveWorkspaceName(), 16) : L"Build queue";
-        renderTarget_->DrawTextW(queueTitle.c_str(), static_cast<UINT32>(queueTitle.size()), uiFormat_.Get(), MakeRect(26.0f, appHeaderHeight_ + 426.0f, 200.0f, appHeaderHeight_ + 444.0f), brush.Get());
+        renderTarget_->DrawTextW(queueTitle.c_str(), static_cast<UINT32>(queueTitle.size()), uiFormat_.Get(), MakeRect(26.0f, appHeaderHeight_ + 552.0f, 200.0f, appHeaderHeight_ + 570.0f), brush.Get());
         brush->SetColor(D2D1::ColorF(0.49f, 0.54f, 0.64f, 0.96f));
         const std::wstring queueSub = std::format(L"{} session(s)", workspace_ ? workspace_->Tabs().size() : 0);
-        renderTarget_->DrawTextW(queueSub.c_str(), static_cast<UINT32>(queueSub.size()), uiFormat_.Get(), MakeRect(26.0f, appHeaderHeight_ + 444.0f, 180.0f, appHeaderHeight_ + 462.0f), brush.Get());
+        renderTarget_->DrawTextW(queueSub.c_str(), static_cast<UINT32>(queueSub.size()), uiFormat_.Get(), MakeRect(26.0f, appHeaderHeight_ + 570.0f, 180.0f, appHeaderHeight_ + 588.0f), brush.Get());
         brush->SetColor(D2D1::ColorF(0.96f, 0.76f, 0.47f, 1.0f));
-        renderTarget_->FillEllipse(D2D1::Ellipse(D2D1::Point2F(sidebarWidth - 30.0f, appHeaderHeight_ + 441.0f), 5.0f, 5.0f), brush.Get());
+        renderTarget_->FillEllipse(D2D1::Ellipse(D2D1::Point2F(sidebarWidth - 30.0f, appHeaderHeight_ + 567.0f), 5.0f, 5.0f), brush.Get());
 
         const D2D1_RECT_F footerRect = MakeRect(14.0f, static_cast<float>(rect.bottom) - 132.0f, sidebarWidth - 14.0f, static_cast<float>(rect.bottom) - 18.0f);
         brush->SetColor(D2D1::ColorF(1, 1, 1, 0.035f));
@@ -811,7 +864,7 @@ namespace wsh::app
         brush->SetColor(D2D1::ColorF(0.93f, 0.95f, 0.98f, 1.0f));
         renderTarget_->DrawTextW(L"WSH Workspace", 13, uiFormat_.Get(), MakeRect(28.0f, footerRect.top + 16.0f, footerRect.right - 18.0f, footerRect.top + 36.0f), brush.Get());
         brush->SetColor(D2D1::ColorF(0.67f, 0.71f, 0.79f, 0.95f));
-        const std::wstring footerText = workspace_ ? std::format(L"{} workspaces • {} visible sessions", workspace_->Workspaces().size(), visibleSessions.size()) : L"Material styled terminal shell";
+        const std::wstring footerText = workspace_ ? std::format(L"{} workspace(s) • {} session(s)", workspace_->Workspaces().size(), workspace_->Tabs().size()) : L"Material styled terminal shell";
         renderTarget_->DrawTextW(footerText.c_str(), static_cast<UINT32>(footerText.size()), uiFormat_.Get(), MakeRect(28.0f, footerRect.top + 42.0f, footerRect.right - 18.0f, footerRect.bottom - 14.0f), brush.Get());
 
         const float shellLeft = contentLeft + terminalWrapPadding;
@@ -1025,6 +1078,64 @@ void MainWindow::ShowProfileMenu(const int x, const int y)
             OpenProfile(command - kProfileMenuBase);
         }
     }
+void MainWindow::ShowWorkspaceMenu(const int x, const int y)
+    {
+        if (!workspace_)
+        {
+            return;
+        }
+
+        HMENU menu = ::CreatePopupMenu();
+        if (menu == nullptr)
+        {
+            return;
+        }
+
+        constexpr UINT kWorkspaceMenuBase = 41000;
+        constexpr UINT kWorkspaceNewId = 41999;
+        const auto& groups = workspace_->Workspaces();
+        for (size_t i = 0; i < groups.size(); ++i)
+        {
+            UINT flags = MF_STRING;
+            if (i == workspace_->ActiveWorkspaceIndex())
+            {
+                flags |= MF_CHECKED;
+            }
+            ::AppendMenuW(menu, flags, kWorkspaceMenuBase + static_cast<UINT>(i), groups[i].name.c_str());
+        }
+        if (!groups.empty())
+        {
+            ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+        }
+        ::AppendMenuW(menu, MF_STRING, kWorkspaceNewId, L"New workspace");
+
+        POINT screenPoint{ x, y };
+        ::ClientToScreen(hwnd_, &screenPoint);
+        const UINT command = ::TrackPopupMenu(menu, TPM_RETURNCMD | TPM_LEFTALIGN | TPM_TOPALIGN, screenPoint.x, screenPoint.y, 0, hwnd_, nullptr);
+        ::DestroyMenu(menu);
+
+        if (command >= kWorkspaceMenuBase && command < kWorkspaceMenuBase + groups.size())
+        {
+            workspace_->ActivateWorkspace(command - kWorkspaceMenuBase);
+            if (workspace_->Tabs().empty())
+            {
+                OpenProfile(0);
+            }
+            UpdateWindowTitle();
+            Invalidate();
+            return;
+        }
+
+        if (command == kWorkspaceNewId)
+        {
+            const size_t newIndex = workspace_->AddWorkspace();
+            workspace_->ActivateWorkspace(newIndex);
+            OpenProfile(0);
+            UpdateWindowTitle();
+            Invalidate();
+        }
+    }
+
 
 void MainWindow::OnKeyDown(const WPARAM key, LPARAM)
     {
@@ -1277,6 +1388,27 @@ void MainWindow::OnMouseWheel(const short delta)
         return x >= left && x <= left + 38.0f && y >= top && y <= top + 38.0f;
     }
 
+    std::optional<int> MainWindow::HitTestSidebarButton(const int x, const int y) const
+    {
+        constexpr float left = 14.0f;
+        constexpr float top = 78.0f;
+        constexpr float size = 40.0f;
+        constexpr float gap = 10.0f;
+        if (y < appHeaderHeight_ + 14 || y > appHeaderHeight_ + 54)
+        {
+            return std::nullopt;
+        }
+        for (int i = 0; i < 4; ++i)
+        {
+            const float x0 = left + static_cast<float>(i) * (size + gap);
+            if (x >= x0 && x <= x0 + size)
+            {
+                return i;
+            }
+        }
+        return std::nullopt;
+    }
+
     std::optional<size_t> MainWindow::HitTestSidebarSession(const int x, const int y) const
     {
         if (!workspace_ || x < 14 || x > 254)
@@ -1284,10 +1416,10 @@ void MainWindow::OnMouseWheel(const short delta)
             return std::nullopt;
         }
         const auto visible = workspace_->FilteredSessionIndices(searchQuery_);
-        const size_t shown = std::min<size_t>(4, visible.size());
+        const size_t shown = std::min<size_t>(5, visible.size());
         for (size_t visualIndex = 0; visualIndex < shown; ++visualIndex)
         {
-            const float top = static_cast<float>(appHeaderHeight_) + 108.0f + static_cast<float>(visualIndex) * 66.0f;
+            const float top = static_cast<float>(appHeaderHeight_) + 160.0f + static_cast<float>(visualIndex) * 66.0f;
             if (y >= top && y <= top + 58.0f)
             {
                 return visible[visualIndex];
@@ -1339,7 +1471,7 @@ void MainWindow::OnMouseWheel(const short delta)
 
     bool MainWindow::IsPointInSearchBox(const int x, const int y) const
     {
-        return x >= 14 && x <= 254 && y >= appHeaderHeight_ + 16 && y <= appHeaderHeight_ + 60;
+        return x >= 14 && x <= 254 && y >= appHeaderHeight_ + 68 && y <= appHeaderHeight_ + 112;
     }
 
     bool MainWindow::IsPointInWorkspacePill(const int x, const int y) const
@@ -1360,6 +1492,29 @@ void MainWindow::OnLeftButtonDown(const int x, const int y)
         ::SetFocus(hwnd_);
         UpdateHoverState(x, y);
 
+        if (const auto sidebarButton = HitTestSidebarButton(x, y))
+        {
+            switch (*sidebarButton)
+            {
+            case kSidebarNewSession:
+                ShowProfileMenu(x, appHeaderHeight_ + 54);
+                break;
+            case kSidebarWorkspaceMenu:
+                ShowWorkspaceMenu(x, appHeaderHeight_ + 54);
+                break;
+            case kSidebarFocusSearch:
+                searchFocused_ = true;
+                Invalidate();
+                return;
+            case kSidebarReloadSettings:
+                settings_ = config::LoadSettings(SettingsPath());
+                break;
+            }
+            UpdateWindowTitle();
+            Invalidate();
+            return;
+        }
+
         if (IsPointInSearchBox(x, y))
         {
             searchFocused_ = true;
@@ -1370,13 +1525,7 @@ void MainWindow::OnLeftButtonDown(const int x, const int y)
 
         if (IsPointInWorkspacePill(x, y) && workspace_)
         {
-            workspace_->NextWorkspace();
-            if (workspace_->Tabs().empty())
-            {
-                OpenProfile(0);
-            }
-            UpdateWindowTitle();
-            Invalidate();
+            ShowWorkspaceMenu(x, appHeaderHeight_);
             return;
         }
 
@@ -1613,6 +1762,7 @@ void MainWindow::OnLeftButtonDown(const int x, const int y)
         hoveredCloseTab_.reset();
         hoveredWindowControl_.reset();
         hoveredSidebarSession_.reset();
+        hoveredSidebarButton_.reset();
         hoveredShellToolbarButton_.reset();
         hoveredShellTrafficDot_.reset();
         hoverNewTabButton_ = false;
@@ -1633,6 +1783,7 @@ void MainWindow::OnLeftButtonDown(const int x, const int y)
         const auto oldClose = hoveredCloseTab_;
         const auto oldWindowControl = hoveredWindowControl_;
         const auto oldSidebarSession = hoveredSidebarSession_;
+        const auto oldSidebarButton = hoveredSidebarButton_;
         const auto oldShellButton = hoveredShellToolbarButton_;
         const auto oldTraffic = hoveredShellTrafficDot_;
         const bool oldNew = hoverNewTabButton_;
@@ -1644,6 +1795,7 @@ void MainWindow::OnLeftButtonDown(const int x, const int y)
         hoveredCloseTab_ = HitTestTabClose(x, y);
         hoveredTab_ = hoveredCloseTab_.has_value() ? hoveredCloseTab_ : HitTestTab(x, y);
         hoveredSidebarSession_ = HitTestSidebarSession(x, y);
+        hoveredSidebarButton_ = HitTestSidebarButton(x, y);
         hoveredShellToolbarButton_ = HitTestShellToolbarButton(x, y);
         hoveredShellTrafficDot_ = HitTestShellTrafficDot(x, y);
         hoverNewTabButton_ = IsPointInNewTabButton(x, y);
@@ -1653,7 +1805,7 @@ void MainWindow::OnLeftButtonDown(const int x, const int y)
         UpdateCursor();
 
         return hoveredTab_ != oldTab || hoveredCloseTab_ != oldClose || hoveredWindowControl_ != oldWindowControl ||
-               hoveredSidebarSession_ != oldSidebarSession || hoveredShellToolbarButton_ != oldShellButton ||
+               hoveredSidebarSession_ != oldSidebarSession || hoveredSidebarButton_ != oldSidebarButton || hoveredShellToolbarButton_ != oldShellButton ||
                hoveredShellTrafficDot_ != oldTraffic || hoverNewTabButton_ != oldNew || hoverTerminal_ != oldTerminal ||
                hoverSearchBox_ != oldSearch || hoverWorkspacePill_ != oldWorkspacePill;
     }
@@ -1683,7 +1835,7 @@ void MainWindow::OnLeftButtonDown(const int x, const int y)
             return;
         }
 
-        if (hoveredTab_.has_value() || hoveredCloseTab_.has_value() || hoverNewTabButton_ || hoveredSidebarSession_.has_value() || hoveredShellToolbarButton_.has_value() || hoveredShellTrafficDot_.has_value() || hoverWorkspacePill_)
+        if (hoveredTab_.has_value() || hoveredCloseTab_.has_value() || hoverNewTabButton_ || hoveredSidebarSession_.has_value() || hoveredSidebarButton_.has_value() || hoveredShellToolbarButton_.has_value() || hoveredShellTrafficDot_.has_value() || hoverWorkspacePill_)
         {
             ::SetCursor(::LoadCursorW(nullptr, IDC_HAND));
             return;
