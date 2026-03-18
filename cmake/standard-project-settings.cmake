@@ -1,9 +1,0 @@
-if(MSVC)
-  add_compile_definitions(
-    _CRT_SECURE_NO_WARNINGS
-    UNICODE
-    _UNICODE
-    WIN32_LEAN_AND_MEAN
-    NOMINMAX
-  )
-endif()

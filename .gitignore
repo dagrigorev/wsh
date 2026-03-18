@@ -1,9 +1,141 @@
-/out/
-/.vs/
-/CMakeUserPresets.json
-/.idea/
-.vscode/
-*.user
+# ------------------------------
+# OS / Explorer
+# ------------------------------
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# ------------------------------
+# Visual Studio
+# ------------------------------
+.vs/
+*.VC.db
+*.VC.opendb
+*.VC.VC.opendb
 *.suo
-*.vcxproj.user
+*.user
+*.userosscache
+*.sln.docstates
+
+# Visual Studio generated caches
+ipch/
+*.ipch
+*.tlog
+*.lastbuildstate
+
+# ------------------------------
+# CMake
+# ------------------------------
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+CTestTestfile.cmake
+install_manifest.txt
+compile_commands.json
+
+# CMake user presets/local presets
+CMakeUserPresets.json
+
+# Generated build trees
+out/
+build/
+_build/
+cmake-build-*/
+artifacts/
+
+# ------------------------------
+# Ninja / NMake / MSBuild artifacts
+# ------------------------------
+.ninja_deps
+.ninja_log
+build.ninja
+rules.ninja
+*.dir/
+
+# ------------------------------
+# Compiler / linker outputs
+# ------------------------------
+*.obj
+*.o
+*.lo
+*.slo
+*.pch
+*.pdb
+*.idb
+*.ilk
+*.exp
+*.lib
+*.a
+*.dll
+*.exe
+*.out
+*.app
+*.iobj
+*.ipdb
+
+# Debug / Release folders
+Debug/
+Release/
+x64/Debug/
+x64/Release/
+x86/Debug/
+x86/Release/
+Win32/Debug/
+Win32/Release/
+
+# ------------------------------
+# Test / coverage / profiling
+# ------------------------------
+Testing/
+coverage/
+*.gcda
+*.gcno
+*.gcov
+*.profraw
+*.profdata
+
+# ------------------------------
+# Logs / temp / runtime dumps
+# ------------------------------
 *.log
+logs/
+temp/
+tmp/
+*.tmp
+*.stackdump
+*.dmp
+
+# ------------------------------
+# Packaged archives
+# ------------------------------
+*.zip
+*.7z
+*.rar
+
+# ------------------------------
+# Local app settings / machine-specific overrides
+# ------------------------------
+assets/local/
+config.local.toml
+settings.local.toml
+profiles.local.toml
+
+# ------------------------------
+# Optional: generated terminal/session state
+# ------------------------------
+*.session
+*.history
+*.cache
+
+# ------------------------------
+# Keep important assets and configs
+# ------------------------------
+!assets/
+!assets/*.toml
+!assets/*.json
+!assets/*.yaml
+!assets/*.yml
+!assets/*.ttf
+!assets/*.otf
+!docs/
+!cmake/

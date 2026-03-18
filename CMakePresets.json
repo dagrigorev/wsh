@@ -2,42 +2,41 @@
   "version": 6,
   "cmakeMinimumRequired": {
     "major": 3,
-    "minor": 27,
+    "minor": 24,
     "patch": 0
   },
   "configurePresets": [
     {
-      "name": "vs2022-x64",
-      "displayName": "VS2022 x64",
-      "generator": "Ninja Multi-Config",
-      "binaryDir": "${sourceDir}/out/build/vs2022-x64",
+      "name": "vs2026-x64-debug",
+      "displayName": "Visual Studio 2026 x64 Debug",
+      "generator": "Visual Studio 18 2026",
+      "architecture": "x64",
+      "binaryDir": "${sourceDir}/out/build/vs2026-x64-debug",
       "cacheVariables": {
-        "CMAKE_CXX_STANDARD": "20",
-        "WSH_BUILD_TESTS": "ON",
-        "WSH_WARNINGS_AS_ERRORS": "OFF"
+        "CMAKE_INSTALL_PREFIX": "${sourceDir}/out/install/vs2026-x64-debug",
+        "CMAKE_BUILD_TYPE": "Debug"
+      }
+    },
+    {
+      "name": "vs2026-x64-release",
+      "displayName": "Visual Studio 2026 x64 Release",
+      "generator": "Visual Studio 18 2026",
+      "architecture": "x64",
+      "binaryDir": "${sourceDir}/out/build/vs2026-x64-release",
+      "cacheVariables": {
+        "CMAKE_INSTALL_PREFIX": "${sourceDir}/out/install/vs2026-x64-release",
+        "CMAKE_BUILD_TYPE": "Release"
       }
     }
   ],
   "buildPresets": [
     {
-      "name": "debug",
-      "configurePreset": "vs2022-x64",
-      "configuration": "Debug"
+      "name": "build-debug",
+      "configurePreset": "vs2026-x64-debug"
     },
     {
-      "name": "release",
-      "configurePreset": "vs2022-x64",
-      "configuration": "Release"
-    }
-  ],
-  "testPresets": [
-    {
-      "name": "test-debug",
-      "configurePreset": "vs2022-x64",
-      "configuration": "Debug",
-      "output": {
-        "outputOnFailure": true
-      }
+      "name": "build-release",
+      "configurePreset": "vs2026-x64-release"
     }
   ]
 }

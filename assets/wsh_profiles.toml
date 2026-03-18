@@ -1,0 +1,25 @@
+font_family = "Cascadia Mono"
+font_size = 18
+
+[theme]
+background = "#0D1425"
+foreground = "#E6EDF7"
+accent = "#5AA9FF"
+muted = "#7E8CA0"
+status_background = "#121A2D"
+selection = "#2C4F8A"
+
+[[profiles]]
+name = "PowerShell"
+command = "pwsh.exe"
+arguments = ["-NoLogo"]
+
+[[profiles]]
+name = "CMD"
+command = "cmd.exe"
+arguments = []
+
+[[profiles]]
+name = "WSL"
+command = "wsl.exe"
+arguments = []

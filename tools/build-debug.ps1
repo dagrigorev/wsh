@@ -1,1 +1,0 @@
-cmake --build --preset debug
