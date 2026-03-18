@@ -82,10 +82,10 @@ namespace wsh::app
         float lineHeight_ = 20.0f;
         int terminalColumns_ = 80;
         int terminalRows_ = 24;
-        int appHeaderHeight_ = 76;
-        int tabBarHeight_ = 56;
-        int statusBarHeight_ = 38;
-        int padding_ = 18;
+        int appHeaderHeight_ = 64;
+        int tabBarHeight_ = 58;
+        int statusBarHeight_ = 40;
+        int padding_ = 14;
 
         bool selecting_ = false;
         bool mouseTracking_ = false;

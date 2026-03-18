@@ -286,14 +286,25 @@ namespace wsh::app
         lineHeight_ = metrics.height + 2.0f;
     }
 
-    void MainWindow::ResizeTerminalToClient()
+        void MainWindow::ResizeTerminalToClient()
     {
         RECT rect{};
         ::GetClientRect(hwnd_, &rect);
-        const int clientWidth = static_cast<int>(rect.right - rect.left);
-        const int clientHeight = static_cast<int>(rect.bottom - rect.top);
-        const int width = std::max(100, clientWidth - 2 * padding_ - 28);
-        const int height = std::max(100, clientHeight - appHeaderHeight_ - tabBarHeight_ - statusBarHeight_ - 54);
+
+        constexpr int sidebarWidth = 268;
+        constexpr int terminalWrapPadding = 14;
+        constexpr int terminalShellHeader = 42;
+        constexpr int terminalFrameMargin = 12;
+        constexpr int terminalPaddingX = 26;
+        constexpr int terminalPaddingY = 24;
+
+        const int clientWidth = rect.right - rect.left;
+        const int clientHeight = rect.bottom - rect.top;
+        const int contentWidth = std::max(320, clientWidth - sidebarWidth);
+        const int contentHeight = std::max(240, clientHeight - appHeaderHeight_ - tabBarHeight_ - statusBarHeight_);
+
+        const int width = std::max(100, contentWidth - terminalWrapPadding * 2 - terminalFrameMargin * 2 - terminalPaddingX * 2 - 4);
+        const int height = std::max(100, contentHeight - terminalWrapPadding * 2 - terminalShellHeader - terminalFrameMargin * 2 - terminalPaddingY * 2 - 4);
         terminalColumns_ = std::max(20, static_cast<int>(width / charWidth_));
         terminalRows_ = std::max(8, static_cast<int>(height / lineHeight_));
 
@@ -371,7 +382,7 @@ namespace wsh::app
         return std::format(L"{} #{}", name, count);
     }
 
-    std::wstring MainWindow::Ellipsize(const std::wstring& text, const size_t maxChars) const
+        std::wstring MainWindow::Ellipsize(const std::wstring& text, const size_t maxChars) const
     {
         if (text.size() <= maxChars)
         {
@@ -382,100 +393,146 @@ namespace wsh::app
             return text.substr(0, maxChars);
         }
 
-        const auto slashPos = text.find_last_of(L"\/");
+        const auto slashPos = text.find_last_of(L"/\\");
         if (slashPos != std::wstring::npos)
         {
             const std::wstring tail = text.substr(slashPos + 1);
             if (tail.size() + 4 <= maxChars)
             {
-                const size_t headCount = maxChars - tail.size() - 1;
-                return L"…" + text.substr(slashPos - std::min(slashPos, headCount) + 1, std::min(slashPos, headCount)) + L"\"" + tail;
+                const size_t headCount = maxChars - tail.size() - 2;
+                const size_t prefixStart = (slashPos > headCount) ? (slashPos - headCount) : 0;
+                const std::wstring head = text.substr(prefixStart, std::min(slashPos, headCount));
+                return L"…" + head + L"\\" + tail;
             }
-
-            if (tail.size() + 1 < maxChars)
+            if (tail.size() + 2 <= maxChars)
             {
-                return L"…\"" + tail.substr(tail.size() - (maxChars - 2));
+                return L"…\\" + tail.substr(tail.size() - (maxChars - 2));
             }
         }
 
         return text.substr(0, maxChars - 1) + L"…";
     }
 
-    void MainWindow::DrawHeader()
+        void MainWindow::DrawHeader()
     {
         RECT rect{};
         ::GetClientRect(hwnd_, &rect);
+
+        constexpr float sidebarWidth = 268.0f;
+        constexpr float titlePadLeft = 18.0f;
+        constexpr float titlePadRight = 16.0f;
+        constexpr float logoSize = 34.0f;
+        constexpr float iconButton = 40.0f;
+
+        ComPtr<ID2D1SolidColorBrush> brush;
+        renderTarget_->CreateSolidColorBrush(settings_.theme.foreground, brush.GetAddressOf());
 
         D2D1_GRADIENT_STOP stops[] = {
-            {0.0f, D2D1::ColorF(0.11f, 0.14f, 0.24f, 1.0f)},
-            {0.36f, D2D1::ColorF(0.08f, 0.11f, 0.20f, 1.0f)},
-            {1.0f, D2D1::ColorF(0.03f, 0.05f, 0.10f, 1.0f)}
+            {0.0f, D2D1::ColorF(0.06f, 0.07f, 0.09f, 1.0f)},
+            {0.45f, D2D1::ColorF(0.06f, 0.07f, 0.10f, 1.0f)},
+            {1.0f, D2D1::ColorF(0.04f, 0.05f, 0.07f, 1.0f)}
         };
         ComPtr<ID2D1GradientStopCollection> stopCollection;
-        renderTarget_->CreateGradientStopCollection(stops, 3, stopCollection.GetAddressOf());
+        renderTarget_->CreateGradientStopCollection(stops, ARRAYSIZE(stops), stopCollection.GetAddressOf());
         ComPtr<ID2D1LinearGradientBrush> gradient;
         renderTarget_->CreateLinearGradientBrush(
-            D2D1::LinearGradientBrushProperties(D2D1::Point2F(0.0f, 0.0f), D2D1::Point2F(static_cast<float>(rect.right), static_cast<float>(rect.bottom))),
-            stopCollection.Get(), gradient.GetAddressOf());
+            D2D1::LinearGradientBrushProperties(
+                D2D1::Point2F(0.0f, 0.0f),
+                D2D1::Point2F(0.0f, static_cast<float>(rect.bottom))),
+            stopCollection.Get(),
+            gradient.GetAddressOf());
         renderTarget_->FillRectangle(MakeRect(0.0f, 0.0f, static_cast<float>(rect.right), static_cast<float>(rect.bottom)), gradient.Get());
 
-        ComPtr<ID2D1SolidColorBrush> brush;
-        renderTarget_->CreateSolidColorBrush(settings_.theme.foreground, brush.GetAddressOf());
+        brush->SetColor(D2D1::ColorF(0.31f, 0.55f, 1.0f, 0.10f));
+        renderTarget_->FillEllipse(D2D1::Ellipse(D2D1::Point2F(170.0f, 80.0f), 180.0f, 120.0f), brush.Get());
+        brush->SetColor(D2D1::ColorF(0.55f, 0.36f, 0.96f, 0.09f));
+        renderTarget_->FillEllipse(D2D1::Ellipse(D2D1::Point2F(static_cast<float>(rect.right) - 140.0f, 64.0f), 170.0f, 110.0f), brush.Get());
 
-        const auto drawSoftPanel = [&](const D2D1_RECT_F& panel, const float radius, const float fillAlpha, const float shadowAlpha)
-        {
-            brush->SetColor(D2D1::ColorF(0.01f, 0.02f, 0.05f, shadowAlpha));
-            renderTarget_->FillRoundedRectangle(D2D1::RoundedRect(MakeRect(panel.left, panel.top + 11.0f, panel.right, panel.bottom + 12.0f), radius + 1.5f, radius + 1.5f), brush.Get());
-            brush->SetColor(D2D1::ColorF(0.12f, 0.16f, 0.29f, fillAlpha));
-            renderTarget_->FillRoundedRectangle(D2D1::RoundedRect(panel, radius, radius), brush.Get());
-            brush->SetColor(D2D1::ColorF(1, 1, 1, 0.085f));
-            renderTarget_->DrawRoundedRectangle(D2D1::RoundedRect(panel, radius, radius), brush.Get(), 1.0f);
-            brush->SetColor(D2D1::ColorF(0.67f, 0.79f, 1.0f, 0.07f));
-            renderTarget_->FillRoundedRectangle(D2D1::RoundedRect(MakeRect(panel.left + 1.0f, panel.top + 1.0f, panel.right - 1.0f, panel.top + 24.0f), radius - 1.0f, radius - 1.0f), brush.Get());
-            brush->SetColor(D2D1::ColorF(0.00f, 0.00f, 0.00f, 0.12f));
-            renderTarget_->DrawLine(D2D1::Point2F(panel.left + 6.0f, panel.bottom - 1.0f), D2D1::Point2F(panel.right - 6.0f, panel.bottom - 1.0f), brush.Get(), 1.0f);
-        };
-
-        const D2D1_RECT_F headerPanel = MakeRect(10.0f, 10.0f, static_cast<float>(rect.right) - 10.0f, static_cast<float>(appHeaderHeight_) - 8.0f);
-        drawSoftPanel(headerPanel, 19.0f, 0.70f, 0.16f);
+        const D2D1_RECT_F titlebar = MakeRect(0.0f, 0.0f, static_cast<float>(rect.right), static_cast<float>(appHeaderHeight_));
+        const D2D1_RECT_F sidebar = MakeRect(0.0f, static_cast<float>(appHeaderHeight_), sidebarWidth, static_cast<float>(rect.bottom));
+        const D2D1_RECT_F content = MakeRect(sidebarWidth, static_cast<float>(appHeaderHeight_), static_cast<float>(rect.right), static_cast<float>(rect.bottom));
 
         brush->SetColor(D2D1::ColorF(1, 1, 1, 0.03f));
-        renderTarget_->DrawLine(D2D1::Point2F(0.0f, static_cast<float>(appHeaderHeight_) + 1.0f), D2D1::Point2F(static_cast<float>(rect.right), static_cast<float>(appHeaderHeight_) + 1.0f), brush.Get(), 1.0f);
-        brush->SetColor(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.18f));
-        renderTarget_->DrawLine(D2D1::Point2F(0.0f, static_cast<float>(appHeaderHeight_) + 2.0f), D2D1::Point2F(static_cast<float>(rect.right), static_cast<float>(appHeaderHeight_) + 2.0f), brush.Get(), 1.0f);
+        renderTarget_->FillRectangle(titlebar, brush.Get());
+        brush->SetColor(D2D1::ColorF(1, 1, 1, 0.05f));
+        renderTarget_->DrawLine(D2D1::Point2F(0.0f, static_cast<float>(appHeaderHeight_) - 0.5f), D2D1::Point2F(static_cast<float>(rect.right), static_cast<float>(appHeaderHeight_) - 0.5f), brush.Get(), 1.0f);
 
-        const D2D1_RECT_F brandRect = MakeRect(18.0f, 18.0f, 50.0f, 50.0f);
-        brush->SetColor(D2D1::ColorF(0.27f, 0.16f, 0.68f, 1.0f));
-        renderTarget_->FillRoundedRectangle(D2D1::RoundedRect(brandRect, 10.0f, 10.0f), brush.Get());
-        brush->SetColor(D2D1::ColorF(0.34f, 0.75f, 1.0f, 1.0f));
-        renderTarget_->FillRoundedRectangle(D2D1::RoundedRect(MakeRect(18.0f, 18.0f, 50.0f, 33.0f), 10.0f, 10.0f), brush.Get());
-        brush->SetColor(D2D1::ColorF(1, 1, 1, 0.11f));
-        renderTarget_->DrawRoundedRectangle(D2D1::RoundedRect(brandRect, 10.0f, 10.0f), brush.Get(), 1.0f);
+        brush->SetColor(D2D1::ColorF(1, 1, 1, 0.025f));
+        renderTarget_->FillRectangle(sidebar, brush.Get());
+        brush->SetColor(D2D1::ColorF(1, 1, 1, 0.08f));
+        renderTarget_->DrawLine(D2D1::Point2F(sidebarWidth - 0.5f, static_cast<float>(appHeaderHeight_)), D2D1::Point2F(sidebarWidth - 0.5f, static_cast<float>(rect.bottom)), brush.Get(), 1.0f);
 
-        ComPtr<IDWriteTextFormat> titleFormat;
-        dwriteFactory_->CreateTextFormat(L"Segoe UI", nullptr, DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, 19.0f, L"en-US", titleFormat.GetAddressOf());
-        titleFormat->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
-        ComPtr<IDWriteTextFormat> subtitleFormat;
-        dwriteFactory_->CreateTextFormat(L"Segoe UI", nullptr, DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, 12.5f, L"en-US", subtitleFormat.GetAddressOf());
-        subtitleFormat->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+        brush->SetColor(D2D1::ColorF(1, 1, 1, 0.015f));
+        renderTarget_->FillRectangle(content, brush.Get());
 
-        brush->SetColor(D2D1::ColorF(0.98f, 0.99f, 1.0f, 1.0f));
-        renderTarget_->DrawTextW(L"WSH", 3, titleFormat.Get(), MakeRect(64.0f, 16.0f, 130.0f, 48.0f), brush.Get());
+        const D2D1_RECT_F logoRect = MakeRect(titlePadLeft, 15.0f, titlePadLeft + logoSize, 15.0f + logoSize);
+        brush->SetColor(D2D1::ColorF(0.35f, 0.78f, 1.0f, 1.0f));
+        renderTarget_->FillRoundedRectangle(D2D1::RoundedRect(logoRect, 10.0f, 10.0f), brush.Get());
+        brush->SetColor(D2D1::ColorF(0.48f, 0.30f, 1.0f, 0.92f));
+        renderTarget_->FillRoundedRectangle(D2D1::RoundedRect(MakeRect(titlePadLeft + 12.0f, 23.0f, titlePadLeft + logoSize, 49.0f), 10.0f, 10.0f), brush.Get());
+        brush->SetColor(D2D1::ColorF(1, 1, 1, 0.16f));
+        renderTarget_->DrawRoundedRectangle(D2D1::RoundedRect(logoRect, 10.0f, 10.0f), brush.Get(), 1.0f);
 
-        std::wstring context = L"~/projects/wsh  •  PowerShell 7 | Admin";
+        ComPtr<IDWriteTextFormat> appNameFormat;
+        dwriteFactory_->CreateTextFormat(L"Segoe UI", nullptr, DWRITE_FONT_WEIGHT_BOLD, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, 20.0f, L"ru-RU", appNameFormat.GetAddressOf());
+        appNameFormat->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+        brush->SetColor(D2D1::ColorF(0.93f, 0.95f, 0.98f, 1.0f));
+        renderTarget_->DrawTextW(L"WSH", 3, appNameFormat.Get(), MakeRect(64.0f, 16.0f, 130.0f, 50.0f), brush.Get());
+
+        const float rightControlsWidth = iconButton + 3.0f * 42.0f + 12.0f;
+        const float centerLeft = 150.0f;
+        const float centerRight = static_cast<float>(rect.right) - rightControlsWidth - titlePadRight - 10.0f;
+        const float pillWidth = std::min(760.0f, std::max(360.0f, centerRight - centerLeft - 40.0f));
+        const float pillLeft = centerLeft + (centerRight - centerLeft - pillWidth) * 0.5f;
+        const D2D1_RECT_F pillRect = MakeRect(pillLeft, 13.0f, pillLeft + pillWidth, 51.0f);
+        brush->SetColor(D2D1::ColorF(1, 1, 1, 0.04f));
+        renderTarget_->FillRoundedRectangle(D2D1::RoundedRect(pillRect, 19.0f, 19.0f), brush.Get());
+        brush->SetColor(D2D1::ColorF(1, 1, 1, 0.07f));
+        renderTarget_->DrawRoundedRectangle(D2D1::RoundedRect(pillRect, 19.0f, 19.0f), brush.Get(), 1.0f);
+
+        ComPtr<IDWriteTextFormat> pillStrongFormat;
+        dwriteFactory_->CreateTextFormat(L"Segoe UI", nullptr, DWRITE_FONT_WEIGHT_BOLD, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, 14.0f, L"ru-RU", pillStrongFormat.GetAddressOf());
+        pillStrongFormat->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+        ComPtr<IDWriteTextFormat> pillFormat;
+        dwriteFactory_->CreateTextFormat(L"Segoe UI", nullptr, DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, 14.0f, L"ru-RU", pillFormat.GetAddressOf());
+        pillFormat->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+
+        brush->SetColor(D2D1::ColorF(0.93f, 0.95f, 0.98f, 1.0f));
+        renderTarget_->DrawTextW(L"Workspace", 9, pillStrongFormat.Get(), MakeRect(pillRect.left + 16.0f, pillRect.top + 8.0f, pillRect.left + 112.0f, pillRect.bottom), brush.Get());
+        brush->SetColor(D2D1::ColorF(0.66f, 0.70f, 0.78f, 1.0f));
+        renderTarget_->DrawTextW(L"•", 1, pillFormat.Get(), MakeRect(pillRect.left + 118.0f, pillRect.top + 8.0f, pillRect.left + 130.0f, pillRect.bottom), brush.Get());
+        const std::wstring mid = L"~/projects/wsh";
+        std::wstring rightText = L"PowerShell 7";
         if (workspace_ && workspace_->ActiveTab())
         {
-            const std::wstring active = workspace_->ActiveTab()->TitleSnapshot();
-            if (!active.empty())
+            const auto name = workspace_->ActiveTab()->ProfileName();
+            if (!name.empty())
             {
-                context = Ellipsize(active, 54);
+                rightText = name;
             }
         }
-        brush->SetColor(D2D1::ColorF(0.82f, 0.87f, 0.95f, 0.86f));
-        renderTarget_->DrawTextW(context.c_str(), static_cast<UINT32>(context.size()), subtitleFormat.Get(), MakeRect(152.0f, 20.0f, static_cast<float>(rect.right) - 230.0f, 48.0f), brush.Get());
+        brush->SetColor(D2D1::ColorF(0.77f, 0.80f, 0.87f, 1.0f));
+        renderTarget_->DrawTextW(mid.c_str(), static_cast<UINT32>(mid.size()), pillFormat.Get(), MakeRect(pillRect.left + 138.0f, pillRect.top + 8.0f, pillRect.left + 318.0f, pillRect.bottom), brush.Get());
+        brush->SetColor(D2D1::ColorF(0.66f, 0.70f, 0.78f, 1.0f));
+        renderTarget_->DrawTextW(L"•", 1, pillFormat.Get(), MakeRect(pillRect.left + 324.0f, pillRect.top + 8.0f, pillRect.left + 336.0f, pillRect.bottom), brush.Get());
+        brush->SetColor(D2D1::ColorF(0.77f, 0.80f, 0.87f, 1.0f));
+        renderTarget_->DrawTextW(rightText.c_str(), static_cast<UINT32>(rightText.size()), pillFormat.Get(), MakeRect(pillRect.left + 342.0f, pillRect.top + 8.0f, pillRect.right - 16.0f, pillRect.bottom), brush.Get());
+
+        const float iconLeft = static_cast<float>(rect.right) - rightControlsWidth - 8.0f;
+        const D2D1_RECT_F iconRect = MakeRect(iconLeft, 12.0f, iconLeft + iconButton, 52.0f);
+        brush->SetColor(D2D1::ColorF(1, 1, 1, 0.04f));
+        renderTarget_->FillRoundedRectangle(D2D1::RoundedRect(iconRect, 12.0f, 12.0f), brush.Get());
+        brush->SetColor(D2D1::ColorF(1, 1, 1, 0.07f));
+        renderTarget_->DrawRoundedRectangle(D2D1::RoundedRect(iconRect, 12.0f, 12.0f), brush.Get(), 1.0f);
+        brush->SetColor(D2D1::ColorF(0.90f, 0.92f, 0.96f, 0.95f));
+        const float ix = iconRect.left + 12.0f;
+        const float iy = iconRect.top + 12.0f;
+        renderTarget_->DrawLine(D2D1::Point2F(ix, iy), D2D1::Point2F(ix + 15.0f, iy), brush.Get(), 1.6f);
+        renderTarget_->DrawLine(D2D1::Point2F(ix, iy + 7.0f), D2D1::Point2F(ix + 11.0f, iy + 7.0f), brush.Get(), 1.6f);
+        renderTarget_->DrawLine(D2D1::Point2F(ix, iy + 14.0f), D2D1::Point2F(ix + 14.0f, iy + 14.0f), brush.Get(), 1.6f);
     }
 
-    void MainWindow::DrawWindowControls()
+        void MainWindow::DrawWindowControls()
     {
         RECT rect{};
         ::GetClientRect(hwnd_, &rect);
@@ -483,97 +540,68 @@ namespace wsh::app
         ComPtr<ID2D1SolidColorBrush> brush;
         renderTarget_->CreateSolidColorBrush(settings_.theme.foreground, brush.GetAddressOf());
 
-        const float buttonSize = 31.0f;
-        const float gap = 7.0f;
-        const float top = 17.5f;
-        float left = static_cast<float>(rect.right) - (buttonSize * 3.0f + gap * 2.0f) - 18.0f;
+        const float buttonSize = 42.0f;
+        const float gap = 4.0f;
+        const float top = 13.0f;
+        float left = static_cast<float>(rect.right) - (buttonSize * 3.0f + gap * 2.0f) - 16.0f;
 
         for (int i = 0; i < 3; ++i)
         {
             const bool hovered = hoveredWindowControl_ && *hoveredWindowControl_ == i;
             const bool pressed = pressedWindowControl_ && *pressedWindowControl_ == i;
-            const D2D1_RECT_F r = MakeRect(left, top, left + buttonSize, top + buttonSize);
+            const D2D1_RECT_F r = MakeRect(left, top, left + buttonSize, top + 38.0f);
 
-            const D2D1_COLOR_F fill = i == kControlClose
-                ? (pressed ? D2D1::ColorF(0.74f, 0.25f, 0.31f, 0.98f) : hovered ? D2D1::ColorF(0.78f, 0.28f, 0.34f, 0.94f) : D2D1::ColorF(0.17f, 0.20f, 0.30f, 0.92f))
-                : (pressed ? D2D1::ColorF(0.18f, 0.22f, 0.36f, 0.98f) : hovered ? D2D1::ColorF(0.19f, 0.24f, 0.38f, 0.95f) : D2D1::ColorF(0.13f, 0.16f, 0.25f, 0.88f));
-            const D2D1_COLOR_F stroke = i == kControlClose
-                ? D2D1::ColorF(1, 1, 1, hovered ? 0.16f : 0.09f)
-                : D2D1::ColorF(1, 1, 1, hovered ? 0.13f : 0.07f);
-
-            brush->SetColor(D2D1::ColorF(0.01f, 0.02f, 0.05f, 0.14f));
-            renderTarget_->FillRoundedRectangle(D2D1::RoundedRect(MakeRect(r.left, r.top + 6.0f, r.right, r.bottom + 6.0f), 10.0f, 10.0f), brush.Get());
+            D2D1_COLOR_F fill = D2D1::ColorF(1, 1, 1, hovered ? 0.08f : 0.0f);
+            if (pressed) fill = D2D1::ColorF(1, 1, 1, 0.12f);
+            if (i == kControlClose && hovered) fill = D2D1::ColorF(1.0f, 0.42f, 0.50f, pressed ? 0.28f : 0.16f);
             brush->SetColor(fill);
             renderTarget_->FillRoundedRectangle(D2D1::RoundedRect(r, 10.0f, 10.0f), brush.Get());
-            brush->SetColor(stroke);
-            renderTarget_->DrawRoundedRectangle(D2D1::RoundedRect(r, 10.0f, 10.0f), brush.Get(), 1.0f);
-            brush->SetColor(D2D1::ColorF(1, 1, 1, hovered ? 0.075f : 0.04f));
-            renderTarget_->FillRoundedRectangle(D2D1::RoundedRect(MakeRect(r.left + 1.0f, r.top + 1.0f, r.right - 1.0f, r.top + 10.0f), 9.0f, 9.0f), brush.Get());
 
-            brush->SetColor(D2D1::ColorF(0.96f, 0.98f, 1.0f, 0.98f));
+            brush->SetColor(D2D1::ColorF(0.92f, 0.95f, 0.98f, 0.96f));
             const float cx = (r.left + r.right) * 0.5f;
             const float cy = (r.top + r.bottom) * 0.5f;
-            switch (i)
+            if (i == kControlMinimize)
             {
-            case kControlMinimize:
-                renderTarget_->DrawLine(D2D1::Point2F(cx - 5.5f, cy + 4.0f), D2D1::Point2F(cx + 5.5f, cy + 4.0f), brush.Get(), 1.7f);
-                break;
-            case kControlMaximize:
-                if (::IsZoomed(hwnd_))
-                {
-                    renderTarget_->DrawRectangle(MakeRect(cx - 5.0f, cy - 2.5f, cx + 4.0f, cy + 6.5f), brush.Get(), 1.3f);
-                    renderTarget_->DrawRectangle(MakeRect(cx - 2.0f, cy - 5.5f, cx + 7.0f, cy + 3.5f), brush.Get(), 1.3f);
-                }
-                else
-                {
-                    renderTarget_->DrawRectangle(MakeRect(cx - 5.5f, cy - 5.5f, cx + 5.5f, cy + 5.5f), brush.Get(), 1.45f);
-                }
-                break;
-            case kControlClose:
-                renderTarget_->DrawLine(D2D1::Point2F(cx - 5.0f, cy - 5.0f), D2D1::Point2F(cx + 5.0f, cy + 5.0f), brush.Get(), 1.75f);
-                renderTarget_->DrawLine(D2D1::Point2F(cx + 5.0f, cy - 5.0f), D2D1::Point2F(cx - 5.0f, cy + 5.0f), brush.Get(), 1.75f);
-                break;
+                renderTarget_->DrawLine(D2D1::Point2F(cx - 7.0f, cy + 5.0f), D2D1::Point2F(cx + 7.0f, cy + 5.0f), brush.Get(), 1.7f);
             }
-
+            else if (i == kControlMaximize)
+            {
+                renderTarget_->DrawRoundedRectangle(D2D1::RoundedRect(MakeRect(cx - 7.0f, cy - 7.0f, cx + 7.0f, cy + 7.0f), 2.0f, 2.0f), brush.Get(), 1.55f);
+            }
+            else
+            {
+                renderTarget_->DrawLine(D2D1::Point2F(cx - 6.0f, cy - 6.0f), D2D1::Point2F(cx + 6.0f, cy + 6.0f), brush.Get(), 1.7f);
+                renderTarget_->DrawLine(D2D1::Point2F(cx + 6.0f, cy - 6.0f), D2D1::Point2F(cx - 6.0f, cy + 6.0f), brush.Get(), 1.7f);
+            }
             left += buttonSize + gap;
         }
     }
 
-    void MainWindow::DrawTabs()
+        void MainWindow::DrawTabs()
     {
         if (!workspace_)
         {
             return;
         }
 
+        RECT rect{};
+        ::GetClientRect(hwnd_, &rect);
+        constexpr float sidebarWidth = 268.0f;
+        const float stripTop = static_cast<float>(appHeaderHeight_);
+        const float stripBottom = stripTop + static_cast<float>(tabBarHeight_);
+
         ComPtr<ID2D1SolidColorBrush> brush;
         renderTarget_->CreateSolidColorBrush(settings_.theme.muted, brush.GetAddressOf());
+        brush->SetColor(D2D1::ColorF(1, 1, 1, 0.018f));
+        renderTarget_->FillRectangle(MakeRect(sidebarWidth, stripTop, static_cast<float>(rect.right), stripBottom), brush.Get());
+        brush->SetColor(D2D1::ColorF(1, 1, 1, 0.05f));
+        renderTarget_->DrawLine(D2D1::Point2F(sidebarWidth, stripBottom - 0.5f), D2D1::Point2F(static_cast<float>(rect.right), stripBottom - 0.5f), brush.Get(), 1.0f);
 
-        const D2D1_RECT_F stripRect = MakeRect(static_cast<float>(padding_) - 4.0f, static_cast<float>(appHeaderHeight_ + 8), static_cast<float>(padding_) + 784.0f, static_cast<float>(appHeaderHeight_ + tabBarHeight_ - 2));
-        brush->SetColor(D2D1::ColorF(1, 1, 1, 0.026f));
-        renderTarget_->FillRoundedRectangle(D2D1::RoundedRect(stripRect, 18.0f, 18.0f), brush.Get());
-        brush->SetColor(D2D1::ColorF(0.66f, 0.78f, 1.0f, 0.05f));
-        renderTarget_->FillRoundedRectangle(D2D1::RoundedRect(MakeRect(stripRect.left + 1.0f, stripRect.top + 1.0f, stripRect.right - 1.0f, stripRect.top + 15.0f), 17.0f, 17.0f), brush.Get());
-
-        const auto drawPill = [&](const D2D1_RECT_F& r, const D2D1_COLOR_F& fill, const D2D1_COLOR_F& stroke, const float glowAlpha, const bool active)
-        {
-            brush->SetColor(D2D1::ColorF(0.01f, 0.02f, 0.05f, glowAlpha));
-            renderTarget_->FillRoundedRectangle(D2D1::RoundedRect(MakeRect(r.left, r.top + 7.0f, r.right, r.bottom + 8.0f), 16.0f, 16.0f), brush.Get());
-            brush->SetColor(fill);
-            renderTarget_->FillRoundedRectangle(D2D1::RoundedRect(r, 16.0f, 16.0f), brush.Get());
-            brush->SetColor(stroke);
-            renderTarget_->DrawRoundedRectangle(D2D1::RoundedRect(r, 16.0f, 16.0f), brush.Get(), 1.0f);
-            brush->SetColor(active ? D2D1::ColorF(0.70f, 0.56f, 1.0f, 0.17f) : D2D1::ColorF(1, 1, 1, 0.035f));
-            renderTarget_->FillRoundedRectangle(D2D1::RoundedRect(MakeRect(r.left + 1.0f, r.top + 1.0f, r.right - 1.0f, r.top + 12.0f), 15.0f, 15.0f), brush.Get());
-            brush->SetColor(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.10f));
-            renderTarget_->DrawLine(D2D1::Point2F(r.left + 10.0f, r.bottom - 1.0f), D2D1::Point2F(r.right - 10.0f, r.bottom - 1.0f), brush.Get(), 1.0f);
-        };
-
-        float x = static_cast<float>(padding_);
-        const float top = static_cast<float>(appHeaderHeight_ + 14);
-        const float height = 44.0f;
-        const float width = 178.0f;
         const auto& tabs = workspace_->Tabs();
+        float x = sidebarWidth + 12.0f;
+        const float top = stripTop + 10.0f;
+        const float height = 38.0f;
+        const float width = 178.0f;
 
         for (size_t i = 0; i < tabs.size(); ++i)
         {
@@ -581,48 +609,78 @@ namespace wsh::app
             const bool hovered = hoveredTab_ && *hoveredTab_ == i;
             const bool closeHovered = hoveredCloseTab_ && *hoveredCloseTab_ == i;
             const D2D1_RECT_F tabRect = MakeRect(x, top, x + width, top + height);
-            drawPill(tabRect,
-                active ? D2D1::ColorF(0.30f, 0.21f, 0.52f, 0.99f) : (hovered ? D2D1::ColorF(0.16f, 0.19f, 0.29f, 0.98f) : D2D1::ColorF(0.13f, 0.16f, 0.24f, 0.95f)),
-                active ? D2D1::ColorF(0.67f, 0.43f, 1.0f, 0.75f) : D2D1::ColorF(1, 1, 1, hovered ? 0.10f : 0.055f),
-                active ? 0.18f : 0.10f,
-                active);
-
-            brush->SetColor(active ? D2D1::ColorF(0.69f, 0.46f, 1.0f, 0.90f) : D2D1::ColorF(1, 1, 1, 0.03f));
-            renderTarget_->FillRoundedRectangle(D2D1::RoundedRect(MakeRect(x + 10.0f, top + height - 4.0f, x + width - 10.0f, top + height - 1.0f), 2.0f, 2.0f), brush.Get());
-
-            brush->SetColor(active ? D2D1::ColorF(0.98f, 0.99f, 1.0f, 1.0f) : D2D1::ColorF(0.83f, 0.86f, 0.92f, 0.95f));
-            const std::wstring tabTitle = Ellipsize(BuildTabLabel(i), 13);
-            renderTarget_->DrawTextW(tabTitle.c_str(), static_cast<UINT32>(tabTitle.size()), uiFormat_.Get(), MakeRect(x + 18.0f, top + 9.0f, x + width - 48.0f, top + height), brush.Get());
-
-            const float closeSize = 22.0f;
-            const float closeLeft = x + width - 34.0f;
-            const float closeTop = top + (height - closeSize) * 0.5f;
-            const D2D1_RECT_F closeRect = MakeRect(closeLeft, closeTop, closeLeft + closeSize, closeTop + closeSize);
-            brush->SetColor(closeHovered ? D2D1::ColorF(0.44f, 0.22f, 0.29f, 0.92f) : D2D1::ColorF(1, 1, 1, active ? 0.055f : 0.032f));
-            renderTarget_->FillRoundedRectangle(D2D1::RoundedRect(closeRect, 11.0f, 11.0f), brush.Get());
-            brush->SetColor(closeHovered ? D2D1::ColorF(1.0f, 0.72f, 0.74f, 1.0f) : D2D1::ColorF(0.82f, 0.85f, 0.92f, 0.92f));
+            brush->SetColor(active ? D2D1::ColorF(0.44f, 0.26f, 0.82f, 0.22f) : D2D1::ColorF(1, 1, 1, hovered ? 0.065f : 0.035f));
+            renderTarget_->FillRoundedRectangle(D2D1::RoundedRect(tabRect, 13.0f, 13.0f), brush.Get());
+            brush->SetColor(active ? D2D1::ColorF(0.55f, 0.36f, 0.96f, 0.40f) : D2D1::ColorF(1, 1, 1, 0.05f));
+            renderTarget_->DrawRoundedRectangle(D2D1::RoundedRect(tabRect, 13.0f, 13.0f), brush.Get(), 1.0f);
+            if (active)
+            {
+                brush->SetColor(D2D1::ColorF(0.55f, 0.36f, 0.96f, 0.92f));
+                renderTarget_->FillRectangle(MakeRect(x + 12.0f, top + height - 3.0f, x + width - 12.0f, top + height - 1.0f), brush.Get());
+            }
+            const D2D1_RECT_F iconRect = MakeRect(x + 10.0f, top + 11.0f, x + 25.0f, top + 26.0f);
+            brush->SetColor(D2D1::ColorF(0.35f, 0.77f, 1.0f, 1.0f));
+            renderTarget_->FillRoundedRectangle(D2D1::RoundedRect(iconRect, 5.0f, 5.0f), brush.Get());
+            brush->SetColor(D2D1::ColorF(0.31f, 0.55f, 1.0f, 0.95f));
+            renderTarget_->FillRoundedRectangle(D2D1::RoundedRect(MakeRect(iconRect.left + 6.0f, iconRect.top + 5.0f, iconRect.right, iconRect.bottom), 5.0f, 5.0f), brush.Get());
+            brush->SetColor(active ? D2D1::ColorF(0.93f, 0.95f, 0.98f, 1.0f) : D2D1::ColorF(0.66f, 0.71f, 0.79f, 1.0f));
+            const std::wstring tabTitle = Ellipsize(BuildTabLabel(i), 16);
+            renderTarget_->DrawTextW(tabTitle.c_str(), static_cast<UINT32>(tabTitle.size()), uiFormat_.Get(), MakeRect(x + 33.0f, top + 8.0f, x + width - 30.0f, top + height), brush.Get());
+            const float closeSize = 18.0f;
+            const float closeLeft = x + width - 26.0f;
+            const float closeTop = top + 10.0f;
+            brush->SetColor(closeHovered ? D2D1::ColorF(1, 1, 1, 0.10f) : D2D1::ColorF(1, 1, 1, 0.0f));
+            renderTarget_->FillRoundedRectangle(D2D1::RoundedRect(MakeRect(closeLeft, closeTop, closeLeft + closeSize, closeTop + closeSize), 9.0f, 9.0f), brush.Get());
+            brush->SetColor(D2D1::ColorF(0.79f, 0.83f, 0.90f, closeHovered ? 1.0f : 0.75f));
             const float cx = closeLeft + closeSize * 0.5f;
             const float cy = closeTop + closeSize * 0.5f;
-            renderTarget_->DrawLine(D2D1::Point2F(cx - 4.0f, cy - 4.0f), D2D1::Point2F(cx + 4.0f, cy + 4.0f), brush.Get(), 1.45f);
-            renderTarget_->DrawLine(D2D1::Point2F(cx + 4.0f, cy - 4.0f), D2D1::Point2F(cx - 4.0f, cy + 4.0f), brush.Get(), 1.45f);
-
-            x += width + 12.0f;
+            renderTarget_->DrawLine(D2D1::Point2F(cx - 3.5f, cy - 3.5f), D2D1::Point2F(cx + 3.5f, cy + 3.5f), brush.Get(), 1.35f);
+            renderTarget_->DrawLine(D2D1::Point2F(cx + 3.5f, cy - 3.5f), D2D1::Point2F(cx - 3.5f, cy + 3.5f), brush.Get(), 1.35f);
+            x += width + 8.0f;
         }
-
-        const D2D1_RECT_F newRect = MakeRect(x, top, x + 44.0f, top + height);
-        drawPill(newRect,
-            hoverNewTabButton_ ? D2D1::ColorF(0.17f, 0.20f, 0.30f, 0.96f) : D2D1::ColorF(0.13f, 0.16f, 0.24f, 0.92f),
-            D2D1::ColorF(1, 1, 1, hoverNewTabButton_ ? 0.10f : 0.055f),
-            0.10f,
-            false);
-        brush->SetColor(D2D1::ColorF(0.97f, 0.99f, 1.0f, 1.0f));
-        const float cx = x + 22.0f;
-        const float cy = top + height * 0.5f;
-        renderTarget_->DrawLine(D2D1::Point2F(cx - 5.0f, cy), D2D1::Point2F(cx + 5.0f, cy), brush.Get(), 1.7f);
-        renderTarget_->DrawLine(D2D1::Point2F(cx, cy - 5.0f), D2D1::Point2F(cx, cy + 5.0f), brush.Get(), 1.7f);
+        const D2D1_RECT_F addRect = MakeRect(x, top, x + 38.0f, top + height);
+        brush->SetColor(D2D1::ColorF(1, 1, 1, hoverNewTabButton_ ? 0.065f : 0.035f));
+        renderTarget_->FillRoundedRectangle(D2D1::RoundedRect(addRect, 13.0f, 13.0f), brush.Get());
+        brush->SetColor(D2D1::ColorF(1, 1, 1, 0.05f));
+        renderTarget_->DrawRoundedRectangle(D2D1::RoundedRect(addRect, 13.0f, 13.0f), brush.Get(), 1.0f);
+        brush->SetColor(D2D1::ColorF(0.90f, 0.93f, 0.97f, 0.95f));
+        const float plusCx = x + 19.0f;
+        const float plusCy = top + 19.0f;
+        renderTarget_->DrawLine(D2D1::Point2F(plusCx - 5.0f, plusCy), D2D1::Point2F(plusCx + 5.0f, plusCy), brush.Get(), 1.7f);
+        renderTarget_->DrawLine(D2D1::Point2F(plusCx, plusCy - 5.0f), D2D1::Point2F(plusCx, plusCy + 5.0f), brush.Get(), 1.7f);
+        const float actionsRight = static_cast<float>(rect.right) - 12.0f;
+        float actionLeft = actionsRight - 3.0f * 40.0f - 8.0f;
+        for (int i = 0; i < 3; ++i)
+        {
+            const D2D1_RECT_F a = MakeRect(actionLeft, top - 1.0f, actionLeft + 40.0f, top + 39.0f);
+            brush->SetColor(D2D1::ColorF(1, 1, 1, 0.03f));
+            renderTarget_->FillRoundedRectangle(D2D1::RoundedRect(a, 12.0f, 12.0f), brush.Get());
+            brush->SetColor(D2D1::ColorF(1, 1, 1, 0.07f));
+            renderTarget_->DrawRoundedRectangle(D2D1::RoundedRect(a, 12.0f, 12.0f), brush.Get(), 1.0f);
+            brush->SetColor(D2D1::ColorF(0.88f, 0.91f, 0.97f, 0.92f));
+            const float cx = (a.left + a.right) * 0.5f;
+            const float cy = (a.top + a.bottom) * 0.5f;
+            if (i == 0)
+            {
+                renderTarget_->DrawLine(D2D1::Point2F(cx - 7.0f, cy), D2D1::Point2F(cx + 7.0f, cy), brush.Get(), 1.6f);
+                renderTarget_->DrawLine(D2D1::Point2F(cx - 7.0f, cy - 6.0f), D2D1::Point2F(cx + 7.0f, cy - 6.0f), brush.Get(), 1.6f);
+                renderTarget_->DrawLine(D2D1::Point2F(cx - 7.0f, cy + 6.0f), D2D1::Point2F(cx + 3.0f, cy + 6.0f), brush.Get(), 1.6f);
+            }
+            else if (i == 1)
+            {
+                renderTarget_->DrawRectangle(MakeRect(cx - 7.0f, cy - 7.0f, cx + 7.0f, cy + 7.0f), brush.Get(), 1.4f);
+                renderTarget_->DrawLine(D2D1::Point2F(cx, cy - 7.0f), D2D1::Point2F(cx, cy + 7.0f), brush.Get(), 1.2f);
+            }
+            else
+            {
+                renderTarget_->DrawLine(D2D1::Point2F(cx - 7.0f, cy), D2D1::Point2F(cx + 7.0f, cy), brush.Get(), 1.6f);
+                renderTarget_->DrawLine(D2D1::Point2F(cx, cy - 7.0f), D2D1::Point2F(cx, cy + 7.0f), brush.Get(), 1.6f);
+            }
+            actionLeft += 44.0f;
+        }
     }
 
-    void MainWindow::DrawTerminal()
+        void MainWindow::DrawTerminal()
     {
         auto* tab = workspace_ ? workspace_->ActiveTab() : nullptr;
         if (tab == nullptr)
@@ -630,148 +688,264 @@ namespace wsh::app
             return;
         }
 
-        const float cardLeft = static_cast<float>(padding_);
-        const float cardTop = static_cast<float>(appHeaderHeight_ + tabBarHeight_ + 22);
-        const float cardRight = cardLeft + terminalColumns_ * charWidth_ + 32.0f;
-        const float cardBottom = cardTop + terminalRows_ * lineHeight_ + statusBarHeight_ + 42.0f;
-        const float left = cardLeft + 18.0f;
-        const float top = cardTop + 18.0f;
-        const float bottom = top + terminalRows_ * lineHeight_ + 8.0f;
+        RECT rect{};
+        ::GetClientRect(hwnd_, &rect);
+
+        constexpr float sidebarWidth = 268.0f;
+        constexpr float terminalWrapPadding = 14.0f;
+        constexpr float shellHeaderHeight = 42.0f;
+        constexpr float shellInnerMargin = 12.0f;
+        constexpr float termPadX = 26.0f;
+        constexpr float termPadY = 24.0f;
+
+        const float contentLeft = sidebarWidth;
+        const float contentTop = static_cast<float>(appHeaderHeight_ + tabBarHeight_);
+        const float contentBottom = static_cast<float>(rect.bottom - statusBarHeight_);
 
         ComPtr<ID2D1SolidColorBrush> brush;
         renderTarget_->CreateSolidColorBrush(settings_.theme.foreground, brush.GetAddressOf());
 
-        brush->SetColor(D2D1::ColorF(0.01f, 0.02f, 0.05f, 0.16f));
-        renderTarget_->FillRoundedRectangle(D2D1::RoundedRect(MakeRect(cardLeft, cardTop + 12.0f, cardRight, cardBottom + 12.0f), 24.0f, 24.0f), brush.Get());
-        brush->SetColor(D2D1::ColorF(0.09f, 0.12f, 0.21f, 0.94f));
-        renderTarget_->FillRoundedRectangle(D2D1::RoundedRect(MakeRect(cardLeft, cardTop, cardRight, cardBottom), 24.0f, 24.0f), brush.Get());
-        brush->SetColor(D2D1::ColorF(1, 1, 1, 0.065f));
-        renderTarget_->DrawRoundedRectangle(D2D1::RoundedRect(MakeRect(cardLeft, cardTop, cardRight, cardBottom), 24.0f, 24.0f), brush.Get(), 1.0f);
-        brush->SetColor(D2D1::ColorF(0.66f, 0.78f, 1.0f, 0.030f));
-        renderTarget_->FillRoundedRectangle(D2D1::RoundedRect(MakeRect(cardLeft + 1.0f, cardTop + 1.0f, cardRight - 1.0f, cardTop + 24.0f), 23.0f, 23.0f), brush.Get());
-        brush->SetColor(D2D1::ColorF(1, 1, 1, 0.025f));
-        renderTarget_->DrawRoundedRectangle(D2D1::RoundedRect(MakeRect(cardLeft + 1.0f, cardTop + 1.0f, cardRight - 1.0f, cardBottom - 1.0f), 23.0f, 23.0f), brush.Get(), 1.0f);
-
-        brush->SetColor(D2D1::ColorF(0.04f, 0.07f, 0.13f, 0.99f));
-        renderTarget_->FillRoundedRectangle(D2D1::RoundedRect(MakeRect(left - 8.0f, top - 8.0f, left + terminalColumns_ * charWidth_ + 12.0f, bottom + 8.0f), 18.0f, 18.0f), brush.Get());
+        const D2D1_RECT_F searchRect = MakeRect(14.0f, appHeaderHeight_ + 16.0f, sidebarWidth - 14.0f, appHeaderHeight_ + 60.0f);
         brush->SetColor(D2D1::ColorF(1, 1, 1, 0.035f));
-        renderTarget_->DrawRoundedRectangle(D2D1::RoundedRect(MakeRect(left - 8.0f, top - 8.0f, left + terminalColumns_ * charWidth_ + 12.0f, bottom + 8.0f), 18.0f, 18.0f), brush.Get(), 1.0f);
+        renderTarget_->FillRoundedRectangle(D2D1::RoundedRect(searchRect, 14.0f, 14.0f), brush.Get());
+        brush->SetColor(D2D1::ColorF(1, 1, 1, 0.06f));
+        renderTarget_->DrawRoundedRectangle(D2D1::RoundedRect(searchRect, 14.0f, 14.0f), brush.Get(), 1.0f);
+        brush->SetColor(D2D1::ColorF(0.67f, 0.71f, 0.79f, 0.96f));
+        renderTarget_->DrawTextW(L"Search sessions", 15, uiFormat_.Get(), MakeRect(52.0f, appHeaderHeight_ + 29.0f, sidebarWidth - 20.0f, appHeaderHeight_ + 54.0f), brush.Get());
+        const float sx = 28.0f;
+        const float sy = static_cast<float>(appHeaderHeight_) + 28.0f;
+        renderTarget_->DrawEllipse(D2D1::Ellipse(D2D1::Point2F(sx + 7.0f, sy + 7.0f), 6.5f, 6.5f), brush.Get(), 1.4f);
+        renderTarget_->DrawLine(D2D1::Point2F(sx + 12.0f, sy + 12.0f), D2D1::Point2F(sx + 18.0f, sy + 18.0f), brush.Get(), 1.4f);
 
-        renderTarget_->PushAxisAlignedClip(MakeRect(left, top, left + terminalColumns_ * charWidth_, top + terminalRows_ * lineHeight_), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+        ComPtr<IDWriteTextFormat> smallCaps;
+        dwriteFactory_->CreateTextFormat(L"Segoe UI", nullptr, DWRITE_FONT_WEIGHT_BOLD, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, 12.0f, L"ru-RU", smallCaps.GetAddressOf());
+        smallCaps->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+        brush->SetColor(D2D1::ColorF(0.49f, 0.54f, 0.64f, 1.0f));
+        renderTarget_->DrawTextW(L"SESSIONS", 8, smallCaps.Get(), MakeRect(20.0f, appHeaderHeight_ + 78.0f, sidebarWidth - 20.0f, appHeaderHeight_ + 100.0f), brush.Get());
 
+        const std::wstring sessionSubs[] = {L"C:\\projects\\wsh", L"~/src/wsh", L"docker compose up", L"repo maintenance"};
+        const D2D1_COLOR_F badgeColors[] = {
+            D2D1::ColorF(0.49f, 0.91f, 0.53f, 1.0f),
+            D2D1::ColorF(0.31f, 0.55f, 1.0f, 1.0f),
+            D2D1::ColorF(0.96f, 0.76f, 0.47f, 1.0f),
+            D2D1::ColorF(0.49f, 0.91f, 0.53f, 1.0f)
+        };
+        const D2D1_COLOR_F iconColors[] = {
+            D2D1::ColorF(0.35f, 0.77f, 1.0f, 1.0f),
+            D2D1::ColorF(0.47f, 0.51f, 0.56f, 1.0f),
+            D2D1::ColorF(0.39f, 0.45f, 0.54f, 1.0f),
+            D2D1::ColorF(0.20f, 0.83f, 0.60f, 1.0f)
+        };
+
+        const size_t shown = std::min<size_t>(4, settings_.profiles.size());
+        for (size_t i = 0; i < shown; ++i)
+        {
+            const bool active = workspace_ && i == workspace_->ActiveIndex();
+            const float itemTop = static_cast<float>(appHeaderHeight_) + 108.0f + static_cast<float>(i) * 66.0f;
+            const D2D1_RECT_F itemRect = MakeRect(14.0f, itemTop, sidebarWidth - 14.0f, itemTop + 58.0f);
+            brush->SetColor(active ? D2D1::ColorF(0.55f, 0.36f, 0.96f, 0.18f) : D2D1::ColorF(1, 1, 1, 0.0f));
+            renderTarget_->FillRoundedRectangle(D2D1::RoundedRect(itemRect, 16.0f, 16.0f), brush.Get());
+            brush->SetColor(active ? D2D1::ColorF(0.55f, 0.36f, 0.96f, 0.26f) : D2D1::ColorF(1, 1, 1, 0.05f));
+            renderTarget_->DrawRoundedRectangle(D2D1::RoundedRect(itemRect, 16.0f, 16.0f), brush.Get(), 1.0f);
+            const D2D1_RECT_F iconRect = MakeRect(26.0f, itemTop + 12.0f, 60.0f, itemTop + 46.0f);
+            brush->SetColor(iconColors[i]);
+            renderTarget_->FillRoundedRectangle(D2D1::RoundedRect(iconRect, 10.0f, 10.0f), brush.Get());
+            brush->SetColor(D2D1::ColorF(1, 1, 1, 0.95f));
+            const wchar_t letter = settings_.profiles[i].name.empty() ? L'?' : static_cast<wchar_t>(std::towupper(settings_.profiles[i].name[0]));
+            const wchar_t one[2] = { letter, 0 };
+            renderTarget_->DrawTextW(one, 1, uiFormat_.Get(), MakeRect(37.0f, itemTop + 17.0f, 50.0f, itemTop + 38.0f), brush.Get());
+            brush->SetColor(D2D1::ColorF(0.93f, 0.95f, 0.98f, 1.0f));
+            const std::wstring name = Ellipsize(settings_.profiles[i].name, 16);
+            renderTarget_->DrawTextW(name.c_str(), static_cast<UINT32>(name.size()), uiFormat_.Get(), MakeRect(72.0f, itemTop + 10.0f, sidebarWidth - 42.0f, itemTop + 30.0f), brush.Get());
+            brush->SetColor(D2D1::ColorF(0.49f, 0.54f, 0.64f, 0.95f));
+            renderTarget_->DrawTextW(sessionSubs[i].c_str(), static_cast<UINT32>(sessionSubs[i].size()), uiFormat_.Get(), MakeRect(72.0f, itemTop + 28.0f, sidebarWidth - 42.0f, itemTop + 48.0f), brush.Get());
+            brush->SetColor(badgeColors[i]);
+            renderTarget_->FillEllipse(D2D1::Ellipse(D2D1::Point2F(sidebarWidth - 30.0f, itemTop + 29.0f), 5.0f, 5.0f), brush.Get());
+        }
+
+        brush->SetColor(D2D1::ColorF(0.49f, 0.54f, 0.64f, 1.0f));
+        renderTarget_->DrawTextW(L"WORKSPACE", 9, smallCaps.Get(), MakeRect(20.0f, appHeaderHeight_ + 382.0f, sidebarWidth - 20.0f, appHeaderHeight_ + 402.0f), brush.Get());
+        const D2D1_RECT_F queueRect = MakeRect(14.0f, appHeaderHeight_ + 412.0f, sidebarWidth - 14.0f, appHeaderHeight_ + 470.0f);
+        brush->SetColor(D2D1::ColorF(1, 1, 1, 0.03f));
+        renderTarget_->FillRoundedRectangle(D2D1::RoundedRect(queueRect, 16.0f, 16.0f), brush.Get());
+        brush->SetColor(D2D1::ColorF(1, 1, 1, 0.05f));
+        renderTarget_->DrawRoundedRectangle(D2D1::RoundedRect(queueRect, 16.0f, 16.0f), brush.Get(), 1.0f);
+        brush->SetColor(D2D1::ColorF(0.93f, 0.95f, 0.98f, 1.0f));
+        renderTarget_->DrawTextW(L"Build queue", 11, uiFormat_.Get(), MakeRect(26.0f, appHeaderHeight_ + 426.0f, 160.0f, appHeaderHeight_ + 444.0f), brush.Get());
+        brush->SetColor(D2D1::ColorF(0.49f, 0.54f, 0.64f, 0.96f));
+        renderTarget_->DrawTextW(L"2 running tasks", 15, uiFormat_.Get(), MakeRect(26.0f, appHeaderHeight_ + 444.0f, 180.0f, appHeaderHeight_ + 462.0f), brush.Get());
+        brush->SetColor(D2D1::ColorF(0.96f, 0.76f, 0.47f, 1.0f));
+        renderTarget_->FillEllipse(D2D1::Ellipse(D2D1::Point2F(sidebarWidth - 30.0f, appHeaderHeight_ + 441.0f), 5.0f, 5.0f), brush.Get());
+
+        const D2D1_RECT_F footerRect = MakeRect(14.0f, static_cast<float>(rect.bottom) - 132.0f, sidebarWidth - 14.0f, static_cast<float>(rect.bottom) - 18.0f);
+        brush->SetColor(D2D1::ColorF(1, 1, 1, 0.035f));
+        renderTarget_->FillRoundedRectangle(D2D1::RoundedRect(footerRect, 18.0f, 18.0f), brush.Get());
+        brush->SetColor(D2D1::ColorF(1, 1, 1, 0.06f));
+        renderTarget_->DrawRoundedRectangle(D2D1::RoundedRect(footerRect, 18.0f, 18.0f), brush.Get(), 1.0f);
+        brush->SetColor(D2D1::ColorF(0.93f, 0.95f, 0.98f, 1.0f));
+        renderTarget_->DrawTextW(L"WSH Workspace", 13, uiFormat_.Get(), MakeRect(28.0f, footerRect.top + 16.0f, footerRect.right - 18.0f, footerRect.top + 36.0f), brush.Get());
+        brush->SetColor(D2D1::ColorF(0.67f, 0.71f, 0.79f, 0.95f));
+        const std::wstring footerText = L"Material-styled terminal shell with"
+                                         L"sessions, tabs, command palette and"
+                                         L"desktop-oriented window controls.";
+        renderTarget_->DrawTextW(footerText.c_str(), static_cast<UINT32>(footerText.size()), uiFormat_.Get(), MakeRect(28.0f, footerRect.top + 42.0f, footerRect.right - 18.0f, footerRect.bottom - 14.0f), brush.Get());
+
+        const float shellLeft = contentLeft + terminalWrapPadding;
+        const float shellTop = contentTop + terminalWrapPadding;
+        const float shellRight = static_cast<float>(rect.right) - terminalWrapPadding;
+        const float shellBottom = contentBottom - terminalWrapPadding;
+        const D2D1_RECT_F shellRect = MakeRect(shellLeft, shellTop, shellRight, shellBottom);
+        brush->SetColor(D2D1::ColorF(0.01f, 0.02f, 0.04f, 0.28f));
+        renderTarget_->FillRoundedRectangle(D2D1::RoundedRect(MakeRect(shellLeft, shellTop + 8.0f, shellRight, shellBottom + 10.0f), 22.0f, 22.0f), brush.Get());
+        brush->SetColor(D2D1::ColorF(1, 1, 1, 0.025f));
+        renderTarget_->FillRoundedRectangle(D2D1::RoundedRect(shellRect, 22.0f, 22.0f), brush.Get());
+        brush->SetColor(D2D1::ColorF(1, 1, 1, 0.07f));
+        renderTarget_->DrawRoundedRectangle(D2D1::RoundedRect(shellRect, 22.0f, 22.0f), brush.Get(), 1.0f);
+
+        const D2D1_RECT_F topline = MakeRect(shellLeft, shellTop, shellRight, shellTop + shellHeaderHeight);
+        brush->SetColor(D2D1::ColorF(1, 1, 1, 0.02f));
+        renderTarget_->FillRoundedRectangle(D2D1::RoundedRect(topline, 22.0f, 22.0f), brush.Get());
+        brush->SetColor(D2D1::ColorF(1, 1, 1, 0.05f));
+        renderTarget_->DrawLine(D2D1::Point2F(shellLeft, shellTop + shellHeaderHeight - 0.5f), D2D1::Point2F(shellRight, shellTop + shellHeaderHeight - 0.5f), brush.Get(), 1.0f);
+        const D2D1_COLOR_F trafficColors[] = {D2D1::ColorF(1.0f, 0.42f, 0.50f, 1.0f), D2D1::ColorF(0.96f, 0.76f, 0.47f, 1.0f), D2D1::ColorF(0.49f, 0.91f, 0.53f, 1.0f)};
+        for (int i = 0; i < 3; ++i)
+        {
+            brush->SetColor(trafficColors[i]);
+            renderTarget_->FillEllipse(D2D1::Ellipse(D2D1::Point2F(shellLeft + 22.0f + i * 18.0f, shellTop + 21.0f), 5.0f, 5.0f), brush.Get());
+        }
+        ComPtr<IDWriteTextFormat> metaFormat;
+        dwriteFactory_->CreateTextFormat(L"Segoe UI", nullptr, DWRITE_FONT_WEIGHT_BOLD, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, 13.0f, L"ru-RU", metaFormat.GetAddressOf());
+        metaFormat->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+        brush->SetColor(D2D1::ColorF(0.66f, 0.71f, 0.79f, 0.98f));
+        std::wstring termTitle = L"LOCAL SHELL • ACTIVE SESSION";
+        renderTarget_->DrawTextW(termTitle.c_str(), static_cast<UINT32>(termTitle.size()), metaFormat.Get(), MakeRect(shellLeft + 86.0f, shellTop + 13.0f, shellLeft + 320.0f, shellTop + 34.0f), brush.Get());
+        std::wstring meta = workspace_ && workspace_->ActiveTab() ? Ellipsize(workspace_->ActiveTab()->TitleSnapshot().empty() ? workspace_->ActiveTab()->ProfileName() : workspace_->ActiveTab()->TitleSnapshot(), 36) : L"Ready";
+        brush->SetColor(D2D1::ColorF(0.49f, 0.54f, 0.64f, 0.96f));
+        renderTarget_->DrawTextW(meta.c_str(), static_cast<UINT32>(meta.size()), uiFormat_.Get(), MakeRect(shellRight - 320.0f, shellTop + 13.0f, shellRight - 16.0f, shellTop + 34.0f), brush.Get());
+
+        const float termOuterLeft = shellLeft + shellInnerMargin;
+        const float termOuterTop = shellTop + shellHeaderHeight + shellInnerMargin;
+        const float termOuterRight = shellRight - shellInnerMargin;
+        const float termOuterBottom = shellBottom - shellInnerMargin;
+        brush->SetColor(D2D1::ColorF(0.04f, 0.06f, 0.09f, 1.0f));
+        renderTarget_->FillRoundedRectangle(D2D1::RoundedRect(MakeRect(termOuterLeft, termOuterTop, termOuterRight, termOuterBottom), 18.0f, 18.0f), brush.Get());
+        brush->SetColor(D2D1::ColorF(1, 1, 1, 0.05f));
+        renderTarget_->DrawRoundedRectangle(D2D1::RoundedRect(MakeRect(termOuterLeft, termOuterTop, termOuterRight, termOuterBottom), 18.0f, 18.0f), brush.Get(), 1.0f);
+
+        const float left = termOuterLeft + termPadX;
+        const float top = termOuterTop + termPadY;
+        const float clipRight = left + terminalColumns_ * charWidth_;
+        const float clipBottom = top + terminalRows_ * lineHeight_;
+        renderTarget_->PushAxisAlignedClip(MakeRect(left, top, clipRight, clipBottom), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
         const auto selectionLeft = selectionStart_ && selectionEnd_ ? std::min(*selectionStart_, *selectionEnd_) : wsh::terminal::SelectionPoint{};
         const auto selectionRight = selectionStart_ && selectionEnd_ ? std::max(*selectionStart_, *selectionEnd_) : wsh::terminal::SelectionPoint{};
         const bool hasSelection = selectionStart_.has_value() && selectionEnd_.has_value();
-
         std::scoped_lock lock(tab->Mutex());
         const auto& lines = tab->Buffer().Lines();
         const int viewportTop = tab->Buffer().ViewportTop();
         for (int row = 0; row < terminalRows_; ++row)
         {
             const int bufferRow = viewportTop + row;
-            if (bufferRow >= static_cast<int>(lines.size()))
-            {
-                break;
-            }
-
+            if (bufferRow >= static_cast<int>(lines.size())) break;
             const float y = top + row * lineHeight_;
             for (int column = 0; column < terminalColumns_ && column < static_cast<int>(lines[bufferRow].size()); ++column)
             {
                 const auto& cell = lines[bufferRow][column];
                 const float x = left + column * charWidth_;
                 const bool selected = hasSelection && wsh::terminal::SelectionPoint{ bufferRow, column } >= selectionLeft && wsh::terminal::SelectionPoint{ bufferRow, column } <= selectionRight;
-
                 D2D1_COLOR_F background = cell.background;
                 D2D1_COLOR_F foreground = cell.foreground;
-                if (cell.inverse)
-                {
-                    std::swap(background, foreground);
-                }
-
+                if (cell.inverse) std::swap(background, foreground);
                 if (background.a > 0.01f)
                 {
                     brush->SetColor(background);
                     renderTarget_->FillRectangle(MakeRect(x, y, x + charWidth_, y + lineHeight_), brush.Get());
                 }
-
                 if (selected)
                 {
-                    brush->SetColor(D2D1::ColorF(0.28f, 0.46f, 0.86f, 0.82f));
+                    brush->SetColor(D2D1::ColorF(0.55f, 0.36f, 0.96f, 0.36f));
                     renderTarget_->FillRectangle(MakeRect(x, y, x + charWidth_, y + lineHeight_), brush.Get());
                     foreground = D2D1::ColorF(1.0f, 1.0f, 1.0f, 1.0f);
                 }
-
                 brush->SetColor(foreground);
-                const wchar_t glyph[2] = { cell.glyph == L'\0' ? L' ' : cell.glyph, 0 };
+                const wchar_t glyph[2] = { cell.glyph == L'\000' ? L' ' : cell.glyph, (wchar_t)0 };
                 renderTarget_->DrawTextW(glyph, 1, terminalFormat_.Get(), MakeRect(x, y, x + charWidth_ * 2.0f, y + lineHeight_), brush.Get());
-
                 if (cell.underline)
                 {
                     renderTarget_->DrawLine(D2D1::Point2F(x, y + lineHeight_ - 2.0f), D2D1::Point2F(x + charWidth_, y + lineHeight_ - 2.0f), brush.Get(), 1.0f);
                 }
             }
         }
-
         const auto& cursor = tab->Buffer().GetCursor();
         const bool blinkOn = ((::GetTickCount64() / 530ULL) % 2ULL) == 0ULL;
         if (cursor.visible && blinkOn)
         {
-            brush->SetColor(settings_.theme.accent);
+            brush->SetColor(D2D1::ColorF(0.96f, 0.97f, 1.0f, 1.0f));
             const int relativeRow = cursor.row - viewportTop;
             if (relativeRow >= 0 && relativeRow < terminalRows_)
             {
                 const float x = left + cursor.column * charWidth_;
                 const float y = top + relativeRow * lineHeight_;
-                switch (settings_.cursorStyle)
+                if (settings_.cursorStyle == config::CursorStyle::Underline)
                 {
-                case config::CursorStyle::Block:
-                    renderTarget_->DrawRectangle(MakeRect(x + 0.5f, y + 0.5f, x + charWidth_ - 0.5f, y + lineHeight_ - 0.5f), brush.Get(), 1.5f);
-                    break;
-                case config::CursorStyle::Underline:
                     renderTarget_->FillRectangle(MakeRect(x, y + lineHeight_ - 3.0f, x + charWidth_, y + lineHeight_ - 1.0f), brush.Get());
-                    break;
-                case config::CursorStyle::Bar:
-                default:
-                    renderTarget_->FillRectangle(MakeRect(x, y + 2.0f, x + 2.0f, y + lineHeight_ - 2.0f), brush.Get());
-                    break;
+                }
+                else if (settings_.cursorStyle == config::CursorStyle::Block)
+                {
+                    renderTarget_->FillRectangle(MakeRect(x, y, x + charWidth_ - 1.0f, y + lineHeight_ - 1.0f), brush.Get());
+                }
+                else
+                {
+                    renderTarget_->FillRectangle(MakeRect(x, y, x + 2.0f, y + lineHeight_ - 2.0f), brush.Get());
                 }
             }
         }
-
         renderTarget_->PopAxisAlignedClip();
     }
 
-    void MainWindow::DrawStatusBar()
+        void MainWindow::DrawStatusBar()
     {
         RECT rect{};
         ::GetClientRect(hwnd_, &rect);
-
-        const float cardLeft = static_cast<float>(padding_) - 4.0f;
-        const float cardTop = static_cast<float>(appHeaderHeight_ + tabBarHeight_ + 14);
-        const float cardRight = static_cast<float>(rect.right - padding_ + 4);
-        const float cardBottom = static_cast<float>(rect.bottom - padding_ + 2);
-        const D2D1_RECT_F cardRect = MakeRect(cardLeft, cardTop, cardRight, cardBottom);
+        constexpr float sidebarWidth = 268.0f;
+        const float left = sidebarWidth;
+        const float top = static_cast<float>(rect.bottom - statusBarHeight_);
+        const float right = static_cast<float>(rect.right);
+        const float bottom = static_cast<float>(rect.bottom);
 
         ComPtr<ID2D1SolidColorBrush> brush;
         renderTarget_->CreateSolidColorBrush(settings_.theme.foreground, brush.GetAddressOf());
+        brush->SetColor(D2D1::ColorF(1, 1, 1, 0.018f));
+        renderTarget_->FillRectangle(MakeRect(left, top, right, bottom), brush.Get());
+        brush->SetColor(D2D1::ColorF(1, 1, 1, 0.05f));
+        renderTarget_->DrawLine(D2D1::Point2F(left, top + 0.5f), D2D1::Point2F(right, top + 0.5f), brush.Get(), 1.0f);
 
-        brush->SetColor(D2D1::ColorF(0.01f, 0.02f, 0.05f, 0.16f));
-        renderTarget_->FillRoundedRectangle(D2D1::RoundedRect(MakeRect(cardRect.left, cardRect.top + 12.0f, cardRect.right, cardRect.bottom + 10.0f), 24.0f, 24.0f), brush.Get());
-        brush->SetColor(D2D1::ColorF(0.12f, 0.15f, 0.27f, 0.18f));
-        renderTarget_->DrawRoundedRectangle(D2D1::RoundedRect(cardRect, 24.0f, 24.0f), brush.Get(), 1.0f);
+        auto drawDivider = [&](float x)
+        {
+            brush->SetColor(D2D1::ColorF(1, 1, 1, 0.08f));
+            renderTarget_->DrawLine(D2D1::Point2F(x, top + 13.0f), D2D1::Point2F(x, bottom - 13.0f), brush.Get(), 1.0f);
+        };
 
-        const float statusHeight = 31.0f;
-        const D2D1_RECT_F statusRect = MakeRect(cardRect.left + 12.0f, cardRect.bottom - statusHeight - 10.0f, cardRect.right - 12.0f, cardRect.bottom - 12.0f);
-        brush->SetColor(D2D1::ColorF(0.12f, 0.16f, 0.29f, 0.56f));
-        renderTarget_->FillRoundedRectangle(D2D1::RoundedRect(statusRect, 15.0f, 15.0f), brush.Get());
-        brush->SetColor(D2D1::ColorF(1, 1, 1, 0.035f));
-        renderTarget_->DrawRoundedRectangle(D2D1::RoundedRect(statusRect, 15.0f, 15.0f), brush.Get(), 1.0f);
-        brush->SetColor(D2D1::ColorF(0.66f, 0.78f, 1.0f, 0.035f));
-        renderTarget_->FillRoundedRectangle(D2D1::RoundedRect(MakeRect(statusRect.left + 1.0f, statusRect.top + 1.0f, statusRect.right - 1.0f, statusRect.top + 12.0f), 14.0f, 14.0f), brush.Get());
-
-        std::wstring status = std::format(L"{}  |  UTF-8  |  LF  |  x64  |  Ready  |  main", workspace_ && workspace_->ActiveTab() ? workspace_->ActiveTab()->ProfileName() : L"shell");
-        brush->SetColor(D2D1::ColorF(0.92f, 0.95f, 1.0f, 0.96f));
-        renderTarget_->DrawTextW(status.c_str(), static_cast<UINT32>(status.size()), uiFormat_.Get(), MakeRect(statusRect.left + 12.0f, statusRect.top + 5.0f, statusRect.right - 12.0f, statusRect.bottom), brush.Get());
+        float x = left + 16.0f;
+        brush->SetColor(D2D1::ColorF(0.49f, 0.91f, 0.53f, 1.0f));
+        renderTarget_->FillEllipse(D2D1::Ellipse(D2D1::Point2F(x + 4.0f, top + 20.0f), 4.0f, 4.0f), brush.Get());
+        x += 16.0f;
+        const std::wstring profile = workspace_ && workspace_->ActiveTab() ? workspace_->ActiveTab()->ProfileName() : L"pwsh";
+        brush->SetColor(D2D1::ColorF(0.78f, 0.82f, 0.89f, 0.98f));
+        renderTarget_->DrawTextW(profile.c_str(), static_cast<UINT32>(profile.size()), uiFormat_.Get(), MakeRect(x, top + 10.0f, x + 120.0f, bottom), brush.Get());
+        x += 110.0f; drawDivider(x); x += 12.0f;
+        renderTarget_->DrawTextW(L"UTF-8", 5, uiFormat_.Get(), MakeRect(x, top + 10.0f, x + 60.0f, bottom), brush.Get());
+        x += 64.0f; drawDivider(x); x += 12.0f;
+        renderTarget_->DrawTextW(L"LF", 2, uiFormat_.Get(), MakeRect(x, top + 10.0f, x + 28.0f, bottom), brush.Get());
+        x += 34.0f; drawDivider(x); x += 12.0f;
+        renderTarget_->DrawTextW(L"x64", 3, uiFormat_.Get(), MakeRect(x, top + 10.0f, x + 40.0f, bottom), brush.Get());
+        x += 50.0f; drawDivider(x); x += 12.0f;
+        renderTarget_->DrawTextW(L"Ready", 5, uiFormat_.Get(), MakeRect(x, top + 10.0f, x + 60.0f, bottom), brush.Get());
+        std::wstring active = workspace_ && workspace_->ActiveTab() ? workspace_->ActiveTab()->TitleSnapshot() : L"";
+        if (active.empty()) active = L"main";
+        active = Ellipsize(active, 34);
+        brush->SetColor(D2D1::ColorF(0.49f, 0.54f, 0.64f, 0.96f));
+        renderTarget_->DrawTextW(active.c_str(), static_cast<UINT32>(active.size()), uiFormat_.Get(), MakeRect(right - 240.0f, top + 10.0f, right - 16.0f, bottom), brush.Get());
     }
 
     void MainWindow::OnChar(const wchar_t ch)
@@ -943,82 +1117,89 @@ void MainWindow::OnMouseWheel(const short delta)
         }
     }
 
-    bool MainWindow::IsPointInTerminal(const int x, const int y) const
+        bool MainWindow::IsPointInTerminal(const int x, const int y) const
     {
-        const int left = padding_ + 18;
-        const int top = appHeaderHeight_ + tabBarHeight_ + padding_ + 18;
+        constexpr int sidebarWidth = 268;
+        constexpr int terminalWrapPadding = 14;
+        constexpr int shellHeaderHeight = 42;
+        constexpr int shellInnerMargin = 12;
+        constexpr int termPadX = 26;
+        constexpr int termPadY = 24;
+        const int left = sidebarWidth + terminalWrapPadding + shellInnerMargin + termPadX;
+        const int top = appHeaderHeight_ + tabBarHeight_ + terminalWrapPadding + shellHeaderHeight + shellInnerMargin + termPadY;
         const int right = left + static_cast<int>(terminalColumns_ * charWidth_);
         const int bottom = top + static_cast<int>(terminalRows_ * lineHeight_);
         return x >= left && x <= right && y >= top && y <= bottom;
     }
 
-    bool MainWindow::IsPointInDraggableHeader(const int x, const int y) const
+        bool MainWindow::IsPointInDraggableHeader(const int x, const int y) const
     {
-        if (y < 10 || y > appHeaderHeight_ - 6)
+        if (y < 0 || y > appHeaderHeight_)
         {
             return false;
         }
-
         if (HitTestWindowControl(x, y).has_value())
         {
             return false;
         }
-
-        if (x >= padding_ && x <= 360)
+        if (x >= 420 && x <= 980)
         {
-            return true;
+            return false;
         }
-
-        return x > 120 && x < 900;
+        if (x >= 1060)
+        {
+            return false;
+        }
+        return true;
     }
 
-    std::optional<int> MainWindow::HitTestWindowControl(const int x, const int y) const
+        std::optional<int> MainWindow::HitTestWindowControl(const int x, const int y) const
     {
         RECT rect{};
         ::GetClientRect(hwnd_, &rect);
-
-        const float buttonSize = 34.0f;
-        const float gap = 10.0f;
-        const float top = 16.0f;
-        float left = static_cast<float>(rect.right) - (buttonSize * 3.0f + gap * 2.0f) - 20.0f;
-
+        const float buttonSize = 42.0f;
+        const float gap = 4.0f;
+        const float top = 13.0f;
+        float left = static_cast<float>(rect.right) - (buttonSize * 3.0f + gap * 2.0f) - 16.0f;
         for (int i = 0; i < 3; ++i)
         {
-            if (x >= left && x <= left + buttonSize && y >= top && y <= top + buttonSize)
+            if (x >= left && x <= left + buttonSize && y >= top && y <= top + 38.0f)
             {
                 return i;
             }
             left += buttonSize + gap;
         }
-
         return std::nullopt;
     }
 
-    wsh::terminal::SelectionPoint MainWindow::ClientToBufferPoint(const int x, const int y) const
+        wsh::terminal::SelectionPoint MainWindow::ClientToBufferPoint(const int x, const int y) const
     {
         auto* tab = workspace_ ? workspace_->ActiveTab() : nullptr;
         if (tab == nullptr)
         {
             return {};
         }
-
-        const int column = std::clamp(static_cast<int>((x - padding_ - 18) / charWidth_), 0, terminalColumns_ - 1);
-        const int row = std::clamp(static_cast<int>((y - appHeaderHeight_ - tabBarHeight_ - padding_ - 18) / lineHeight_), 0, terminalRows_ - 1);
+        constexpr int sidebarWidth = 268;
+        constexpr int terminalWrapPadding = 14;
+        constexpr int shellHeaderHeight = 42;
+        constexpr int shellInnerMargin = 12;
+        constexpr int termPadX = 26;
+        constexpr int termPadY = 24;
+        const int column = std::clamp(static_cast<int>((x - sidebarWidth - terminalWrapPadding - shellInnerMargin - termPadX) / charWidth_), 0, terminalColumns_ - 1);
+        const int row = std::clamp(static_cast<int>((y - appHeaderHeight_ - tabBarHeight_ - terminalWrapPadding - shellHeaderHeight - shellInnerMargin - termPadY) / lineHeight_), 0, terminalRows_ - 1);
         return { tab->Buffer().ViewportTop() + row, column };
     }
 
-    std::optional<size_t> MainWindow::HitTestTab(const int x, const int y) const
+        std::optional<size_t> MainWindow::HitTestTab(const int x, const int y) const
     {
-        if (!workspace_ || y < appHeaderHeight_ || y > appHeaderHeight_ + tabBarHeight_ + 20)
+        if (!workspace_ || y < appHeaderHeight_ || y > appHeaderHeight_ + tabBarHeight_)
         {
             return std::nullopt;
         }
-
-        float left = static_cast<float>(padding_);
-        const float top = static_cast<float>(appHeaderHeight_ + 12);
-        const float height = 44.0f;
+        float left = 268.0f + 12.0f;
+        const float top = static_cast<float>(appHeaderHeight_ + 10);
+        const float height = 38.0f;
         const float width = 178.0f;
-
         for (size_t i = 0; i < workspace_->Tabs().size(); ++i)
         {
             if (x >= left && x <= left + width && y >= top && y <= top + height)
@@ -1027,53 +1208,45 @@ void MainWindow::OnMouseWheel(const short delta)
             }
             left += width + 8.0f;
         }
-
         return std::nullopt;
     }
 
-    std::optional<size_t> MainWindow::HitTestTabClose(const int x, const int y) const
+        std::optional<size_t> MainWindow::HitTestTabClose(const int x, const int y) const
     {
-        if (!workspace_ || y < appHeaderHeight_ || y > appHeaderHeight_ + tabBarHeight_ + 20)
+        if (!workspace_ || y < appHeaderHeight_ || y > appHeaderHeight_ + tabBarHeight_)
         {
             return std::nullopt;
         }
-
-        float left = static_cast<float>(padding_);
-        const float top = static_cast<float>(appHeaderHeight_ + 12);
+        float left = 268.0f + 12.0f;
+        const float top = static_cast<float>(appHeaderHeight_ + 10);
         const float width = 178.0f;
-        const float height = 44.0f;
         for (size_t i = 0; i < workspace_->Tabs().size(); ++i)
         {
-            const float closeLeft = left + width - 34.0f;
-            const float closeRight = closeLeft + 22.0f;
-            const float closeTop = top + (height - 22.0f) * 0.5f;
-            const float closeBottom = closeTop + 22.0f;
-            if (x >= closeLeft && x <= closeRight && y >= closeTop && y <= closeBottom)
+            const float closeLeft = left + width - 26.0f;
+            const float closeTop = top + 10.0f;
+            if (x >= closeLeft && x <= closeLeft + 18.0f && y >= closeTop && y <= closeTop + 18.0f)
             {
                 return i;
             }
             left += width + 8.0f;
         }
-
         return std::nullopt;
     }
 
-    bool MainWindow::IsPointInNewTabButton(const int x, const int y) const
+        bool MainWindow::IsPointInNewTabButton(const int x, const int y) const
     {
-        if (!workspace_ || y < appHeaderHeight_ || y > appHeaderHeight_ + tabBarHeight_ + 20)
+        if (!workspace_ || y < appHeaderHeight_ || y > appHeaderHeight_ + tabBarHeight_)
         {
             return false;
         }
-
-        float left = static_cast<float>(padding_);
+        float left = 268.0f + 12.0f;
         const float width = 178.0f;
         for (size_t i = 0; i < workspace_->Tabs().size(); ++i)
         {
             left += width + 8.0f;
         }
-
-        const float top = static_cast<float>(appHeaderHeight_ + 12);
-        return x >= left && x <= left + 48.0f && y >= top && y <= top + 46.0f;
+        const float top = static_cast<float>(appHeaderHeight_ + 10);
+        return x >= left && x <= left + 38.0f && y >= top && y <= top + 38.0f;
     }
 
 void MainWindow::OnLeftButtonDown(const int x, const int y)
@@ -1416,7 +1589,7 @@ void MainWindow::OnLeftButtonDown(const int x, const int y)
             return;
         }
 
-        const int terminalTop = tabBarHeight_ + padding_;
+        const int terminalTop = appHeaderHeight_ + tabBarHeight_ + 14 + 42 + 12 + 24;
         const int terminalBottom = terminalTop + static_cast<int>(terminalRows_ * lineHeight_);
         if (y < terminalTop)
         {
