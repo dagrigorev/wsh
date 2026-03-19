@@ -44,6 +44,7 @@ namespace wsh::conpty
                               ExitHandler exitHandler)
     {
         Stop();
+        stopping_ = false;
 
         outputHandler_ = std::move(outputHandler);
         exitHandler_ = std::move(exitHandler);
@@ -134,7 +135,7 @@ namespace wsh::conpty
             while (!token.stop_requested())
             {
                 DWORD bytesRead = 0;
-                if (!::ReadFile(outputRead_, buffer.data(), static_cast<DWORD>(buffer.size()), &bytesRead, nullptr) || bytesRead == 0)
+                if (outputRead_ == nullptr || !::ReadFile(outputRead_, buffer.data(), static_cast<DWORD>(buffer.size()), &bytesRead, nullptr) || bytesRead == 0)
                 {
                     break;
                 }
@@ -147,13 +148,12 @@ namespace wsh::conpty
                     }
                     catch (...)
                     {
-                        // Keep the terminal process alive even if parsing/render state rejects
-                        // an unexpected escape sequence or malformed UTF-8 fragment.
+                        // Keep the hosted shell alive even if the terminal frontend rejected a payload.
                     }
                 }
             }
 
-            if (exitHandler_)
+            if (!stopping_ && exitHandler_)
             {
                 exitHandler_();
             }
@@ -162,9 +162,15 @@ namespace wsh::conpty
 
     void ConptySession::Stop()
     {
+        stopping_ = true;
+
+        SafeClose(inputWrite_);
+        SafeClose(outputRead_);
+
         if (readerThread_.joinable())
         {
             readerThread_.request_stop();
+            readerThread_ = std::jthread{};
         }
 
         if (pseudoConsole_ != nullptr)
@@ -173,8 +179,6 @@ namespace wsh::conpty
             pseudoConsole_ = nullptr;
         }
 
-        SafeClose(inputWrite_);
-        SafeClose(outputRead_);
         SafeClose(process_);
         SafeClose(thread_);
     }

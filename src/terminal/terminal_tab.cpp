@@ -113,6 +113,10 @@ namespace wsh::terminal
 
     void TerminalTab::SendInput(const std::string_view utf8)
     {
+        {
+            std::scoped_lock lock(mutex_);
+            buffer_.FollowBottom();
+        }
         session_.Write(utf8);
     }
 

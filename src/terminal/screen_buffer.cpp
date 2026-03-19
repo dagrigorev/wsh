@@ -7,6 +7,7 @@ namespace wsh::terminal
     ScreenBuffer::ScreenBuffer(const int columns, const int rows)
         : columns_(std::max(columns, 1)), rows_(std::max(rows, 1))
     {
+        ResetAttributes();
         for (int i = 0; i < rows_; ++i)
         {
             PushEmptyLine();
@@ -16,7 +17,7 @@ namespace wsh::terminal
 
     std::vector<Cell> ScreenBuffer::MakeBlankLine() const
     {
-        return std::vector<Cell>(columns_, currentStyle_);
+        return std::vector<Cell>(columns_, defaultStyle_);
     }
 
     void ScreenBuffer::PushEmptyLine()
@@ -27,12 +28,20 @@ namespace wsh::terminal
 
     void ScreenBuffer::EnsureHistoryLimit()
     {
-        while (static_cast<int>(lines_.size()) > rows_ + maxScrollback_)
+        while (!alternateScreenActive_ && static_cast<int>(lines_.size()) > rows_ + maxScrollback_)
         {
             lines_.pop_front();
             if (viewportTop_ > 0)
             {
                 --viewportTop_;
+            }
+            if (cursor_.row > 0)
+            {
+                --cursor_.row;
+            }
+            if (savedCursor_.row > 0)
+            {
+                --savedCursor_.row;
             }
         }
     }
@@ -50,35 +59,64 @@ namespace wsh::terminal
 
         for (auto& line : lines_)
         {
-            line.resize(columns_, currentStyle_);
+            line.resize(columns_, defaultStyle_);
+        }
+        if (!alternateScreenActive_)
+        {
+            for (auto& line : primaryLines_)
+            {
+                line.resize(columns_, defaultStyle_);
+            }
         }
 
         while (static_cast<int>(lines_.size()) < rows_)
         {
             PushEmptyLine();
         }
-
+        EnsureHistoryLimit();
         EnsureCursorInBounds();
         FollowBottom();
     }
 
     void ScreenBuffer::PutChar(const wchar_t glyph, const Cell& style)
     {
+        if (glyph == L'\0')
+        {
+            return;
+        }
+
         EnsureCursorInBounds();
         if (cursor_.row >= static_cast<int>(lines_.size()))
         {
             PushEmptyLine();
         }
 
-        lines_[cursor_.row][cursor_.column] = style;
-        lines_[cursor_.row][cursor_.column].glyph = glyph;
-
-        ++cursor_.column;
         if (cursor_.column >= columns_)
         {
             cursor_.column = 0;
-            LineFeed();
+            ++cursor_.row;
+            if (cursor_.row >= static_cast<int>(lines_.size()))
+            {
+                PushEmptyLine();
+            }
         }
+
+        auto& line = lines_.at(cursor_.row);
+        line.at(cursor_.column) = style;
+        line.at(cursor_.column).glyph = glyph;
+        ++cursor_.column;
+
+        if (cursor_.column >= columns_)
+        {
+            cursor_.column = 0;
+            ++cursor_.row;
+            if (cursor_.row >= static_cast<int>(lines_.size()))
+            {
+                PushEmptyLine();
+            }
+        }
+
+        FollowBottom();
     }
 
     void ScreenBuffer::CarriageReturn()
@@ -98,19 +136,23 @@ namespace wsh::terminal
 
     void ScreenBuffer::Backspace()
     {
-        cursor_.column = std::max(0, cursor_.column - 1);
+        if (cursor_.column > 0)
+        {
+            --cursor_.column;
+        }
     }
 
     void ScreenBuffer::Tab()
     {
-        const int next = ((cursor_.column / 4) + 1) * 4;
-        cursor_.column = std::min(columns_ - 1, next);
+        const int nextStop = ((cursor_.column / 8) + 1) * 8;
+        cursor_.column = std::min(nextStop, columns_ - 1);
     }
 
     void ScreenBuffer::MoveCursor(const int row, const int column)
     {
-        cursor_.row = std::clamp(row, 0, std::max(0, static_cast<int>(lines_.size()) - 1));
-        cursor_.column = std::clamp(column, 0, std::max(0, columns_ - 1));
+        cursor_.row = row;
+        cursor_.column = column;
+        EnsureCursorInBounds();
     }
 
     void ScreenBuffer::ClearScreen()
@@ -121,68 +163,140 @@ namespace wsh::terminal
             PushEmptyLine();
         }
         cursor_ = {};
-        FollowBottom();
+        viewportTop_ = std::max(0, static_cast<int>(lines_.size()) - rows_);
     }
 
     void ScreenBuffer::ClearDisplay(const int mode)
     {
-        if (mode == 2)
+        if (lines_.empty())
         {
+            return;
+        }
+
+        EnsureCursorInBounds();
+
+        switch (mode)
+        {
+        case 2:
+        case 3:
             ClearScreen();
-            return;
-        }
-
-        const int rowCount = static_cast<int>(lines_.size());
-        if (rowCount == 0)
-        {
-            return;
-        }
-
-        if (mode == 0)
-        {
-            ClearLine(0);
-            for (int row = cursor_.row + 1; row < rowCount; ++row)
-            {
-                for (int column = 0; column < columns_; ++column)
-                {
-                    lines_[row][column] = currentStyle_;
-                    lines_[row][column].glyph = L' ';
-                }
-            }
-        }
-        else if (mode == 1)
-        {
+            break;
+        case 1:
             for (int row = 0; row < cursor_.row; ++row)
             {
-                for (int column = 0; column < columns_; ++column)
-                {
-                    lines_[row][column] = currentStyle_;
-                    lines_[row][column].glyph = L' ';
-                }
+                std::fill(lines_[row].begin(), lines_[row].end(), defaultStyle_);
             }
-            ClearLine(1);
+            for (int col = 0; col <= cursor_.column && col < columns_; ++col)
+            {
+                lines_[cursor_.row][col] = defaultStyle_;
+            }
+            break;
+        case 0:
+        default:
+            for (int col = cursor_.column; col < columns_; ++col)
+            {
+                lines_[cursor_.row][col] = defaultStyle_;
+            }
+            for (size_t row = static_cast<size_t>(cursor_.row + 1); row < lines_.size(); ++row)
+            {
+                std::fill(lines_[row].begin(), lines_[row].end(), defaultStyle_);
+            }
+            break;
         }
     }
 
     void ScreenBuffer::ClearLine(const int mode)
     {
-        auto& line = lines_[cursor_.row];
-        const int first = (mode == 1) ? 0 : cursor_.column;
-        const int last = (mode == 0) ? (columns_ - 1) : ((mode == 1) ? cursor_.column : (columns_ - 1));
-        for (int i = first; i <= last && i < columns_; ++i)
+        if (lines_.empty())
         {
-            if (i < 0)
+            return;
+        }
+
+        EnsureCursorInBounds();
+        auto& line = lines_[cursor_.row];
+        switch (mode)
+        {
+        case 1:
+            for (int col = 0; col <= cursor_.column && col < columns_; ++col)
             {
-                continue;
+                line[col] = defaultStyle_;
             }
-            line[i] = currentStyle_;
-            line[i].glyph = L' ';
+            break;
+        case 2:
+            std::fill(line.begin(), line.end(), defaultStyle_);
+            break;
+        case 0:
+        default:
+            for (int col = cursor_.column; col < columns_; ++col)
+            {
+                line[col] = defaultStyle_;
+            }
+            break;
         }
     }
 
     void ScreenBuffer::ResetAttributes()
     {
-        currentStyle_ = {};
+        defaultStyle_ = {};
+        currentStyle_ = defaultStyle_;
+    }
+
+    void ScreenBuffer::SaveCursor()
+    {
+        savedCursor_ = cursor_;
+        savedStyle_ = currentStyle_;
+    }
+
+    void ScreenBuffer::RestoreCursor()
+    {
+        cursor_ = savedCursor_;
+        currentStyle_ = savedStyle_;
+        EnsureCursorInBounds();
+    }
+
+    void ScreenBuffer::EnterAlternateScreen()
+    {
+        if (alternateScreenActive_)
+        {
+            return;
+        }
+
+        primaryLines_ = lines_;
+        primaryViewportTop_ = viewportTop_;
+        lines_.clear();
+        for (int i = 0; i < rows_; ++i)
+        {
+            lines_.push_back(MakeBlankLine());
+        }
+        cursor_ = {};
+        savedCursor_ = {};
+        viewportTop_ = 0;
+        alternateScreenActive_ = true;
+    }
+
+    void ScreenBuffer::LeaveAlternateScreen()
+    {
+        if (!alternateScreenActive_)
+        {
+            return;
+        }
+
+        lines_ = std::move(primaryLines_);
+        if (lines_.empty())
+        {
+            for (int i = 0; i < rows_; ++i)
+            {
+                lines_.push_back(MakeBlankLine());
+            }
+        }
+        viewportTop_ = std::clamp(primaryViewportTop_, 0, std::max(0, static_cast<int>(lines_.size()) - rows_));
+        alternateScreenActive_ = false;
+        EnsureCursorInBounds();
+    }
+
+    void ScreenBuffer::SetCursorVisible(const bool value)
+    {
+        cursor_.visible = value;
     }
 
     void ScreenBuffer::SetForeground(const D2D1_COLOR_F& color)
@@ -197,12 +311,12 @@ namespace wsh::terminal
 
     void ScreenBuffer::ResetForeground()
     {
-        currentStyle_.foreground = Cell{}.foreground;
+        currentStyle_.foreground = defaultStyle_.foreground;
     }
 
     void ScreenBuffer::ResetBackground()
     {
-        currentStyle_.background = Cell{}.background;
+        currentStyle_.background = defaultStyle_.background;
     }
 
     void ScreenBuffer::SetBold(const bool value)
@@ -220,20 +334,9 @@ namespace wsh::terminal
         currentStyle_.inverse = value;
     }
 
-    void ScreenBuffer::SaveCursor()
+    void ScreenBuffer::SetBracketedPasteMode(const bool value)
     {
-        savedCursor_ = cursor_;
-    }
-
-    void ScreenBuffer::RestoreCursor()
-    {
-        cursor_ = savedCursor_;
-        EnsureCursorInBounds();
-    }
-
-    void ScreenBuffer::SetCursorVisible(const bool value)
-    {
-        cursor_.visible = value;
+        bracketedPasteMode_ = value;
     }
 
     void ScreenBuffer::ScrollViewport(const int deltaRows)
@@ -249,33 +352,43 @@ namespace wsh::terminal
 
     std::wstring ScreenBuffer::CopySelection(const SelectionPoint& start, const SelectionPoint& end) const
     {
-        const SelectionPoint left = std::min(start, end);
-        const SelectionPoint right = std::max(start, end);
-        std::wstring result;
-
-        for (int row = left.row; row <= right.row && row < static_cast<int>(lines_.size()); ++row)
+        if (lines_.empty())
         {
-            const int firstColumn = (row == left.row) ? left.column : 0;
-            const int lastColumn = (row == right.row) ? right.column : (columns_ - 1);
-
-            for (int column = firstColumn; column <= lastColumn && column < columns_; ++column)
-            {
-                result.push_back(lines_[row][column].glyph);
-            }
-
-            while (!result.empty() && (result.back() == L' ' || result.back() == L'\0'))
-            {
-                result.pop_back();
-            }
-
-            if (row != right.row)
-            {
-                result.append(L"\r\n");
-            }
+            return {};
         }
 
+        SelectionPoint first = start;
+        SelectionPoint last = end;
+        if (last < first)
+        {
+            std::swap(first, last);
+        }
+
+        first.row = std::clamp(first.row, 0, static_cast<int>(lines_.size()) - 1);
+        last.row = std::clamp(last.row, 0, static_cast<int>(lines_.size()) - 1);
+        first.column = std::clamp(first.column, 0, std::max(0, columns_ - 1));
+        last.column = std::clamp(last.column, 0, std::max(0, columns_ - 1));
+
+        std::wstring result;
+        for (int row = first.row; row <= last.row; ++row)
+        {
+            const auto& line = lines_[row];
+            const int startColumn = row == first.row ? first.column : 0;
+            const int endColumn = row == last.row ? last.column : columns_ - 1;
+            int trimmedEnd = std::min(endColumn, columns_ - 1);
+            while (trimmedEnd >= startColumn && line[trimmedEnd].glyph == L' ')
+            {
+                --trimmedEnd;
+            }
+            for (int column = startColumn; column <= trimmedEnd; ++column)
+            {
+                result.push_back(line[column].glyph);
+            }
+            if (row != last.row)
+            {
+                result += L"\r\n";
+            }
+        }
         return result;
     }
 }
-
-

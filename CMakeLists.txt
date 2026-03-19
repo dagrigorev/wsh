@@ -18,6 +18,7 @@ add_executable(wsh-terminal WIN32
     src/config/settings.cpp
     src/terminal/screen_buffer.cpp
     src/terminal/vt_parser.cpp
+    src/terminal/input_translator.cpp
     src/conpty/conpty_session.cpp
     src/terminal/terminal_tab.cpp
     src/workspace/workspace.cpp

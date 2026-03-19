@@ -43,6 +43,7 @@ namespace wsh::conpty
         HANDLE process_ = nullptr;
         HANDLE thread_ = nullptr;
         std::jthread readerThread_;
+        std::atomic<bool> stopping_{ false };
         OutputHandler outputHandler_;
         ExitHandler exitHandler_;
     };

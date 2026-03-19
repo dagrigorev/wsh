@@ -35,6 +35,8 @@ namespace wsh::terminal
         void ResetAttributes();
         void SaveCursor();
         void RestoreCursor();
+        void EnterAlternateScreen();
+        void LeaveAlternateScreen();
         void SetCursorVisible(bool value);
         void SetForeground(const D2D1_COLOR_F& color);
         void SetBackground(const D2D1_COLOR_F& color);
@@ -43,6 +45,7 @@ namespace wsh::terminal
         void SetBold(bool value);
         void SetUnderline(bool value);
         void SetInverse(bool value);
+        void SetBracketedPasteMode(bool value);
         void ScrollViewport(int deltaRows);
         void FollowBottom();
 
@@ -51,7 +54,10 @@ namespace wsh::terminal
         [[nodiscard]] const Cursor& GetCursor() const noexcept { return cursor_; }
         [[nodiscard]] const std::deque<std::vector<Cell>>& Lines() const noexcept { return lines_; }
         [[nodiscard]] int ViewportTop() const noexcept { return viewportTop_; }
-        [[nodiscard]] const Cell& DefaultStyle() const noexcept { return currentStyle_; }
+        [[nodiscard]] const Cell& DefaultStyle() const noexcept { return defaultStyle_; }
+        [[nodiscard]] const Cell& CurrentStyle() const noexcept { return currentStyle_; }
+        [[nodiscard]] bool IsAlternateScreenActive() const noexcept { return alternateScreenActive_; }
+        [[nodiscard]] bool IsBracketedPasteMode() const noexcept { return bracketedPasteMode_; }
 
         [[nodiscard]] std::wstring CopySelection(const SelectionPoint& start, const SelectionPoint& end) const;
 
@@ -67,7 +73,13 @@ namespace wsh::terminal
         int viewportTop_ = 0;
         Cursor cursor_{};
         Cursor savedCursor_{};
+        Cell defaultStyle_{};
         Cell currentStyle_{};
+        Cell savedStyle_{};
+        bool alternateScreenActive_ = false;
+        bool bracketedPasteMode_ = false;
         std::deque<std::vector<Cell>> lines_;
+        std::deque<std::vector<Cell>> primaryLines_;
+        int primaryViewportTop_ = 0;
     };
 }

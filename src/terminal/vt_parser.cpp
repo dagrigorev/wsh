@@ -7,6 +7,50 @@
 
 namespace wsh::terminal
 {
+    namespace
+    {
+        D2D1_COLOR_F IndexedColor(const int index)
+        {
+            static const int cube[] = { 0, 95, 135, 175, 215, 255 };
+            if (index < 16)
+            {
+                const bool bright = index >= 8;
+                const int base = bright ? index - 8 : index;
+                static const D2D1_COLOR_F normal[] = {
+                    D2D1::ColorF(0.05f, 0.08f, 0.15f, 1.0f),
+                    D2D1::ColorF(0.85f, 0.33f, 0.33f, 1.0f),
+                    D2D1::ColorF(0.39f, 0.78f, 0.45f, 1.0f),
+                    D2D1::ColorF(0.87f, 0.76f, 0.34f, 1.0f),
+                    D2D1::ColorF(0.34f, 0.60f, 0.94f, 1.0f),
+                    D2D1::ColorF(0.76f, 0.49f, 0.87f, 1.0f),
+                    D2D1::ColorF(0.33f, 0.78f, 0.85f, 1.0f),
+                    D2D1::ColorF(0.90f, 0.93f, 0.97f, 1.0f)
+                };
+                static const D2D1_COLOR_F brightMap[] = {
+                    D2D1::ColorF(0.20f, 0.24f, 0.33f, 1.0f),
+                    D2D1::ColorF(1.00f, 0.45f, 0.43f, 1.0f),
+                    D2D1::ColorF(0.52f, 0.90f, 0.56f, 1.0f),
+                    D2D1::ColorF(0.98f, 0.85f, 0.44f, 1.0f),
+                    D2D1::ColorF(0.45f, 0.74f, 1.0f, 1.0f),
+                    D2D1::ColorF(0.89f, 0.63f, 0.98f, 1.0f),
+                    D2D1::ColorF(0.47f, 0.88f, 0.95f, 1.0f),
+                    D2D1::ColorF(1.00f, 1.00f, 1.00f, 1.0f)
+                };
+                return bright ? brightMap[base] : normal[base];
+            }
+            if (index >= 16 && index <= 231)
+            {
+                const int value = index - 16;
+                const int r = cube[(value / 36) % 6];
+                const int g = cube[(value / 6) % 6];
+                const int b = cube[value % 6];
+                return D2D1::ColorF(r / 255.0f, g / 255.0f, b / 255.0f, 1.0f);
+            }
+            const int gray = std::clamp(8 + (index - 232) * 10, 0, 255);
+            return D2D1::ColorF(gray / 255.0f, gray / 255.0f, gray / 255.0f, 1.0f);
+        }
+    }
+
     VtParser::VtParser(ScreenBuffer& buffer)
         : buffer_(buffer)
     {
@@ -19,7 +63,7 @@ namespace wsh::terminal
 
     void VtParser::FlushText()
     {
-        const Cell style = buffer_.DefaultStyle();
+        const Cell style = buffer_.CurrentStyle();
         for (const wchar_t ch : textBuffer_)
         {
             buffer_.PutChar(ch, style);
@@ -169,27 +213,7 @@ namespace wsh::terminal
 
     D2D1_COLOR_F VtParser::BasicColor(const int index, const bool bright) const
     {
-        static const D2D1_COLOR_F normal[] = {
-            D2D1::ColorF(0.05f, 0.08f, 0.15f, 1.0f),
-            D2D1::ColorF(0.85f, 0.33f, 0.33f, 1.0f),
-            D2D1::ColorF(0.39f, 0.78f, 0.45f, 1.0f),
-            D2D1::ColorF(0.87f, 0.76f, 0.34f, 1.0f),
-            D2D1::ColorF(0.34f, 0.60f, 0.94f, 1.0f),
-            D2D1::ColorF(0.76f, 0.49f, 0.87f, 1.0f),
-            D2D1::ColorF(0.33f, 0.78f, 0.85f, 1.0f),
-            D2D1::ColorF(0.90f, 0.93f, 0.97f, 1.0f)
-        };
-        static const D2D1_COLOR_F brightMap[] = {
-            D2D1::ColorF(0.20f, 0.24f, 0.33f, 1.0f),
-            D2D1::ColorF(1.00f, 0.45f, 0.43f, 1.0f),
-            D2D1::ColorF(0.52f, 0.90f, 0.56f, 1.0f),
-            D2D1::ColorF(0.98f, 0.85f, 0.44f, 1.0f),
-            D2D1::ColorF(0.45f, 0.74f, 1.0f, 1.0f),
-            D2D1::ColorF(0.89f, 0.63f, 0.98f, 1.0f),
-            D2D1::ColorF(0.47f, 0.88f, 0.95f, 1.0f),
-            D2D1::ColorF(1.00f, 1.00f, 1.00f, 1.0f)
-        };
-        return bright ? brightMap[index] : normal[index];
+        return IndexedColor((bright ? 8 : 0) + index);
     }
 
     void VtParser::HandleOsc(const std::wstring& sequence)
@@ -275,6 +299,18 @@ namespace wsh::terminal
         case L'D':
             buffer_.MoveCursor(buffer_.GetCursor().row, buffer_.GetCursor().column - std::max(1, params[0]));
             break;
+        case L'E':
+            buffer_.MoveCursor(buffer_.GetCursor().row + std::max(1, params[0]), 0);
+            break;
+        case L'F':
+            buffer_.MoveCursor(buffer_.GetCursor().row - std::max(1, params[0]), 0);
+            break;
+        case L'G':
+            buffer_.MoveCursor(buffer_.GetCursor().row, std::max(1, params[0]) - 1);
+            break;
+        case L'd':
+            buffer_.MoveCursor(std::max(1, params[0]) - 1, buffer_.GetCursor().column);
+            break;
         case L'J':
             buffer_.ClearDisplay(params[0]);
             break;
@@ -282,8 +318,9 @@ namespace wsh::terminal
             buffer_.ClearLine(params[0]);
             break;
         case L'm':
-            for (const int value : params)
+            for (size_t i = 0; i < params.size(); ++i)
             {
+                const int value = params[i];
                 if (value == 0) buffer_.ResetAttributes();
                 else if (value == 1) buffer_.SetBold(true);
                 else if (value == 4) buffer_.SetUnderline(true);
@@ -297,6 +334,24 @@ namespace wsh::terminal
                 else if (value >= 90 && value <= 97) buffer_.SetForeground(BasicColor(value - 90, true));
                 else if (value >= 40 && value <= 47) buffer_.SetBackground(BasicColor(value - 40, false));
                 else if (value >= 100 && value <= 107) buffer_.SetBackground(BasicColor(value - 100, true));
+                else if ((value == 38 || value == 48) && i + 1 < params.size())
+                {
+                    const bool foreground = value == 38;
+                    const int mode = params[++i];
+                    if (mode == 5 && i + 1 < params.size())
+                    {
+                        const D2D1_COLOR_F color = IndexedColor(std::clamp(params[++i], 0, 255));
+                        if (foreground) buffer_.SetForeground(color); else buffer_.SetBackground(color);
+                    }
+                    else if (mode == 2 && i + 3 < params.size())
+                    {
+                        const float r = std::clamp(params[++i], 0, 255) / 255.0f;
+                        const float g = std::clamp(params[++i], 0, 255) / 255.0f;
+                        const float b = std::clamp(params[++i], 0, 255) / 255.0f;
+                        const D2D1_COLOR_F color = D2D1::ColorF(r, g, b, 1.0f);
+                        if (foreground) buffer_.SetForeground(color); else buffer_.SetBackground(color);
+                    }
+                }
             }
             break;
         case L's':
@@ -306,15 +361,19 @@ namespace wsh::terminal
             buffer_.RestoreCursor();
             break;
         case L'h':
-            if (privateMode && !params.empty() && params[0] == 25)
+            if (privateMode && !params.empty())
             {
-                buffer_.SetCursorVisible(true);
+                if (params[0] == 25) buffer_.SetCursorVisible(true);
+                else if (params[0] == 1049 || params[0] == 1047 || params[0] == 47) buffer_.EnterAlternateScreen();
+                else if (params[0] == 2004) buffer_.SetBracketedPasteMode(true);
             }
             break;
         case L'l':
-            if (privateMode && !params.empty() && params[0] == 25)
+            if (privateMode && !params.empty())
             {
-                buffer_.SetCursorVisible(false);
+                if (params[0] == 25) buffer_.SetCursorVisible(false);
+                else if (params[0] == 1049 || params[0] == 1047 || params[0] == 47) buffer_.LeaveAlternateScreen();
+                else if (params[0] == 2004) buffer_.SetBracketedPasteMode(false);
             }
             break;
         default:

@@ -3,6 +3,7 @@
 #include "core/logger.h"
 #include "core/utf.h"
 #include "platform/clipboard.h"
+#include "terminal/input_translator.h"
 
 #include <algorithm>
 #include <cwctype>
@@ -53,6 +54,7 @@ namespace wsh::app
 
         bool IsCtrlPressed() noexcept { return (::GetKeyState(VK_CONTROL) & 0x8000) != 0; }
         bool IsShiftPressed() noexcept { return (::GetKeyState(VK_SHIFT) & 0x8000) != 0; }
+        bool IsAltPressed() noexcept { return (::GetKeyState(VK_MENU) & 0x8000) != 0; }
 
         D2D1_RECT_F MakeRect(float left, float top, float right, float bottom)
         {
@@ -355,6 +357,21 @@ namespace wsh::app
     void MainWindow::Invalidate()
     {
         ::InvalidateRect(hwnd_, nullptr, FALSE);
+    }
+
+    void MainWindow::FocusActiveTerminal(const bool followBottom)
+    {
+        selectionStart_.reset();
+        selectionEnd_.reset();
+        if (auto* tab = workspace_ ? workspace_->ActiveTab() : nullptr)
+        {
+            if (followBottom)
+            {
+                std::scoped_lock lock(tab->Mutex());
+                tab->Buffer().FollowBottom();
+            }
+        }
+        ::SetFocus(hwnd_);
     }
 
     void MainWindow::OnPaint()
@@ -776,7 +793,33 @@ namespace wsh::app
         renderTarget_->DrawRoundedRectangle(D2D1::RoundedRect(searchRect, 14.0f, 14.0f), brush.Get(), 1.0f);
         brush->SetColor(searchQuery_.empty() ? D2D1::ColorF(0.67f, 0.71f, 0.79f, 0.96f) : D2D1::ColorF(0.88f, 0.92f, 0.98f, 0.98f));
         const std::wstring searchLabel = searchQuery_.empty() ? L"Search sessions" : Ellipsize(searchQuery_, 20);
-        renderTarget_->DrawTextW(searchLabel.c_str(), static_cast<UINT32>(searchLabel.size()), uiFormat_.Get(), MakeRect(52.0f, appHeaderHeight_ + 81.0f, sidebarWidth - 20.0f, appHeaderHeight_ + 106.0f), brush.Get());
+        const D2D1_RECT_F searchTextRect = MakeRect(52.0f, appHeaderHeight_ + 81.0f, sidebarWidth - 20.0f, appHeaderHeight_ + 106.0f);
+        renderTarget_->DrawTextW(searchLabel.c_str(), static_cast<UINT32>(searchLabel.size()), uiFormat_.Get(), searchTextRect, brush.Get());
+        if (searchFocused_)
+        {
+            const bool blinkOn = ((::GetTickCount64() / 530ULL) % 2ULL) == 0ULL;
+            if (blinkOn)
+            {
+                float caretX = searchTextRect.left;
+                if (!searchQuery_.empty())
+                {
+                    ComPtr<IDWriteTextLayout> searchLayout;
+                    const std::wstring visibleSearch = Ellipsize(searchQuery_, 20);
+                    if (SUCCEEDED(dwriteFactory_->CreateTextLayout(visibleSearch.c_str(), static_cast<UINT32>(visibleSearch.size()), uiFormat_.Get(), 400.0f, 32.0f, searchLayout.GetAddressOf())))
+                    {
+                        DWRITE_TEXT_METRICS metrics{};
+                        if (SUCCEEDED(searchLayout->GetMetrics(&metrics)))
+                        {
+                            caretX += metrics.widthIncludingTrailingWhitespace + 1.0f;
+                        }
+                    }
+                }
+                caretX = std::min(caretX, searchTextRect.right - 2.0f);
+                brush->SetColor(D2D1::ColorF(0.94f, 0.96f, 0.99f, 0.96f));
+                renderTarget_->FillRectangle(MakeRect(caretX, searchTextRect.top - 1.0f, caretX + 1.5f, searchTextRect.bottom - 2.0f), brush.Get());
+                brush->SetColor(searchQuery_.empty() ? D2D1::ColorF(0.67f, 0.71f, 0.79f, 0.96f) : D2D1::ColorF(0.88f, 0.92f, 0.98f, 0.98f));
+            }
+        }
         const float sx = 28.0f;
         const float sy = static_cast<float>(appHeaderHeight_) + 80.0f;
         renderTarget_->DrawEllipse(D2D1::Ellipse(D2D1::Point2F(sx + 7.0f, sy + 7.0f), 6.5f, 6.5f), brush.Get(), 1.4f);
@@ -1041,7 +1084,12 @@ namespace wsh::app
             return;
         }
 
-        if (IsCtrlPressed())
+        if (IsCtrlPressed() || IsAltPressed())
+        {
+            return;
+        }
+
+        if (ch < 0x20 || ch == 0x7F)
         {
             return;
         }
@@ -1504,6 +1552,9 @@ void MainWindow::OnLeftButtonDown(const int x, const int y)
                 break;
             case kSidebarFocusSearch:
                 searchFocused_ = true;
+                selectionStart_.reset();
+                selectionEnd_.reset();
+                ::SetFocus(hwnd_);
                 Invalidate();
                 return;
             case kSidebarReloadSettings:
@@ -1518,6 +1569,9 @@ void MainWindow::OnLeftButtonDown(const int x, const int y)
         if (IsPointInSearchBox(x, y))
         {
             searchFocused_ = true;
+            selectionStart_.reset();
+            selectionEnd_.reset();
+            ::SetFocus(hwnd_);
             Invalidate();
             return;
         }
@@ -1532,6 +1586,7 @@ void MainWindow::OnLeftButtonDown(const int x, const int y)
         if (const auto sessionIndex = HitTestSidebarSession(x, y))
         {
             workspace_->ActivateTab(*sessionIndex);
+            FocusActiveTerminal();
             UpdateWindowTitle();
             Invalidate();
             return;
@@ -1595,6 +1650,10 @@ void MainWindow::OnLeftButtonDown(const int x, const int y)
                 {
                     OpenProfile(0);
                 }
+                else
+                {
+                    FocusActiveTerminal();
+                }
                 UpdateWindowTitle();
                 Invalidate();
             }
@@ -1610,6 +1669,7 @@ void MainWindow::OnLeftButtonDown(const int x, const int y)
         if (const auto tabIndex = HitTestTab(x, y))
         {
             workspace_->ActivateTab(*tabIndex);
+            FocusActiveTerminal();
             UpdateWindowTitle();
             Invalidate();
             return;
@@ -1623,6 +1683,7 @@ void MainWindow::OnLeftButtonDown(const int x, const int y)
             return;
         }
 
+        ::SetFocus(hwnd_);
         const auto point = ClientToBufferPoint(x, y);
         const DWORD now = ::GetTickCount();
         if (lastDoubleClickPoint_ && point.row == lastDoubleClickPoint_->row && now - lastDoubleClickTick_ <= ::GetDoubleClickTime())
@@ -1969,7 +2030,15 @@ void MainWindow::OnLeftButtonDown(const int x, const int y)
 
         if (const auto text = platform::ReadClipboardText(hwnd_))
         {
-            tab->SendInput(core::WideToUtf8(*text));
+            std::string utf8 = core::WideToUtf8(*text);
+            {
+                std::scoped_lock lock(tab->Mutex());
+                if (tab->Buffer().IsBracketedPasteMode())
+                {
+                    utf8 = std::string("[200~") + utf8 + "[201~";
+                }
+            }
+            tab->SendInput(utf8);
         }
     }
 
@@ -1978,6 +2047,7 @@ void MainWindow::OnLeftButtonDown(const int x, const int y)
         ResizeTerminalToClient();
         if (workspace_ && workspace_->OpenProfile(index, terminalColumns_, terminalRows_))
         {
+            FocusActiveTerminal();
             UpdateWindowTitle();
             Invalidate();
         }

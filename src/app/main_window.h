@@ -74,6 +74,7 @@ namespace wsh::app
         bool UpdateHoverState(int x, int y);
         void EnsureMouseTracking();
         void UpdateCursor();
+        void FocusActiveTerminal(bool followBottom = true);
 
         HWND hwnd_ = nullptr;
         HINSTANCE instance_ = nullptr;
