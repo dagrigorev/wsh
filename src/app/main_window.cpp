@@ -60,6 +60,92 @@ namespace wsh::app
         {
             return D2D1::RectF(left, top, right, bottom);
         }
+
+        struct PaneVisual
+        {
+            D2D1_RECT_F shellRect{};
+            D2D1_RECT_F headerRect{};
+            D2D1_RECT_F outerRect{};
+            D2D1_RECT_F clipRect{};
+            float padX = 26.0f;
+            float padY = 24.0f;
+            int columns = 80;
+            int rows = 24;
+        };
+
+        std::vector<PaneVisual> ComputePaneVisuals(const RECT& rect, const wsh::terminal::TerminalTab& tab, const float charWidth, const float lineHeight, const int appHeaderHeight, const int tabBarHeight, const int statusBarHeight)
+        {
+            constexpr float sidebarWidth = 268.0f;
+            constexpr float terminalWrapPadding = 14.0f;
+            constexpr float shellHeaderHeight = 42.0f;
+            constexpr float shellInnerMargin = 12.0f;
+            constexpr float termPadX = 26.0f;
+            constexpr float termPadY = 24.0f;
+            constexpr float paneGap = 12.0f;
+
+            const float contentTop = static_cast<float>(appHeaderHeight + tabBarHeight);
+            const float contentBottom = static_cast<float>(rect.bottom - statusBarHeight);
+            const float shellLeft = sidebarWidth + terminalWrapPadding;
+            const float shellTop = contentTop + terminalWrapPadding;
+            const float shellRight = static_cast<float>(rect.right) - terminalWrapPadding;
+            const float shellBottom = contentBottom - terminalWrapPadding;
+            const D2D1_RECT_F hostRect = MakeRect(shellLeft, shellTop, shellRight, shellBottom);
+
+            auto makePane = [&](const D2D1_RECT_F& shellRect)
+            {
+                PaneVisual visual{};
+                visual.shellRect = shellRect;
+                visual.headerRect = MakeRect(shellRect.left, shellRect.top, shellRect.right, shellRect.top + shellHeaderHeight);
+                visual.outerRect = MakeRect(shellRect.left + shellInnerMargin, shellRect.top + shellHeaderHeight + shellInnerMargin, shellRect.right - shellInnerMargin, shellRect.bottom - shellInnerMargin);
+                const float clipRight = visual.outerRect.left + termPadX + std::max(100.0f, visual.outerRect.right - visual.outerRect.left - termPadX * 2.0f - 4.0f);
+                const float clipBottom = visual.outerRect.top + termPadY + std::max(80.0f, visual.outerRect.bottom - visual.outerRect.top - termPadY * 2.0f - 4.0f);
+                visual.clipRect = MakeRect(visual.outerRect.left + termPadX, visual.outerRect.top + termPadY, clipRight, clipBottom);
+                visual.columns = std::max(20, static_cast<int>((visual.clipRect.right - visual.clipRect.left) / charWidth));
+                visual.rows = std::max(6, static_cast<int>((visual.clipRect.bottom - visual.clipRect.top) / lineHeight));
+                return visual;
+            };
+
+            std::vector<PaneVisual> visuals;
+            const size_t count = tab.PaneCount();
+            visuals.reserve(count);
+            switch (tab.LayoutPreset())
+            {
+            case wsh::terminal::PaneLayoutPreset::TwoColumns:
+            {
+                const float mid = (hostRect.left + hostRect.right - paneGap) * 0.5f;
+                visuals.push_back(makePane(MakeRect(hostRect.left, hostRect.top, mid, hostRect.bottom)));
+                visuals.push_back(makePane(MakeRect(mid + paneGap, hostRect.top, hostRect.right, hostRect.bottom)));
+                break;
+            }
+            case wsh::terminal::PaneLayoutPreset::TwoRows:
+            {
+                const float mid = (hostRect.top + hostRect.bottom - paneGap) * 0.5f;
+                visuals.push_back(makePane(MakeRect(hostRect.left, hostRect.top, hostRect.right, mid)));
+                visuals.push_back(makePane(MakeRect(hostRect.left, mid + paneGap, hostRect.right, hostRect.bottom)));
+                break;
+            }
+            case wsh::terminal::PaneLayoutPreset::Grid2x2:
+            {
+                const float midX = (hostRect.left + hostRect.right - paneGap) * 0.5f;
+                const float midY = (hostRect.top + hostRect.bottom - paneGap) * 0.5f;
+                visuals.push_back(makePane(MakeRect(hostRect.left, hostRect.top, midX, midY)));
+                visuals.push_back(makePane(MakeRect(midX + paneGap, hostRect.top, hostRect.right, midY)));
+                visuals.push_back(makePane(MakeRect(hostRect.left, midY + paneGap, midX, hostRect.bottom)));
+                visuals.push_back(makePane(MakeRect(midX + paneGap, midY + paneGap, hostRect.right, hostRect.bottom)));
+                break;
+            }
+            case wsh::terminal::PaneLayoutPreset::Single:
+            default:
+                visuals.push_back(makePane(hostRect));
+                break;
+            }
+
+            if (visuals.size() > count)
+            {
+                visuals.resize(count);
+            }
+            return visuals;
+        }
     }
 
     bool MainWindow::Create(HINSTANCE instance, int showCommand)
@@ -411,14 +497,18 @@ namespace wsh::app
             ++seen[name];
         }
 
-        const std::wstring& name = workspace_->Tabs()[index]->ProfileName();
-        const int count = seen[name];
-        if (count <= 1)
+        const auto* tab = workspace_->Tabs()[index].get();
+        std::wstring label = tab->ProfileName();
+        const int count = seen[label];
+        if (count > 1)
         {
-            return name;
+            label = std::format(L"{} #{}", label, count);
         }
-
-        return std::format(L"{} #{}", name, count);
+        if (tab->PaneCount() > 1)
+        {
+            label += L" • Multi";
+        }
+        return label;
     }
 
         std::wstring MainWindow::Ellipsize(const std::wstring& text, const size_t maxChars) const
@@ -910,115 +1000,114 @@ namespace wsh::app
         const std::wstring footerText = workspace_ ? std::format(L"{} workspace(s) • {} session(s)", workspace_->Workspaces().size(), workspace_->Tabs().size()) : L"Material styled terminal shell";
         renderTarget_->DrawTextW(footerText.c_str(), static_cast<UINT32>(footerText.size()), uiFormat_.Get(), MakeRect(28.0f, footerRect.top + 42.0f, footerRect.right - 18.0f, footerRect.bottom - 14.0f), brush.Get());
 
-        const float shellLeft = contentLeft + terminalWrapPadding;
-        const float shellTop = contentTop + terminalWrapPadding;
-        const float shellRight = static_cast<float>(rect.right) - terminalWrapPadding;
-        const float shellBottom = contentBottom - terminalWrapPadding;
-        const D2D1_RECT_F shellRect = MakeRect(shellLeft, shellTop, shellRight, shellBottom);
-        brush->SetColor(D2D1::ColorF(0.01f, 0.02f, 0.04f, 0.28f));
-        renderTarget_->FillRoundedRectangle(D2D1::RoundedRect(MakeRect(shellLeft, shellTop + 8.0f, shellRight, shellBottom + 10.0f), 22.0f, 22.0f), brush.Get());
-        brush->SetColor(D2D1::ColorF(1, 1, 1, 0.025f));
-        renderTarget_->FillRoundedRectangle(D2D1::RoundedRect(shellRect, 22.0f, 22.0f), brush.Get());
-        brush->SetColor(D2D1::ColorF(1, 1, 1, 0.07f));
-        renderTarget_->DrawRoundedRectangle(D2D1::RoundedRect(shellRect, 22.0f, 22.0f), brush.Get(), 1.0f);
-
-        const D2D1_RECT_F topline = MakeRect(shellLeft, shellTop, shellRight, shellTop + shellHeaderHeight);
-        brush->SetColor(D2D1::ColorF(1, 1, 1, 0.02f));
-        renderTarget_->FillRoundedRectangle(D2D1::RoundedRect(topline, 22.0f, 22.0f), brush.Get());
-        brush->SetColor(D2D1::ColorF(1, 1, 1, 0.05f));
-        renderTarget_->DrawLine(D2D1::Point2F(shellLeft, shellTop + shellHeaderHeight - 0.5f), D2D1::Point2F(shellRight, shellTop + shellHeaderHeight - 0.5f), brush.Get(), 1.0f);
-        const D2D1_COLOR_F trafficColors[] = {D2D1::ColorF(1.0f, 0.42f, 0.50f, 1.0f), D2D1::ColorF(0.96f, 0.76f, 0.47f, 1.0f), D2D1::ColorF(0.49f, 0.91f, 0.53f, 1.0f)};
-        for (int i = 0; i < 3; ++i)
+        const auto paneVisuals = ComputePaneVisuals(rect, *tab, charWidth_, lineHeight_, appHeaderHeight_, tabBarHeight_, statusBarHeight_);
+        for (size_t paneIndex = 0; paneIndex < paneVisuals.size(); ++paneIndex)
         {
-            brush->SetColor(trafficColors[i]);
-            renderTarget_->FillEllipse(D2D1::Ellipse(D2D1::Point2F(shellLeft + 22.0f + i * 18.0f, shellTop + 21.0f), 5.0f, 5.0f), brush.Get());
-        }
-        ComPtr<IDWriteTextFormat> metaFormat;
-        dwriteFactory_->CreateTextFormat(L"Segoe UI", nullptr, DWRITE_FONT_WEIGHT_BOLD, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, 13.0f, L"ru-RU", metaFormat.GetAddressOf());
-        metaFormat->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
-        brush->SetColor(D2D1::ColorF(0.66f, 0.71f, 0.79f, 0.98f));
-        std::wstring termTitle = workspace_ && workspace_->ActiveTab() ? std::format(L"{} • ACTIVE SESSION", workspace_->ActiveTab()->ProfileName()) : L"LOCAL SHELL • ACTIVE SESSION";
-        termTitle = Ellipsize(termTitle, 28);
-        renderTarget_->DrawTextW(termTitle.c_str(), static_cast<UINT32>(termTitle.size()), metaFormat.Get(), MakeRect(shellLeft + 86.0f, shellTop + 13.0f, shellRight - 24.0f, shellTop + 34.0f), brush.Get());
+            const auto& visual = paneVisuals[paneIndex];
+            const bool activePane = paneIndex == tab->ActivePaneIndex();
+            const bool hoveredPane = hoveredPane_ && *hoveredPane_ == paneIndex;
+            const bool dragTarget = dragTargetPane_ && *dragTargetPane_ == paneIndex;
 
-        const float termOuterLeft = shellLeft + shellInnerMargin;
-        const float termOuterTop = shellTop + shellHeaderHeight + shellInnerMargin;
-        const float termOuterRight = shellRight - shellInnerMargin;
-        const float termOuterBottom = shellBottom - shellInnerMargin;
-        brush->SetColor(D2D1::ColorF(0.04f, 0.06f, 0.09f, 1.0f));
-        renderTarget_->FillRoundedRectangle(D2D1::RoundedRect(MakeRect(termOuterLeft, termOuterTop, termOuterRight, termOuterBottom), 18.0f, 18.0f), brush.Get());
-        brush->SetColor(D2D1::ColorF(1, 1, 1, 0.05f));
-        renderTarget_->DrawRoundedRectangle(D2D1::RoundedRect(MakeRect(termOuterLeft, termOuterTop, termOuterRight, termOuterBottom), 18.0f, 18.0f), brush.Get(), 1.0f);
+            brush->SetColor(D2D1::ColorF(0.01f, 0.02f, 0.04f, 0.28f));
+            renderTarget_->FillRoundedRectangle(D2D1::RoundedRect(MakeRect(visual.shellRect.left, visual.shellRect.top + 8.0f, visual.shellRect.right, visual.shellRect.bottom + 10.0f), 22.0f, 22.0f), brush.Get());
+            brush->SetColor(D2D1::ColorF(1, 1, 1, activePane ? 0.04f : 0.025f));
+            renderTarget_->FillRoundedRectangle(D2D1::RoundedRect(visual.shellRect, 22.0f, 22.0f), brush.Get());
+            brush->SetColor(dragTarget ? D2D1::ColorF(0.55f, 0.36f, 0.96f, 0.55f) : (activePane ? D2D1::ColorF(0.55f, 0.36f, 0.96f, 0.28f) : D2D1::ColorF(1, 1, 1, hoveredPane ? 0.11f : 0.07f)));
+            renderTarget_->DrawRoundedRectangle(D2D1::RoundedRect(visual.shellRect, 22.0f, 22.0f), brush.Get(), activePane ? 1.4f : 1.0f);
 
-        const float left = termOuterLeft + termPadX;
-        const float top = termOuterTop + termPadY;
-        const float clipRight = left + terminalColumns_ * charWidth_;
-        const float clipBottom = top + terminalRows_ * lineHeight_;
-        renderTarget_->PushAxisAlignedClip(MakeRect(left, top, clipRight, clipBottom), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
-        const auto selectionLeft = selectionStart_ && selectionEnd_ ? std::min(*selectionStart_, *selectionEnd_) : wsh::terminal::SelectionPoint{};
-        const auto selectionRight = selectionStart_ && selectionEnd_ ? std::max(*selectionStart_, *selectionEnd_) : wsh::terminal::SelectionPoint{};
-        const bool hasSelection = selectionStart_.has_value() && selectionEnd_.has_value();
-        std::scoped_lock lock(tab->Mutex());
-        const auto& lines = tab->Buffer().Lines();
-        const int viewportTop = tab->Buffer().ViewportTop();
-        for (int row = 0; row < terminalRows_; ++row)
-        {
-            const int bufferRow = viewportTop + row;
-            if (bufferRow >= static_cast<int>(lines.size())) break;
-            const float y = top + row * lineHeight_;
-            for (int column = 0; column < terminalColumns_ && column < static_cast<int>(lines[bufferRow].size()); ++column)
+            brush->SetColor(D2D1::ColorF(1, 1, 1, activePane ? 0.03f : 0.02f));
+            renderTarget_->FillRoundedRectangle(D2D1::RoundedRect(visual.headerRect, 22.0f, 22.0f), brush.Get());
+            brush->SetColor(D2D1::ColorF(1, 1, 1, 0.05f));
+            renderTarget_->DrawLine(D2D1::Point2F(visual.headerRect.left, visual.headerRect.bottom - 0.5f), D2D1::Point2F(visual.headerRect.right, visual.headerRect.bottom - 0.5f), brush.Get(), 1.0f);
+
+            const D2D1_COLOR_F trafficColors[] = {D2D1::ColorF(1.0f, 0.42f, 0.50f, 1.0f), D2D1::ColorF(0.96f, 0.76f, 0.47f, 1.0f), D2D1::ColorF(0.49f, 0.91f, 0.53f, 1.0f)};
+            for (int i = 0; i < 3; ++i)
             {
-                const auto& cell = lines[bufferRow][column];
-                const float x = left + column * charWidth_;
-                const bool selected = hasSelection && wsh::terminal::SelectionPoint{ bufferRow, column } >= selectionLeft && wsh::terminal::SelectionPoint{ bufferRow, column } <= selectionRight;
-                D2D1_COLOR_F background = cell.background;
-                D2D1_COLOR_F foreground = cell.foreground;
-                if (cell.inverse) std::swap(background, foreground);
-                if (background.a > 0.01f)
+                brush->SetColor(trafficColors[i]);
+                renderTarget_->FillEllipse(D2D1::Ellipse(D2D1::Point2F(visual.headerRect.left + 22.0f + i * 18.0f, visual.headerRect.top + 21.0f), 5.0f, 5.0f), brush.Get());
+            }
+
+            ComPtr<IDWriteTextFormat> metaFormat;
+            dwriteFactory_->CreateTextFormat(L"Segoe UI", nullptr, DWRITE_FONT_WEIGHT_BOLD, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, 13.0f, L"ru-RU", metaFormat.GetAddressOf());
+            metaFormat->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+            brush->SetColor(activePane ? D2D1::ColorF(0.80f, 0.85f, 0.97f, 0.98f) : D2D1::ColorF(0.66f, 0.71f, 0.79f, 0.96f));
+            std::wstring termTitle = std::format(L"{} • {}", tab->ProfileName(), tab->PaneTitleSnapshot(paneIndex));
+            termTitle = Ellipsize(termTitle, paneIndex == tab->ActivePaneIndex() ? 32 : 24);
+            renderTarget_->DrawTextW(termTitle.c_str(), static_cast<UINT32>(termTitle.size()), metaFormat.Get(), MakeRect(visual.headerRect.left + 86.0f, visual.headerRect.top + 13.0f, visual.headerRect.right - 24.0f, visual.headerRect.top + 34.0f), brush.Get());
+
+            brush->SetColor(D2D1::ColorF(0.04f, 0.06f, 0.09f, 1.0f));
+            renderTarget_->FillRoundedRectangle(D2D1::RoundedRect(visual.outerRect, 18.0f, 18.0f), brush.Get());
+            brush->SetColor(D2D1::ColorF(1, 1, 1, activePane ? 0.06f : 0.05f));
+            renderTarget_->DrawRoundedRectangle(D2D1::RoundedRect(visual.outerRect, 18.0f, 18.0f), brush.Get(), 1.0f);
+
+            tab->ResizePane(paneIndex, visual.columns, visual.rows);
+            renderTarget_->PushAxisAlignedClip(visual.clipRect, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+            const auto selectionLeft = selectionStart_ && selectionEnd_ ? std::min(*selectionStart_, *selectionEnd_) : wsh::terminal::SelectionPoint{};
+            const auto selectionRight = selectionStart_ && selectionEnd_ ? std::max(*selectionStart_, *selectionEnd_) : wsh::terminal::SelectionPoint{};
+            const bool hasSelection = activePane && selectionStart_.has_value() && selectionEnd_.has_value();
+            std::scoped_lock lock(tab->MutexAt(paneIndex));
+            const auto& buffer = tab->BufferAt(paneIndex);
+            const auto& lines = buffer.Lines();
+            const int viewportTop = buffer.ViewportTop();
+            for (int row = 0; row < visual.rows; ++row)
+            {
+                const int bufferRow = viewportTop + row;
+                if (bufferRow >= static_cast<int>(lines.size())) break;
+                const float y = visual.clipRect.top + row * lineHeight_;
+                for (int column = 0; column < visual.columns && column < static_cast<int>(lines[bufferRow].size()); ++column)
                 {
-                    brush->SetColor(background);
-                    renderTarget_->FillRectangle(MakeRect(x, y, x + charWidth_, y + lineHeight_), brush.Get());
-                }
-                if (selected)
-                {
-                    brush->SetColor(D2D1::ColorF(0.55f, 0.36f, 0.96f, 0.36f));
-                    renderTarget_->FillRectangle(MakeRect(x, y, x + charWidth_, y + lineHeight_), brush.Get());
-                    foreground = D2D1::ColorF(1.0f, 1.0f, 1.0f, 1.0f);
-                }
-                brush->SetColor(foreground);
-                const wchar_t glyph[2] = { cell.glyph == L'\000' ? L' ' : cell.glyph, (wchar_t)0 };
-                renderTarget_->DrawTextW(glyph, 1, terminalFormat_.Get(), MakeRect(x, y, x + charWidth_ * 2.0f, y + lineHeight_), brush.Get());
-                if (cell.underline)
-                {
-                    renderTarget_->DrawLine(D2D1::Point2F(x, y + lineHeight_ - 2.0f), D2D1::Point2F(x + charWidth_, y + lineHeight_ - 2.0f), brush.Get(), 1.0f);
+                    const auto& cell = lines[bufferRow][column];
+                    const float x = visual.clipRect.left + column * charWidth_;
+                    const bool selected = hasSelection && wsh::terminal::SelectionPoint{ bufferRow, column } >= selectionLeft && wsh::terminal::SelectionPoint{ bufferRow, column } <= selectionRight;
+                    D2D1_COLOR_F background = cell.background;
+                    D2D1_COLOR_F foreground = cell.foreground;
+                    if (cell.inverse) std::swap(background, foreground);
+                    if (background.a > 0.01f)
+                    {
+                        brush->SetColor(background);
+                        renderTarget_->FillRectangle(MakeRect(x, y, x + charWidth_, y + lineHeight_), brush.Get());
+                    }
+                    if (selected)
+                    {
+                        brush->SetColor(D2D1::ColorF(0.55f, 0.36f, 0.96f, 0.36f));
+                        renderTarget_->FillRectangle(MakeRect(x, y, x + charWidth_, y + lineHeight_), brush.Get());
+                        foreground = D2D1::ColorF(1.0f, 1.0f, 1.0f, 1.0f);
+                    }
+                    brush->SetColor(foreground);
+                    const wchar_t glyph[2] = { cell.glyph == L'\0' ? L' ' : cell.glyph, (wchar_t)0 };
+                    renderTarget_->DrawTextW(glyph, 1, terminalFormat_.Get(), MakeRect(x, y, x + charWidth_ * 2.0f, y + lineHeight_), brush.Get());
+                    if (cell.underline)
+                    {
+                        renderTarget_->DrawLine(D2D1::Point2F(x, y + lineHeight_ - 2.0f), D2D1::Point2F(x + charWidth_, y + lineHeight_ - 2.0f), brush.Get(), 1.0f);
+                    }
                 }
             }
-        }
-        const auto& cursor = tab->Buffer().GetCursor();
-        const bool blinkOn = ((::GetTickCount64() / 530ULL) % 2ULL) == 0ULL;
-        if (cursor.visible && blinkOn)
-        {
-            brush->SetColor(D2D1::ColorF(0.96f, 0.97f, 1.0f, 1.0f));
-            const int relativeRow = cursor.row - viewportTop;
-            if (relativeRow >= 0 && relativeRow < terminalRows_)
+            const auto& cursor = buffer.GetCursor();
+            const bool blinkOn = ((::GetTickCount64() / 530ULL) % 2ULL) == 0ULL;
+            if (activePane && cursor.visible && blinkOn)
             {
-                const float x = left + cursor.column * charWidth_;
-                const float y = top + relativeRow * lineHeight_;
-                if (settings_.cursorStyle == config::CursorStyle::Underline)
+                brush->SetColor(D2D1::ColorF(0.96f, 0.97f, 1.0f, 1.0f));
+                const int relativeRow = cursor.row - viewportTop;
+                if (relativeRow >= 0 && relativeRow < visual.rows)
                 {
-                    renderTarget_->FillRectangle(MakeRect(x, y + lineHeight_ - 3.0f, x + charWidth_, y + lineHeight_ - 1.0f), brush.Get());
-                }
-                else if (settings_.cursorStyle == config::CursorStyle::Block)
-                {
-                    renderTarget_->FillRectangle(MakeRect(x, y, x + charWidth_ - 1.0f, y + lineHeight_ - 1.0f), brush.Get());
-                }
-                else
-                {
-                    renderTarget_->FillRectangle(MakeRect(x, y, x + 2.0f, y + lineHeight_ - 2.0f), brush.Get());
+                    const float x = visual.clipRect.left + cursor.column * charWidth_;
+                    const float y = visual.clipRect.top + relativeRow * lineHeight_;
+                    if (settings_.cursorStyle == config::CursorStyle::Underline)
+                    {
+                        renderTarget_->FillRectangle(MakeRect(x, y + lineHeight_ - 3.0f, x + charWidth_, y + lineHeight_ - 1.0f), brush.Get());
+                    }
+                    else if (settings_.cursorStyle == config::CursorStyle::Block)
+                    {
+                        renderTarget_->FillRectangle(MakeRect(x, y, x + charWidth_ - 1.0f, y + lineHeight_ - 1.0f), brush.Get());
+                    }
+                    else
+                    {
+                        renderTarget_->FillRectangle(MakeRect(x, y, x + 2.0f, y + lineHeight_ - 2.0f), brush.Get());
+                    }
                 }
             }
+            renderTarget_->PopAxisAlignedClip();
         }
-        renderTarget_->PopAxisAlignedClip();
     }
 
         void MainWindow::DrawStatusBar()
@@ -1098,7 +1187,7 @@ namespace wsh::app
         Invalidate();
     }
 
-void MainWindow::ShowProfileMenu(const int x, const int y)
+    void MainWindow::ShowProfileMenu(const int x, const int y)
     {
         if (!workspace_)
         {
@@ -1126,7 +1215,50 @@ void MainWindow::ShowProfileMenu(const int x, const int y)
             OpenProfile(command - kProfileMenuBase);
         }
     }
-void MainWindow::ShowWorkspaceMenu(const int x, const int y)
+
+    void MainWindow::ShowSplitLayoutMenu(const int x, const int y)
+    {
+        auto* tab = workspace_ ? workspace_->ActiveTab() : nullptr;
+        if (tab == nullptr)
+        {
+            return;
+        }
+
+        constexpr UINT kLayoutSingle = 42001;
+        constexpr UINT kLayoutColumns = 42002;
+        constexpr UINT kLayoutRows = 42003;
+        constexpr UINT kLayoutGrid = 42004;
+
+        HMENU menu = ::CreatePopupMenu();
+        if (menu == nullptr)
+        {
+            return;
+        }
+
+        ::AppendMenuW(menu, MF_STRING | (tab->LayoutPreset() == wsh::terminal::PaneLayoutPreset::Single ? MF_CHECKED : 0), kLayoutSingle, L"Single pane");
+        ::AppendMenuW(menu, MF_STRING | (tab->LayoutPreset() == wsh::terminal::PaneLayoutPreset::TwoColumns ? MF_CHECKED : 0), kLayoutColumns, L"Split vertically");
+        ::AppendMenuW(menu, MF_STRING | (tab->LayoutPreset() == wsh::terminal::PaneLayoutPreset::TwoRows ? MF_CHECKED : 0), kLayoutRows, L"Split horizontally");
+        ::AppendMenuW(menu, MF_STRING | (tab->LayoutPreset() == wsh::terminal::PaneLayoutPreset::Grid2x2 ? MF_CHECKED : 0), kLayoutGrid, L"Grid 2x2");
+
+        POINT screenPoint{ x, y };
+        ::ClientToScreen(hwnd_, &screenPoint);
+        const UINT command = ::TrackPopupMenu(menu, TPM_RETURNCMD | TPM_LEFTALIGN | TPM_TOPALIGN, screenPoint.x, screenPoint.y, 0, hwnd_, nullptr);
+        ::DestroyMenu(menu);
+
+        switch (command)
+        {
+        case kLayoutSingle: tab->SetLayoutPreset(wsh::terminal::PaneLayoutPreset::Single); break;
+        case kLayoutColumns: tab->SplitActivePane(wsh::terminal::PaneLayoutPreset::TwoColumns); break;
+        case kLayoutRows: tab->SplitActivePane(wsh::terminal::PaneLayoutPreset::TwoRows); break;
+        case kLayoutGrid: tab->SplitActivePane(wsh::terminal::PaneLayoutPreset::Grid2x2); break;
+        default: return;
+        }
+
+        FocusActiveTerminal();
+        Invalidate();
+    }
+
+    void MainWindow::ShowWorkspaceMenu(const int x, const int y)
     {
         if (!workspace_)
         {
@@ -1183,7 +1315,6 @@ void MainWindow::ShowWorkspaceMenu(const int x, const int y)
             Invalidate();
         }
     }
-
 
 void MainWindow::OnKeyDown(const WPARAM key, LPARAM)
     {
@@ -1292,7 +1423,15 @@ void MainWindow::OnMouseWheel(const short delta)
         if (auto* tab = workspace_ ? workspace_->ActiveTab() : nullptr)
         {
             const int step = std::max(3, terminalRows_ / 8);
-            tab->Scroll(delta > 0 ? -step : step);
+            if (hoveredPane_)
+            {
+                tab->ActivatePane(*hoveredPane_);
+                tab->ScrollPane(*hoveredPane_, delta > 0 ? -step : step);
+            }
+            else
+            {
+                tab->Scroll(delta > 0 ? -step : step);
+            }
             if (selecting_)
             {
                 POINT point{};
@@ -1306,17 +1445,22 @@ void MainWindow::OnMouseWheel(const short delta)
 
         bool MainWindow::IsPointInTerminal(const int x, const int y) const
     {
-        constexpr int sidebarWidth = 268;
-        constexpr int terminalWrapPadding = 14;
-        constexpr int shellHeaderHeight = 42;
-        constexpr int shellInnerMargin = 12;
-        constexpr int termPadX = 26;
-        constexpr int termPadY = 24;
-        const int left = sidebarWidth + terminalWrapPadding + shellInnerMargin + termPadX;
-        const int top = appHeaderHeight_ + tabBarHeight_ + terminalWrapPadding + shellHeaderHeight + shellInnerMargin + termPadY;
-        const int right = left + static_cast<int>(terminalColumns_ * charWidth_);
-        const int bottom = top + static_cast<int>(terminalRows_ * lineHeight_);
-        return x >= left && x <= right && y >= top && y <= bottom;
+        auto* tab = workspace_ ? workspace_->ActiveTab() : nullptr;
+        if (tab == nullptr)
+        {
+            return false;
+        }
+        RECT rect{};
+        ::GetClientRect(hwnd_, &rect);
+        const auto visuals = ComputePaneVisuals(rect, *tab, charWidth_, lineHeight_, appHeaderHeight_, tabBarHeight_, statusBarHeight_);
+        for (const auto& visual : visuals)
+        {
+            if (x >= visual.clipRect.left && x <= visual.clipRect.right && y >= visual.clipRect.top && y <= visual.clipRect.bottom)
+            {
+                return true;
+            }
+        }
+        return false;
     }
 
         bool MainWindow::IsPointInDraggableHeader(const int x, const int y) const
@@ -1361,20 +1505,32 @@ void MainWindow::OnMouseWheel(const short delta)
 
         wsh::terminal::SelectionPoint MainWindow::ClientToBufferPoint(const int x, const int y) const
     {
+        if (const auto paneIndex = HitTestTerminalPane(x, y))
+        {
+            return ClientToBufferPoint(x, y, *paneIndex);
+        }
+        auto* tab = workspace_ ? workspace_->ActiveTab() : nullptr;
+        return tab ? wsh::terminal::SelectionPoint{ tab->Buffer().ViewportTop(), 0 } : wsh::terminal::SelectionPoint{};
+    }
+
+        wsh::terminal::SelectionPoint MainWindow::ClientToBufferPoint(const int x, const int y, const size_t paneIndex) const
+    {
         auto* tab = workspace_ ? workspace_->ActiveTab() : nullptr;
         if (tab == nullptr)
         {
             return {};
         }
-        constexpr int sidebarWidth = 268;
-        constexpr int terminalWrapPadding = 14;
-        constexpr int shellHeaderHeight = 42;
-        constexpr int shellInnerMargin = 12;
-        constexpr int termPadX = 26;
-        constexpr int termPadY = 24;
-        const int column = std::clamp(static_cast<int>((x - sidebarWidth - terminalWrapPadding - shellInnerMargin - termPadX) / charWidth_), 0, terminalColumns_ - 1);
-        const int row = std::clamp(static_cast<int>((y - appHeaderHeight_ - tabBarHeight_ - terminalWrapPadding - shellHeaderHeight - shellInnerMargin - termPadY) / lineHeight_), 0, terminalRows_ - 1);
-        return { tab->Buffer().ViewportTop() + row, column };
+        RECT rect{};
+        ::GetClientRect(hwnd_, &rect);
+        const auto visuals = ComputePaneVisuals(rect, *tab, charWidth_, lineHeight_, appHeaderHeight_, tabBarHeight_, statusBarHeight_);
+        if (paneIndex >= visuals.size())
+        {
+            return {};
+        }
+        const auto& visual = visuals[paneIndex];
+        const int column = std::clamp(static_cast<int>((x - visual.clipRect.left) / charWidth_), 0, std::max(0, visual.columns - 1));
+        const int row = std::clamp(static_cast<int>((y - visual.clipRect.top) / lineHeight_), 0, std::max(0, visual.rows - 1));
+        return { tab->BufferAt(paneIndex).ViewportTop() + row, column };
     }
 
         std::optional<size_t> MainWindow::HitTestTab(const int x, const int y) const
@@ -1499,17 +1655,74 @@ void MainWindow::OnMouseWheel(const short delta)
 
     std::optional<int> MainWindow::HitTestShellTrafficDot(const int x, const int y) const
     {
+        auto* tab = workspace_ ? workspace_->ActiveTab() : nullptr;
+        if (tab == nullptr)
+        {
+            return std::nullopt;
+        }
         RECT rect{};
         ::GetClientRect(hwnd_, &rect);
-        const float shellLeft = 268.0f + 14.0f;
-        const float shellTop = static_cast<float>(appHeaderHeight_ + tabBarHeight_) + 14.0f;
+        const auto visuals = ComputePaneVisuals(rect, *tab, charWidth_, lineHeight_, appHeaderHeight_, tabBarHeight_, statusBarHeight_);
+        const size_t paneIndex = hoveredPane_.value_or(tab->ActivePaneIndex());
+        if (paneIndex >= visuals.size())
+        {
+            return std::nullopt;
+        }
+        const auto& header = visuals[paneIndex].headerRect;
         for (int i = 0; i < 3; ++i)
         {
-            const float cx = shellLeft + 22.0f + i * 18.0f;
-            const float cy = shellTop + 21.0f;
+            const float cx = header.left + 22.0f + i * 18.0f;
+            const float cy = header.top + 21.0f;
             const float dx = static_cast<float>(x) - cx;
             const float dy = static_cast<float>(y) - cy;
             if (dx * dx + dy * dy <= 64.0f)
+            {
+                return i;
+            }
+        }
+        return std::nullopt;
+    }
+
+    std::optional<size_t> MainWindow::HitTestTerminalPane(const int x, const int y) const
+    {
+        auto* tab = workspace_ ? workspace_->ActiveTab() : nullptr;
+        if (tab == nullptr)
+        {
+            return std::nullopt;
+        }
+        RECT rect{};
+        ::GetClientRect(hwnd_, &rect);
+        const auto visuals = ComputePaneVisuals(rect, *tab, charWidth_, lineHeight_, appHeaderHeight_, tabBarHeight_, statusBarHeight_);
+        for (size_t i = 0; i < visuals.size(); ++i)
+        {
+            const auto& clip = visuals[i].clipRect;
+            const auto& shell = visuals[i].shellRect;
+            if (x >= shell.left && x <= shell.right && y >= shell.top && y <= shell.bottom)
+            {
+                return i;
+            }
+            if (x >= clip.left && x <= clip.right && y >= clip.top && y <= clip.bottom)
+            {
+                return i;
+            }
+        }
+        return std::nullopt;
+    }
+
+    std::optional<size_t> MainWindow::HitTestTerminalPaneHeader(const int x, const int y) const
+    {
+        auto* tab = workspace_ ? workspace_->ActiveTab() : nullptr;
+        if (tab == nullptr)
+        {
+            return std::nullopt;
+        }
+        RECT rect{};
+        ::GetClientRect(hwnd_, &rect);
+        const auto visuals = ComputePaneVisuals(rect, *tab, charWidth_, lineHeight_, appHeaderHeight_, tabBarHeight_, statusBarHeight_);
+        for (size_t i = 0; i < visuals.size(); ++i)
+        {
+            const auto& header = visuals[i].headerRect;
+            if (x >= header.left && x <= header.right && y >= header.top && y <= header.bottom)
             {
                 return i;
             }
@@ -1600,24 +1813,16 @@ void MainWindow::OnLeftButtonDown(const int x, const int y)
             }
             else if (*shellButton == kShellDuplicateSession)
             {
-                const auto active = workspace_->ActiveTab();
-                if (active != nullptr)
-                {
-                    for (size_t i = 0; i < settings_.profiles.size(); ++i)
-                    {
-                        if (settings_.profiles[i].name == active->ProfileName())
-                        {
-                            OpenProfile(i);
-                            break;
-                        }
-                    }
-                }
+                ShowSplitLayoutMenu(x, appHeaderHeight_ + tabBarHeight_ + 40);
             }
             else if (*shellButton == kShellNewWorkspace)
             {
-                const size_t newIndex = workspace_->AddWorkspace();
-                workspace_->ActivateWorkspace(newIndex);
-                OpenProfile(0);
+                auto* active = workspace_->ActiveTab();
+                if (active != nullptr)
+                {
+                    active->SplitActivePane(active->PaneCount() < 2 ? wsh::terminal::PaneLayoutPreset::TwoColumns : wsh::terminal::PaneLayoutPreset::Grid2x2);
+                    FocusActiveTerminal();
+                }
             }
             UpdateWindowTitle();
             Invalidate();
@@ -1675,7 +1880,8 @@ void MainWindow::OnLeftButtonDown(const int x, const int y)
             return;
         }
 
-        if (!IsPointInTerminal(x, y))
+        const auto paneIndex = HitTestTerminalPane(x, y);
+        if (!paneIndex)
         {
             selectionStart_.reset();
             selectionEnd_.reset();
@@ -1683,8 +1889,19 @@ void MainWindow::OnLeftButtonDown(const int x, const int y)
             return;
         }
 
+        workspace_->ActiveTab()->ActivatePane(*paneIndex);
+        hoveredPane_ = paneIndex;
+        if (const auto headerPane = HitTestTerminalPaneHeader(x, y))
+        {
+            draggedPane_ = headerPane;
+            dragTargetPane_.reset();
+            ::SetCapture(hwnd_);
+            Invalidate();
+            return;
+        }
+
         ::SetFocus(hwnd_);
-        const auto point = ClientToBufferPoint(x, y);
+        const auto point = ClientToBufferPoint(x, y, *paneIndex);
         const DWORD now = ::GetTickCount();
         if (lastDoubleClickPoint_ && point.row == lastDoubleClickPoint_->row && now - lastDoubleClickTick_ <= ::GetDoubleClickTime())
         {
@@ -1711,6 +1928,13 @@ void MainWindow::OnLeftButtonDown(const int x, const int y)
     {
         EnsureMouseTracking();
         const bool hoverChanged = UpdateHoverState(x, y);
+
+        if (draggedPane_ && (flags & MK_LBUTTON) != 0)
+        {
+            dragTargetPane_ = HitTestTerminalPaneHeader(x, y);
+            Invalidate();
+            return;
+        }
 
         if (selecting_ && (flags & MK_LBUTTON) != 0)
         {
@@ -1753,6 +1977,23 @@ void MainWindow::OnLeftButtonDown(const int x, const int y)
             return;
         }
 
+        if (draggedPane_)
+        {
+            if (auto* tab = workspace_ ? workspace_->ActiveTab() : nullptr)
+            {
+                if (dragTargetPane_ && *dragTargetPane_ != *draggedPane_)
+                {
+                }
+                tab->ActivatePane(dragTargetPane_.value_or(*draggedPane_));
+            }
+            draggedPane_.reset();
+            dragTargetPane_.reset();
+            ::ReleaseCapture();
+            UpdateHoverState(x, y);
+            Invalidate();
+            return;
+        }
+
         if (!selecting_)
         {
             return;
@@ -1774,16 +2015,21 @@ void MainWindow::OnLeftButtonDown(const int x, const int y)
         ::SetFocus(hwnd_);
         UpdateHoverState(x, y);
 
-        if (!IsPointInTerminal(x, y))
+        const auto paneIndex = HitTestTerminalPane(x, y);
+        if (!paneIndex)
         {
             return;
         }
 
+        if (auto* tab = workspace_ ? workspace_->ActiveTab() : nullptr)
+        {
+            tab->ActivatePane(*paneIndex);
+        }
         selecting_ = false;
         ::ReleaseCapture();
         SelectWordAt(x, y);
         lastDoubleClickTick_ = ::GetTickCount();
-        lastDoubleClickPoint_ = ClientToBufferPoint(x, y);
+        lastDoubleClickPoint_ = ClientToBufferPoint(x, y, *paneIndex);
         if (settings_.copyOnSelect)
         {
             CopySelection();
@@ -1826,6 +2072,8 @@ void MainWindow::OnLeftButtonDown(const int x, const int y)
         hoveredSidebarButton_.reset();
         hoveredShellToolbarButton_.reset();
         hoveredShellTrafficDot_.reset();
+        hoveredPane_.reset();
+        dragTargetPane_.reset();
         hoverNewTabButton_ = false;
         hoverTerminal_ = false;
         hoverSearchBox_ = false;
@@ -1847,6 +2095,7 @@ void MainWindow::OnLeftButtonDown(const int x, const int y)
         const auto oldSidebarButton = hoveredSidebarButton_;
         const auto oldShellButton = hoveredShellToolbarButton_;
         const auto oldTraffic = hoveredShellTrafficDot_;
+        const auto oldPane = hoveredPane_;
         const bool oldNew = hoverNewTabButton_;
         const bool oldTerminal = hoverTerminal_;
         const bool oldSearch = hoverSearchBox_;
@@ -1859,6 +2108,7 @@ void MainWindow::OnLeftButtonDown(const int x, const int y)
         hoveredSidebarButton_ = HitTestSidebarButton(x, y);
         hoveredShellToolbarButton_ = HitTestShellToolbarButton(x, y);
         hoveredShellTrafficDot_ = HitTestShellTrafficDot(x, y);
+        hoveredPane_ = HitTestTerminalPane(x, y);
         hoverNewTabButton_ = IsPointInNewTabButton(x, y);
         hoverTerminal_ = IsPointInTerminal(x, y);
         hoverSearchBox_ = IsPointInSearchBox(x, y);
@@ -1867,7 +2117,7 @@ void MainWindow::OnLeftButtonDown(const int x, const int y)
 
         return hoveredTab_ != oldTab || hoveredCloseTab_ != oldClose || hoveredWindowControl_ != oldWindowControl ||
                hoveredSidebarSession_ != oldSidebarSession || hoveredSidebarButton_ != oldSidebarButton || hoveredShellToolbarButton_ != oldShellButton ||
-               hoveredShellTrafficDot_ != oldTraffic || hoverNewTabButton_ != oldNew || hoverTerminal_ != oldTerminal ||
+               hoveredShellTrafficDot_ != oldTraffic || hoveredPane_ != oldPane || hoverNewTabButton_ != oldNew || hoverTerminal_ != oldTerminal ||
                hoverSearchBox_ != oldSearch || hoverWorkspacePill_ != oldWorkspacePill;
     }
 
@@ -1887,16 +2137,18 @@ void MainWindow::OnLeftButtonDown(const int x, const int y)
             mouseTracking_ = true;
         }
     }
-
     void MainWindow::UpdateCursor()
     {
-        if (selecting_ || hoverTerminal_ || hoverSearchBox_)
+        if (selecting_ || hoverSearchBox_ || hoverTerminal_)
         {
             ::SetCursor(::LoadCursorW(nullptr, IDC_IBEAM));
             return;
         }
 
-        if (hoveredTab_.has_value() || hoveredCloseTab_.has_value() || hoverNewTabButton_ || hoveredSidebarSession_.has_value() || hoveredSidebarButton_.has_value() || hoveredShellToolbarButton_.has_value() || hoveredShellTrafficDot_.has_value() || hoverWorkspacePill_)
+        POINT point{};
+        ::GetCursorPos(&point);
+        ::ScreenToClient(hwnd_, &point);
+        if (HitTestTerminalPaneHeader(point.x, point.y).has_value() || hoveredTab_.has_value() || hoveredCloseTab_.has_value() || hoverNewTabButton_ || hoveredSidebarSession_.has_value() || hoveredSidebarButton_.has_value() || hoveredShellToolbarButton_.has_value() || hoveredShellTrafficDot_.has_value() || hoverWorkspacePill_)
         {
             ::SetCursor(::LoadCursorW(nullptr, IDC_HAND));
             return;
@@ -1990,18 +2242,25 @@ void MainWindow::OnLeftButtonDown(const int x, const int y)
             return;
         }
 
-        const int terminalTop = appHeaderHeight_ + tabBarHeight_ + 14 + 42 + 12 + 24;
-        const int terminalBottom = terminalTop + static_cast<int>(terminalRows_ * lineHeight_);
-        if (y < terminalTop)
+        const size_t paneIndex = tab->ActivePaneIndex();
+        RECT rect{};
+        ::GetClientRect(hwnd_, &rect);
+        const auto visuals = ComputePaneVisuals(rect, *tab, charWidth_, lineHeight_, appHeaderHeight_, tabBarHeight_, statusBarHeight_);
+        if (paneIndex >= visuals.size())
         {
-            tab->Scroll(-1);
+            return;
         }
-        else if (y > terminalBottom)
+        const auto& visual = visuals[paneIndex];
+        if (y < visual.clipRect.top)
         {
-            tab->Scroll(1);
+            tab->ScrollPane(paneIndex, -1);
+        }
+        else if (y > visual.clipRect.bottom)
+        {
+            tab->ScrollPane(paneIndex, 1);
         }
 
-        selectionEnd_ = ClientToBufferPoint(x, y);
+        selectionEnd_ = ClientToBufferPoint(x, y, paneIndex);
     }
 
     void MainWindow::CopySelection()

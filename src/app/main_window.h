@@ -57,9 +57,12 @@ namespace wsh::app
         std::optional<int> HitTestSidebarButton(int x, int y) const;
         std::optional<int> HitTestShellToolbarButton(int x, int y) const;
         std::optional<int> HitTestShellTrafficDot(int x, int y) const;
+        std::optional<size_t> HitTestTerminalPane(int x, int y) const;
+        std::optional<size_t> HitTestTerminalPaneHeader(int x, int y) const;
         bool IsPointInSearchBox(int x, int y) const;
         bool IsPointInWorkspacePill(int x, int y) const;
         wsh::terminal::SelectionPoint ClientToBufferPoint(int x, int y) const;
+        wsh::terminal::SelectionPoint ClientToBufferPoint(int x, int y, size_t paneIndex) const;
         void SelectWordAt(int x, int y);
         void SelectLineAt(int x, int y);
         void UpdateSelectionForDrag(int x, int y);
@@ -71,6 +74,7 @@ namespace wsh::app
         std::wstring BuildTabLabel(size_t index) const;
         std::wstring Ellipsize(const std::wstring& text, size_t maxChars) const;
         void ShowProfileMenu(int x, int y);
+        void ShowSplitLayoutMenu(int x, int y);
         bool UpdateHoverState(int x, int y);
         void EnsureMouseTracking();
         void UpdateCursor();
@@ -111,6 +115,9 @@ namespace wsh::app
         std::optional<int> hoveredSidebarButton_;
         std::optional<int> hoveredShellToolbarButton_;
         std::optional<int> hoveredShellTrafficDot_;
+        std::optional<size_t> hoveredPane_;
+        std::optional<size_t> draggedPane_;
+        std::optional<size_t> dragTargetPane_;
         std::optional<wsh::terminal::SelectionPoint> selectionStart_;
         std::optional<wsh::terminal::SelectionPoint> selectionEnd_;
         DWORD lastDoubleClickTick_ = 0;
