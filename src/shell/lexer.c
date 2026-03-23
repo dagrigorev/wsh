@@ -189,7 +189,28 @@ Token lex_next(Lexer *l) {
             case '}': advance(l); t.kind = TOK_RBRACE; return t;
             case '!': advance(l); t.kind = TOK_BANG;   return t;
 
-            default: return read_word(l, t.line);
+            default:
+                /* fd-prefixed redirection: digit(s) immediately followed by < or >
+                 * e.g. 2>> 1> 2< — consume the fd, return the redirect token kind */
+                if (isdigit((unsigned char)c)) {
+                    int saved_pos = l->pos;
+                    while (isdigit((unsigned char)peek(l))) advance(l);
+                    int nc = peek(l);
+                    if (nc == '<' || nc == '>') {
+                        advance(l); /* consume < or > */
+                        if (nc == '<') {
+                            if (peek(l) == '<') { advance(l); t.kind = TOK_REDIR_HEREDOC; }
+                            else t.kind = TOK_REDIR_IN;
+                        } else {
+                            if (peek(l) == '>') { advance(l); t.kind = TOK_REDIR_APPEND; }
+                            else t.kind = TOK_REDIR_OUT;
+                        }
+                        return t;
+                    }
+                    /* Not a fd-redirect — rewind and fall through to read_word */
+                    l->pos = saved_pos;
+                }
+                return read_word(l, t.line);
         }
     }
 }

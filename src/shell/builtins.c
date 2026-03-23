@@ -307,7 +307,7 @@ int builtin_test(int argc, char **argv, ShellContext *ctx) {
             case 'd': return path_is_dir(f)?0:1;
             case 'e': return path_exists(f)?0:1;
             case 'r': case 'w': case 'x': return path_exists(f)?0:1;
-            case 's': { wchar_t *w=u8_to_u16(f,NULL); WIN32_FILE_ATTRIBUTE_DATA fa;
+            case 's': { wchar_t *w=u8_to_u16(f,NULL); WIN32_FILE_ATTRIBUTE_DATA fa={0};
                         BOOL ok=w&&GetFileAttributesExW(w,GetFileExInfoStandard,&fa); str_free(w);
                         return (ok&&(fa.nFileSizeLow>0||fa.nFileSizeHigh>0))?0:1; }
             default: return 1;

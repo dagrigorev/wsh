@@ -17,6 +17,11 @@
 #include <stddef.h>
 #include <stdbool.h>
 
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* Opaque handle; callers never touch internals directly (Encapsulation). */
 typedef struct Arena Arena;
 
@@ -37,5 +42,10 @@ void   arena_reset(Arena *a);
 
 /* Destroy the arena and release backing memory. */
 void   arena_destroy(Arena *a);
+
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* WSH_ARENA_H */

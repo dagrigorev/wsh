@@ -17,6 +17,7 @@
 #include "expand.h"
 #include "history.h"
 #include "jobs.h"
+#include "builtins.h"
 #include "../core/str_util.h"
 #include "../core/path_util.h"
 #include "../core/log.h"
@@ -126,7 +127,6 @@ int shell_exec_line(ShellContext *ctx, const char *line) {
         char *trial = expand_tilde(ctx, line);
         if (path_is_dir(trial)) {
             char *argv2[2] = { "cd", trial };
-            extern int builtin_cd(int, char **, ShellContext *);
             int r = builtin_cd(2, argv2, ctx);
             str_free(trial);
             return r;

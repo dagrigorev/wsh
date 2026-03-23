@@ -21,6 +21,11 @@
 
 #include <stdbool.h>
 
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* Forward-declare to avoid circular includes */
 typedef struct ShellContext ShellContext;
 
@@ -63,5 +68,10 @@ WordList expand_glob(const char *pattern);
 
 /* Split s on IFS characters into a WordList. */
 WordList expand_split_ifs(ShellContext *ctx, const char *s);
+
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* WSH_EXPAND_H */

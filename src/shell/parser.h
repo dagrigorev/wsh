@@ -26,6 +26,11 @@
 #include "../core/arena.h"
 #include <stdbool.h>
 
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* ── Redirection kinds ────────────────────────────────────────────────────── */
 
 typedef enum {
@@ -157,5 +162,10 @@ void     parser_init(Parser *p, Lexer *l, Arena *arena);
 /* Parse a complete list (sequence of pipelines).
  * Returns NULL on empty input or parse error (check p->error). */
 ASTNode *parser_parse(Parser *p);
+
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* WSH_PARSER_H */

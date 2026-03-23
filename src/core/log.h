@@ -16,6 +16,11 @@
 #include <windows.h>
 #include <stdbool.h>
 
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 typedef enum {
     LOG_DEBUG = 0,
     LOG_INFO,
@@ -45,5 +50,10 @@ void wsh_log_win32(const char *context);
 #define WSH_LOG_INFO(fmt,  ...) wsh_log_write(LOG_INFO,  __FILE__, __LINE__, fmt, ##__VA_ARGS__)
 #define WSH_LOG_WARN(fmt,  ...) wsh_log_write(LOG_WARN,  __FILE__, __LINE__, fmt, ##__VA_ARGS__)
 #define WSH_LOG_ERROR(fmt, ...) wsh_log_write(LOG_ERROR, __FILE__, __LINE__, fmt, ##__VA_ARGS__)
+
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* WSH_LOG_H */

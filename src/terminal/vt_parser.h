@@ -7,6 +7,11 @@
 #include <stdint.h>
 #include "screen.h"
 
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* ─── Parser States ──────────────────────────────────────────────────────── */
 
 typedef enum {
@@ -64,5 +69,10 @@ typedef struct {
 void vt_parser_init(VtParser *vt, ScreenBuffer *screen);
 void vt_parser_feed(VtParser *vt, const char *data, int len);
 void vt_parser_reset(VtParser *vt);
+
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* WSH_VT_PARSER_H */

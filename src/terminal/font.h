@@ -8,6 +8,11 @@
 #include <dwrite.h>
 #include <stdbool.h>
 
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 typedef struct {
     IDWriteFactory    *factory;
     IDWriteTextFormat *fmt_normal;
@@ -29,5 +34,10 @@ bool font_resize(FontState *fs, float pt_size, float dpi);
 
 /* Release all DirectWrite resources */
 void font_free(FontState *fs);
+
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* WSH_FONT_H */

@@ -1,6 +1,5 @@
 # ── Unit tests ────────────────────────────────────────────────────────────────
 # Each test is a standalone console executable that returns 0 on pass.
-# CTest runs them via `ctest --output-on-failure`.
 
 function(add_wsh_test name src)
     add_executable(${name} ${src} test_helpers.c)
@@ -10,6 +9,13 @@ function(add_wsh_test name src)
         ${CMAKE_SOURCE_DIR}/src/platform
     )
     target_link_libraries(${name} PRIVATE wsh_core wsh_shell wsh_platform)
+    if(MSVC)
+        # Compile as C++ so the auto-registration struct trick in test_helpers.h works
+        target_compile_options(${name} PRIVATE /TP)
+        # Console subsystem — tests use main(), not WinMain
+        set_target_properties(${name} PROPERTIES
+            LINK_FLAGS "/SUBSYSTEM:CONSOLE /MANIFEST:NO")
+    endif()
     add_test(NAME ${name} COMMAND ${name})
 endfunction()
 

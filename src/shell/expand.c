@@ -34,7 +34,11 @@ typedef struct { char *buf; int len; int cap; } SB;
 static void sb_push(SB *b, char c) {
     if (b->len >= b->cap - 1) {
         b->cap = b->cap ? b->cap * 2 : 256;
-        b->buf = (char *)HeapReAlloc(GetProcessHeap(), 0, b->buf, (size_t)b->cap);
+        if (b->buf) {
+            b->buf = (char *)HeapReAlloc(GetProcessHeap(), 0, b->buf, (size_t)b->cap);
+        } else {
+            b->buf = (char *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, (size_t)b->cap);
+        }
     }
     b->buf[b->len++] = c;
 }
@@ -51,8 +55,12 @@ void wordlist_init(WordList *wl) { memset(wl, 0, sizeof(*wl)); }
 void wordlist_push(WordList *wl, char *word) {
     if (wl->count >= wl->cap) {
         wl->cap = wl->cap ? wl->cap * 2 : 8;
-        wl->words = (char **)HeapReAlloc(GetProcessHeap(), 0, wl->words,
-                                          (size_t)wl->cap * sizeof(char *));
+        size_t bytes = (size_t)wl->cap * sizeof(char *);
+        if (wl->words) {
+            wl->words = (char **)HeapReAlloc(GetProcessHeap(), 0, wl->words, bytes);
+        } else {
+            wl->words = (char **)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, bytes);
+        }
     }
     wl->words[wl->count++] = word;
 }

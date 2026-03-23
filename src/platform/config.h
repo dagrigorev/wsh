@@ -6,6 +6,11 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* ─── Color palette (16 + special) ──────────────────────────────────────── */
 
 typedef struct {
@@ -86,5 +91,10 @@ void config_path(char *out, int out_size);
 
 /* Parse "#RRGGBB" hex color string; returns 0 on failure */
 uint32_t config_parse_color(const char *hex);
+
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* WSH_CONFIG_H */

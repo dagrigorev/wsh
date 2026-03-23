@@ -6,6 +6,11 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* ─── Cell Attribute ─────────────────────────────────────────────────────── */
 
 typedef struct {
@@ -130,5 +135,10 @@ ScreenCell *screen_cell_at(ScreenBuffer *sb, int col, int row);
 
 /* Get a cell from scrollback (0 = oldest visible, negative = further back) */
 ScreenCell *screen_scrollback_line(ScreenBuffer *sb, int line_offset, int col);
+
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* WSH_SCREEN_H */

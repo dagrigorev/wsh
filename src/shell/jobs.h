@@ -5,6 +5,11 @@
 #include <windows.h>
 #include <stdbool.h>
 
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #define JOBS_MAX 64
 
 typedef enum {
@@ -57,5 +62,10 @@ bool job_bg(JobTable *jt, int id);
 
 /* Kill job */
 bool job_kill(JobTable *jt, int id, int signum);
+
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* WSH_JOBS_H */

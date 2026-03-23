@@ -10,6 +10,11 @@
 #include "../platform/config.h"
 #include "font.h"
 
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* ─── ANSI color palette (256 colors) ───────────────────────────────────── */
 
 typedef struct {
@@ -76,5 +81,10 @@ Color4F renderer_rgb_to_color(uint32_t rgb);
 /* Resolve a cell's fg/bg to Color4F (handles 256-color and truecolor) */
 Color4F renderer_resolve_fg(const Renderer *r, const ScreenCell *cell);
 Color4F renderer_resolve_bg(const Renderer *r, const ScreenCell *cell);
+
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* WSH_RENDERER_H */

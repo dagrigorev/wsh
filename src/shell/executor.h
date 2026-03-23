@@ -14,6 +14,11 @@
 #include "parser.h"
 #include "shell_ctx.h"
 
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* Execute an AST node; returns its exit status. */
 int exec_node(ShellContext *ctx, ASTNode *node);
 
@@ -25,5 +30,10 @@ bool exec_apply_redirs(ShellContext *ctx, Redir *redirs,
 /* Restore I/O handles saved by exec_apply_redirs. */
 void exec_restore_redirs(ShellContext *ctx,
                          HANDLE saved_in, HANDLE saved_out, HANDLE saved_err);
+
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* WSH_EXECUTOR_H */

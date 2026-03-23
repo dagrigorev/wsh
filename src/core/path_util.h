@@ -10,6 +10,11 @@
 
 #include <stdbool.h>
 
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* True if path exists (file or directory). */
 bool  path_exists(const char *path);
 
@@ -31,5 +36,10 @@ char *path_dirname(const char *path);
 /* Ensure all directories in path exist (like mkdir -p).
  * Returns true on success or if already exists. */
 bool  path_mkdirs(const char *path);
+
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* WSH_PATH_UTIL_H */

@@ -17,6 +17,11 @@
 #include "../core/arena.h"
 #include <stdbool.h>
 
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* ── Token types ──────────────────────────────────────────────────────────── */
 
 typedef enum {
@@ -82,5 +87,10 @@ Token lex_next(Lexer *l);
 
 /* Human-readable token kind name (for error messages). */
 const char *tok_name(TokenKind k);
+
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* WSH_LEXER_H */

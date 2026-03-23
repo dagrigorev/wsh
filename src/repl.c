@@ -16,11 +16,13 @@
 #include <windows.h>
 #include <string.h>
 #include <stdlib.h>
+#include <stdio.h>
 #include "repl.h"
 #include "../shell/shell_ctx.h"
 #include "../shell/history.h"
 #include "../shell/completion.h"
 #include "../shell/builtins.h"
+#include "../shell/expand.h"
 #include "../core/str_util.h"
 #include "../core/log.h"
 

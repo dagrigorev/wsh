@@ -5,6 +5,11 @@
 #include <windows.h>
 #include <stdbool.h>
 
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #define HISTORY_MAX 50000
 
 typedef struct {
@@ -55,5 +60,10 @@ const char *history_at(const History *h, int index);
 
 /* Number of entries */
 int history_count(const History *h);
+
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* WSH_HISTORY_H */

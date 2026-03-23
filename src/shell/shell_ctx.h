@@ -27,6 +27,11 @@
 #include "jobs.h"
 #include "../core/arena.h"
 
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* ── I/O Strategy interface (Dependency Inversion) ────────────────────────── */
 /*
  * IShellIO abstracts all shell I/O.  The terminal renderer implements this
@@ -163,5 +168,10 @@ const char *shell_getenv(const ShellContext *ctx, const char *name);
 void        shell_setenv(ShellContext *ctx, const char *name,
                          const char *value, bool exported);
 void        shell_unsetenv(ShellContext *ctx, const char *name);
+
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* WSH_SHELL_CTX_H */

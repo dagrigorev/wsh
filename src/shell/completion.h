@@ -5,6 +5,11 @@
 #include <stdbool.h>
 #include "shell_ctx.h"
 
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* ─── Completion result ──────────────────────────────────────────────────── */
 
 typedef struct {
@@ -30,5 +35,10 @@ void completion_free(CompletionResult *cr);
 int completion_apply(const CompletionResult *cr, int selected,
                      char *line_buf, int line_len, int cursor_pos,
                      int buf_size);
+
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* WSH_COMPLETION_H */

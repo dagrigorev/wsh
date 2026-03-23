@@ -5,6 +5,11 @@
 #include <windows.h>
 #include <stdbool.h>
 
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* ─── Input event types ──────────────────────────────────────────────────── */
 
 typedef enum {
@@ -39,5 +44,10 @@ InputEvent input_translate(WPARAM vk, WCHAR ch, LPARAM lParam, bool app_cursor_k
 
 /* Check if a WM_KEYDOWN should suppress the subsequent WM_CHAR */
 bool input_suppress_char(WPARAM vk, LPARAM lParam);
+
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* WSH_INPUT_H */

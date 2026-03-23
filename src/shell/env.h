@@ -22,6 +22,11 @@
 #include <windows.h>
 #include <stdbool.h>
 
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* ── Variable attributes ──────────────────────────────────────────────────── */
 
 typedef struct EnvVar {
@@ -62,5 +67,10 @@ void        env_unset(EnvScope *scope, const char *name);
 /* Sync a subset of the Win32 process environment into the global scope.
  * Called once at startup so $PATH, $HOME etc. are visible. */
 void        env_import_process(EnvScope *global_scope);
+
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* WSH_ENV_H */

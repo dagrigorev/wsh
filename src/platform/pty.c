@@ -58,7 +58,7 @@ bool pty_create(PtySession *pty, int cols, int rows) {
     COORD size = { (SHORT)cols, (SHORT)rows };
     HRESULT hr = CreatePseudoConsole(size, pipe_read_from_us, pipe_write_to_us, 0, &pty->hpcon);
     if (FAILED(hr)) {
-        wsh_log("CreatePseudoConsole failed: 0x%08X", hr);
+        WSH_LOG_ERROR("CreatePseudoConsole failed: 0x%08X", hr);
         CloseHandle(pipe_read_from_us);
         CloseHandle(pipe_write_to_child);
         CloseHandle(pipe_read_from_child);
@@ -146,7 +146,7 @@ bool pty_spawn(PtySession *pty, const wchar_t *cmdline, const wchar_t *cwd,
         return false;
     }
 
-    wsh_log("Spawned PID %lu: %ls", pty->pid, cmdline);
+    WSH_LOG_ERROR("Spawned PID %lu: %ls", pty->pid, cmdline);
     return true;
 }
 
@@ -159,7 +159,7 @@ void pty_resize(PtySession *pty, int cols, int rows) {
     pty->rows = rows;
     COORD size = { (SHORT)cols, (SHORT)rows };
     HRESULT hr = ResizePseudoConsole(pty->hpcon, size);
-    if (FAILED(hr)) wsh_log("ResizePseudoConsole failed: 0x%08X", hr);
+    if (FAILED(hr)) WSH_LOG_ERROR("ResizePseudoConsole failed: 0x%08X", hr);
 }
 
 /* ─── pty_write ──────────────────────────────────────────────────────────── */

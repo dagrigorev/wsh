@@ -6,6 +6,16 @@ int      g_test_count = 0;
 int      g_pass_count = 0;
 int      g_fail_count = 0;
 
+/* Called by C test files via the WSH_TEST_REGISTER macro */
+void wsh_register_test(const char *suite, const char *name, TestFn fn) {
+    if (g_test_count < MAX_TESTS) {
+        g_tests[g_test_count].suite = suite;
+        g_tests[g_test_count].name  = name;
+        g_tests[g_test_count].fn    = fn;
+        g_test_count++;
+    }
+}
+
 int run_all_tests(void) {
     printf("Running %d test(s)...\n", g_test_count);
     for (int i = 0; i < g_test_count; i++) {

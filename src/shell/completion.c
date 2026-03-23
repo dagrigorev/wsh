@@ -1,4 +1,5 @@
 #include <windows.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
@@ -22,8 +23,12 @@ static void ml_push(MatchList *m, char *s) {
     if (!s) return;
     if (m->count >= m->cap) {
         m->cap  = m->cap ? m->cap * 2 : 32;
-        m->items = (char **)HeapReAlloc(GetProcessHeap(), 0, m->items,
-                                         (size_t)m->cap * sizeof(char *));
+        size_t bytes = (size_t)m->cap * sizeof(char *);
+        if (m->items) {
+            m->items = (char **)HeapReAlloc(GetProcessHeap(), 0, m->items, bytes);
+        } else {
+            m->items = (char **)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, bytes);
+        }
     }
     m->items[m->count++] = s;
 }

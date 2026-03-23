@@ -4,6 +4,9 @@
 
 TEST(History, PushAndNav) {
     History h; history_init(&h);
+    /* Clear entries loaded from ~/.Wsh_history for a known-empty baseline. */
+    h.count = 0;
+    h.head  = 0;
 
     history_push(&h, "cmd1");
     history_push(&h, "cmd2");
@@ -26,6 +29,10 @@ TEST(History, PushAndNav) {
 TEST(History, IgnoreDuplicates) {
     History h; history_init(&h);
     h.ignore_dups = true;
+    /* Clear any entries loaded from ~/.Wsh_history so the test
+     * starts from a known-empty state regardless of the user's history file. */
+    h.count = 0;
+    h.head  = 0;
 
     history_push(&h, "ls");
     history_push(&h, "ls");  /* duplicate — should be skipped */

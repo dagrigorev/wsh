@@ -5,6 +5,11 @@
 #include <windows.h>
 #include <stdbool.h>
 
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* ─── PTY Session ────────────────────────────────────────────────────────── */
 
 typedef struct {
@@ -52,5 +57,10 @@ bool pty_is_alive(PtySession *pty);
 
 /* Get child exit code (valid after !pty_is_alive). */
 DWORD pty_exit_code(PtySession *pty);
+
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* WSH_PTY_H */

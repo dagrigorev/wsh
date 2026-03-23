@@ -11,6 +11,10 @@ set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_C_EXTENSIONS OFF)
 
+set(CMAKE_CXX_STANDARD 14)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+
 # ── Build types ─────────────────────────────────────────────────────────────
 if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
@@ -49,13 +53,12 @@ add_compile_options(
     $<$<CONFIG:Release>:/GL>    # Whole-program optimisation
     $<$<CONFIG:Debug>:/Od>
     $<$<CONFIG:Debug>:/Zi>
-    $<$<CONFIG:Debug>:/MDd>
-    $<$<CONFIG:Release>:/MD>
+    $<$<CONFIG:Debug>:/MTd>
+    $<$<CONFIG:Release>:/MT>
 )
 
 add_link_options(
     $<$<CONFIG:Release>:/LTCG>
-    /SUBSYSTEM:WINDOWS
 )
 
 # ── Sub-libraries (each a static lib — SOLID: one reason to change) ──────────

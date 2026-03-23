@@ -16,6 +16,11 @@
 
 #include "shell_ctx.h"
 
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 typedef int (*BuiltinFn)(int argc, char **argv, ShellContext *ctx);
 
 /* Find a built-in by name; returns NULL if not found. */
@@ -58,5 +63,10 @@ int builtin_env_cmd(int argc, char **argv, ShellContext *ctx);
 int builtin_sudo(int argc, char **argv, ShellContext *ctx);
 /* ZSH completion stubs (no-ops that prevent "command not found" errors) */
 int builtin_noop(int argc, char **argv, ShellContext *ctx);
+
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* WSH_BUILTINS_H */

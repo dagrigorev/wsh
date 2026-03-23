@@ -1,19 +1,8 @@
 #pragma once
 /*
  * test_helpers.h — Minimal unit-test framework for Wsh.
- *
- * No external dependencies (no CUnit, no Google Test) — the test binary
- * is a plain Windows console app that returns 0 on success.
- *
- * Usage:
- *   ASSERT(expr)              — abort with message on failure
- *   ASSERT_EQ(a, b)           — assert a == b (integers)
- *   ASSERT_STR_EQ(a, b)       — assert strcmp(a, b) == 0
- *   ASSERT_NULL(p)            — assert p == NULL
- *   ASSERT_NOT_NULL(p)        — assert p != NULL
- *
- *   TEST(suite, name) { ... } — define a test case
- *   RUN_TESTS()               — run all registered tests, return pass/fail
+ * MSVC-compatible: uses C++ static-initializer trick for auto-registration.
+ * Test files are compiled as C++ via /TP in CMakeLists.
  */
 #ifndef WSH_TEST_HELPERS_H
 #define WSH_TEST_HELPERS_H
@@ -23,7 +12,9 @@
 #include <string.h>
 #include <stdbool.h>
 
-/* ── Test registry ────────────────────────────────────────────────────────── */
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 typedef void (*TestFn)(void);
 
@@ -33,14 +24,20 @@ typedef struct {
     TestFn      fn;
 } TestCase;
 
-/* Max 256 tests per binary */
 #define MAX_TESTS 256
 extern TestCase g_tests[MAX_TESTS];
 extern int      g_test_count;
 extern int      g_pass_count;
 extern int      g_fail_count;
 
-/* ── Assertion macros ─────────────────────────────────────────────────────── */
+void wsh_register_test(const char *suite, const char *name, TestFn fn);
+int  run_all_tests(void);
+
+#ifdef __cplusplus
+} /* extern "C" */
+#endif
+
+/* ── Assertions ─────────────────────────────────────────────────────────── */
 
 #define ASSERT(expr) do { \
     if (!(expr)) { \
@@ -73,25 +70,22 @@ extern int      g_fail_count;
 #define ASSERT_TRUE(x)     ASSERT(x)
 #define ASSERT_FALSE(x)    ASSERT(!(x))
 
-/* ── Test registration ────────────────────────────────────────────────────── */
+/* ── Auto-registration via C++ static initializer ─────────────────────── */
 
+#ifdef __cplusplus
 #define TEST(suite_name, test_name) \
-    static void _test_##suite_name##_##test_name(void); \
-    static void __attribute__((constructor)) \
-        _reg_##suite_name##_##test_name(void) { \
-        if (g_test_count < MAX_TESTS) { \
-            g_tests[g_test_count].suite = #suite_name; \
-            g_tests[g_test_count].name  = #test_name; \
-            g_tests[g_test_count].fn    = _test_##suite_name##_##test_name; \
-            g_test_count++; \
-        } \
+    extern "C" void _test_##suite_name##_##test_name(void); \
+    namespace { \
+        struct _Reg_##suite_name##_##test_name { \
+            _Reg_##suite_name##_##test_name() { \
+                wsh_register_test(#suite_name, #test_name, \
+                                  _test_##suite_name##_##test_name); \
+            } \
+        } _reg_##suite_name##_##test_name; \
     } \
-    static void _test_##suite_name##_##test_name(void)
-
-/* ── Runner ───────────────────────────────────────────────────────────────── */
-
-/* Returns 0 if all tests pass, 1 otherwise.
- * Call from main(). */
-int run_all_tests(void);
+    extern "C" void _test_##suite_name##_##test_name(void)
+#else
+#error "Test files must be compiled as C++ (use /TP flag)"
+#endif
 
 #endif /* WSH_TEST_HELPERS_H */

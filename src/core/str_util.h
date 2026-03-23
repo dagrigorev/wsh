@@ -18,6 +18,11 @@
 #include <stddef.h>
 #include <stdbool.h>
 
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* MSVC doesn't provide strncasecmp / strcasecmp. */
 #ifndef strncasecmp
 #  define strncasecmp _strnicmp
@@ -70,5 +75,10 @@ int          utf8_encode(unsigned int cp, char *buf);
 static inline void str_free(void *p) {
     if (p) HeapFree(GetProcessHeap(), 0, p);
 }
+
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* WSH_STR_UTIL_H */

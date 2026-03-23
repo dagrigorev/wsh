@@ -21,6 +21,11 @@
 #include "../shell/shell_ctx.h"
 #include "../shell/completion.h"
 
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #define REPL_LINE_MAX 8192
 
 /* ── REPL state ────────────────────────────────────────────────────────────── */
@@ -54,5 +59,10 @@ bool repl_handle_input(Repl *r, const char *bytes, int len);
 
 /* Re-draw the current line (CR, erase-to-EOL, reprint, reposition cursor). */
 void repl_redraw_line(Repl *r);
+
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* WSH_REPL_H */
