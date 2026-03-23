@@ -1,6 +1,7 @@
 #pragma once
 #ifndef WSH_UTIL_H
 #define WSH_UTIL_H
+#endif
 
 /* POSIX compat for MSVC */
 #ifndef strncasecmp

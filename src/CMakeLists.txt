@@ -1,5 +1,5 @@
 # ── Wsh executable ────────────────────────────────────────────────────────────
-add_executable(Wsh WIN32
+add_executable(Wsh
     main.cpp
     window.cpp
     renderer.cpp

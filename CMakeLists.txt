@@ -3,7 +3,7 @@ cmake_minimum_required(VERSION 3.20)
 project(Wsh
     VERSION 1.0.0
     DESCRIPTION "Wsh – ZSH-compatible Windows Terminal Emulator"
-    LANGUAGES C
+    LANGUAGES C CXX
 )
 
 # ── C standard ─────────────────────────────────────────────────────────────
@@ -83,3 +83,4 @@ set(CPACK_GENERATOR "ZIP")
 set(CPACK_PACKAGE_NAME "Wsh")
 set(CPACK_PACKAGE_VERSION ${PROJECT_VERSION})
 include(CPack)
+
