@@ -26,6 +26,7 @@ bool window_register_class(HINSTANCE hInst) {
 }
 
 HWND window_create(HINSTANCE hInst, const Config *cfg, int nShow) {
+    (void)cfg;
     /* Initial size: 80x24 cells approx — will be resized by renderer */
     int w = 800, h = 600;
 
@@ -57,7 +58,6 @@ HWND window_create(HINSTANCE hInst, const Config *cfg, int nShow) {
     ShowWindow(hwnd, nShow);
     UpdateWindow(hwnd);
     return hwnd;
-    (void)cfg;
 }
 
 bool window_has_running_jobs(HWND hwnd) {

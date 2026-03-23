@@ -421,6 +421,16 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR lpCmd, int nShow) {
     if (!path_exists(cfg_path)) config_save_defaults(cfg_path);
     config_load(&g_cfg, cfg_path);
 
+    if (g_cfg.general.default_cwd[0] && strcmp(g_cfg.general.default_cwd, "~") != 0) {
+        wchar_t *wcwd = u8_to_u16(g_cfg.general.default_cwd, NULL);
+        if (wcwd) {
+            if (!SetCurrentDirectoryW(wcwd)) {
+                WSH_LOG_WARN("Failed to set default_cwd: %s", g_cfg.general.default_cwd);
+            }
+            str_free(wcwd);
+        }
+    }
+
     /* ── 4. Screen buffer + CRITICAL_SECTION ──────────────────────────────── */
     InitializeCriticalSection(&g_lock);
     screen_init(&g_screen, 80, 24, g_cfg.general.scrollback);
@@ -456,7 +466,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR lpCmd, int nShow) {
     GetEnvironmentVariableA("USERPROFILE", profile, MAX_PATH);
     _snprintf(zshrc, MAX_PATH, "%s\\.zshrc", profile);
 
-    /* Always refresh ~/.zshrc from the bundled default so fixes take effect. */
+    /* Seed ~/.zshrc only once; never overwrite a user's existing config. */
     {
         char default_zshrc[MAX_PATH];
         char exe_dir[MAX_PATH] = {0};
@@ -464,14 +474,16 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR lpCmd, int nShow) {
         char *last_bs = strrchr(exe_dir, '\\');
         if (last_bs) { *last_bs = '\0'; }
         _snprintf(default_zshrc, MAX_PATH, "%s\\config\\.zshrc", exe_dir);
-        if (path_exists(default_zshrc)) {
+        if (!path_exists(zshrc) && path_exists(default_zshrc)) {
             wchar_t *wsrc = u8_to_u16(default_zshrc, NULL);
             wchar_t *wdst = u8_to_u16(zshrc, NULL);
-            /* Delete then copy to ensure the latest bundled .zshrc is always used */
-            if (wdst) DeleteFileW(wdst);
-            if (wsrc && wdst) CopyFileW(wsrc, wdst, FALSE);
-            str_free(wsrc); str_free(wdst);
-            WSH_LOG_INFO("Refreshed ~/.zshrc from bundled default");
+            if (wsrc && wdst && CopyFileW(wsrc, wdst, TRUE)) {
+                WSH_LOG_INFO("Installed default ~/.zshrc");
+            } else {
+                WSH_LOG_WARN("Failed to install default ~/.zshrc");
+            }
+            str_free(wsrc);
+            str_free(wdst);
         }
     }
 

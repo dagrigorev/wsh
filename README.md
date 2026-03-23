@@ -1,159 +1,64 @@
-# Wsh — ZSH-Compatible Windows Terminal Emulator
+# Wsh — Windows-first shell and terminal prototype
 
-A native Windows terminal written in **C11** with zero external dependencies.
+Wsh is a native Windows terminal/shell prototype built with C11/C++14, Win32, Direct2D/DirectWrite and ConPTY.
 
-| Feature | Detail |
-|---------|--------|
-| Renderer | Direct2D + DirectWrite (GPU-accelerated) |
-| Shell | Built-in ZSH-compatible engine |
-| PTY | ConPTY bridge (run any .exe as child) |
-| Theme | Catppuccin Mocha (default) |
-| Build | CMake + MSVC |
-| Tests | CTest unit tests (no external framework) |
+## Current project state
 
----
+This repository currently contains two code generations:
 
-## Quick Start
+- the active modular implementation under `src/core`, `src/shell`, `src/terminal`, `src/platform`
+- older legacy duplicates under `src/*.c` and `src/*.h`
+
+The executable target is wired to the modular implementation. The legacy root-level duplicates are retained only as reference and should not be treated as the source of truth.
+
+## What is implemented now
+
+- Win32 window creation and message loop
+- Direct2D/DirectWrite renderer
+- terminal screen buffer and VT parser
+- built-in shell context, lexer, parser, executor, history, jobs, completion
+- optional external shell hosting through ConPTY
+- config loading from `%APPDATA%\Wsh\Wsh.toml`
+- initial user config seeding from bundled `config/.zshrc` when the file does not already exist
+- CTest-based unit tests for core shell pieces
+
+## What is not yet honest to claim as fully complete
+
+The codebase is **not** at full Zsh or oh-my-zsh compatibility. The current implementation provides a pragmatic subset and should be described as:
+
+- **partial Zsh-style syntax and prompt compatibility**
+- **best-effort `.zshrc` sourcing**
+- **limited compatibility with common alias/prompt patterns**
+- **no full oh-my-zsh plugin/theme compatibility guarantee**
+
+## Build
+
+Open a Visual Studio 2022 Developer Command Prompt:
 
 ```cmd
-:: 1. Open "Developer Command Prompt for VS 2022"
-mkdir build && cd build
+mkdir build
+cd build
 cmake .. -G "NMake Makefiles" -DCMAKE_BUILD_TYPE=Release
 nmake
-
-:: 2. Run
-Wsh.exe
-
-![wsh_window](preview.png)
-
-:: 3. Install (Explorer context menu + PATH)
-..\install.bat
-```
-
----
-
-## Requirements
-
-- **Windows 10 1809+** (ConPTY requires 1809; Direct2D on all Win10)
-- **Visual Studio Build Tools 2019+** (MSVC cl.exe, nmake/ninja)
-- **Windows SDK 10.0.17763+** (bundled with VS Build Tools)
-- **Cascadia Code NF** font (optional, for Nerd Font icons) — download from [nerdfonts.com](https://www.nerdfonts.com)
-
----
-
-## Configuration
-
-On first run, Wsh writes:
-
-| File | Location |
-|------|----------|
-| `Wsh.toml` | `%APPDATA%\Wsh\Wsh.toml` |
-| `.zshrc` | `%USERPROFILE%\.zshrc` |
-
-Edit either file and restart Wsh.
-
-### ZSH-like prompt (default)
-
-```
-user@host ~/projects/myapp ❯
-```
-
-Prompt is configurable via the `PROMPT` variable in `.zshrc`:
-
-```zsh
-PROMPT='%n@%m %~ %# '  # classic ZSH
-PROMPT='%~ ❯ '          # minimal
-```
-
-### Switching to an external shell
-
-```toml
-# Wsh.toml
-[general]
-shell = "C:\\Program Files\\Git\\bin\\bash.exe"
-```
-
----
-
-## Shell Features
-
-### Syntax (ZSH-compatible)
-
-```zsh
-# Variables
-FOO=bar; echo $FOO; echo ${FOO:-default}; echo ${#FOO}
-
-# Arithmetic
-echo $((2 ** 10))  # 1024
-
-# Control flow
-if [ $x -gt 5 ]; then echo big; else echo small; fi
-for f in *.txt; do echo $f; done
-while read line; do echo $line; done < file.txt
-
-# Functions
-greet() { echo "Hello, $1!"; }
-greet World
-
-# Pipelines and redirections
-ls -la | grep '.c' | sort > results.txt
-cat < input.txt | wc -l
-
-# Background jobs
-sleep 10 &; jobs; fg
-```
-
-### Built-ins
-
-`cd` `echo` `printf` `export` `unset` `alias` `unalias` `source` `.` `exit`
-`return` `true` `false` `test` `[` `read` `set` `setopt` `jobs` `fg` `bg`
-`kill` `wait` `pwd` `type` `which` `eval` `exec` `local` `typeset` `declare`
-`hash` `trap` `open` `clip` `env` `sudo`
-
-### ZSH options
-
-```zsh
-setopt AUTO_CD          # cd by typing directory name
-setopt CORRECT          # spell correction
-setopt GLOB_STAR_SHORT  # ** recursive glob
-setopt HIST_IGNORE_DUPS # skip duplicate history
-```
-
----
-
-## Keyboard Shortcuts
-
-| Key | Action |
-|-----|--------|
-| `Ctrl+Shift+C` | Copy |
-| `Ctrl+Shift+V` | Paste |
-| `Ctrl+Shift+T` | New tab |
-| `Ctrl+Shift+=` | Zoom in |
-| `Ctrl+Shift+-` | Zoom out |
-| `Mouse wheel` / `PgUp/Dn` | Scroll |
-| `Ctrl+R` | Reverse history search |
-| `Ctrl+A/E` | Start / end of line |
-| `Ctrl+K/U` | Kill to end / start |
-| `Ctrl+W` | Kill word |
-| `Tab` | Complete / show menu |
-| `↑ ↓` | History navigation |
-| `Ctrl+← →` | Word movement |
-
----
-
-## Running Tests
-
-```cmd
-cd build
 ctest --output-on-failure
 ```
 
-Tests cover: `Arena` · `StrUtil` · `Lexer` · `Parser` · `Expand` · `Builtins` · `History`
+## Runtime notes
 
-See `docs/ARCHITECTURE.md` for a full SOLID/OOP design writeup.
+- `~/.zshrc` is now seeded only when it does not exist; user changes are preserved.
+- `general.shell = "wsh"` uses the built-in shell.
+- any other configured shell path runs through ConPTY.
 
----
+## Repository map
 
-## License
+- `src/core` — strings, paths, arena, logging
+- `src/shell` — lexer/parser/executor/builtins/history/jobs/completion
+- `src/terminal` — screen, VT parser, renderer, font
+- `src/platform` — config, ConPTY, input translation
+- `src/main.cpp`, `src/window.cpp`, `src/repl.c` — app wiring and UI loop
+- `tests` — unit tests
 
-MIT — see `LICENSE`.
+## Testing
+
+The included tests cover parser/lexer/expand/history/builtins/core utilities.
+Windows GUI, Direct2D and ConPTY behavior still require manual verification on a real Windows machine.

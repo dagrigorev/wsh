@@ -22,6 +22,7 @@
 
 #include <windows.h>
 #include <stdbool.h>
+#include <string.h>
 #include "env.h"
 #include "history.h"
 #include "jobs.h"

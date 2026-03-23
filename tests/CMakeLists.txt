@@ -26,3 +26,5 @@ add_wsh_test(test_parser       test_parser.c)
 add_wsh_test(test_expand       test_expand.c)
 add_wsh_test(test_builtins     test_builtins.c)
 add_wsh_test(test_history      test_history.c)
+
+add_wsh_test(test_prompt       test_prompt.c)

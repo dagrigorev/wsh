@@ -33,6 +33,8 @@ static DWORD WINAPI pty_reader_thread(LPVOID param) {
 
 bool pty_create(PtySession *pty, int cols, int rows) {
     memset(pty, 0, sizeof(*pty));
+    pty->hpipe_in = INVALID_HANDLE_VALUE;
+    pty->hpipe_out = INVALID_HANDLE_VALUE;
     pty->cols = cols;
     pty->rows = rows;
 
@@ -146,7 +148,7 @@ bool pty_spawn(PtySession *pty, const wchar_t *cmdline, const wchar_t *cwd,
         return false;
     }
 
-    WSH_LOG_ERROR("Spawned PID %lu: %ls", pty->pid, cmdline);
+    WSH_LOG_INFO("Spawned PID %lu: %ls", pty->pid, cmdline);
     return true;
 }
 
@@ -191,8 +193,8 @@ void pty_close(PtySession *pty) {
         ClosePseudoConsole(pty->hpcon);
         pty->hpcon = NULL;
     }
-    if (pty->hpipe_in  != INVALID_HANDLE_VALUE) { CloseHandle(pty->hpipe_in);  pty->hpipe_in  = INVALID_HANDLE_VALUE; }
-    if (pty->hpipe_out != INVALID_HANDLE_VALUE) { CloseHandle(pty->hpipe_out); pty->hpipe_out = INVALID_HANDLE_VALUE; }
+    if (pty->hpipe_in  && pty->hpipe_in  != INVALID_HANDLE_VALUE) { CloseHandle(pty->hpipe_in);  pty->hpipe_in  = INVALID_HANDLE_VALUE; }
+    if (pty->hpipe_out && pty->hpipe_out != INVALID_HANDLE_VALUE) { CloseHandle(pty->hpipe_out); pty->hpipe_out = INVALID_HANDLE_VALUE; }
 
     if (pty->hthread_reader) {
         WaitForSingleObject(pty->hthread_reader, 3000);
@@ -200,7 +202,13 @@ void pty_close(PtySession *pty) {
         pty->hthread_reader = NULL;
     }
     if (pty->hprocess) {
-        TerminateProcess(pty->hprocess, 0);
+        DWORD code = STILL_ACTIVE;
+        if (!GetExitCodeProcess(pty->hprocess, &code)) code = STILL_ACTIVE;
+        if (code == STILL_ACTIVE) {
+            if (WaitForSingleObject(pty->hprocess, 250) == WAIT_TIMEOUT) {
+                TerminateProcess(pty->hprocess, 0);
+            }
+        }
         CloseHandle(pty->hprocess);
         pty->hprocess = NULL;
     }

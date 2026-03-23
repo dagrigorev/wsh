@@ -14,6 +14,7 @@ endif()
 
 target_include_directories(Wsh PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/src
     ${CMAKE_SOURCE_DIR}/src/core
     ${CMAKE_SOURCE_DIR}/src/shell
     ${CMAKE_SOURCE_DIR}/src/terminal
