@@ -101,6 +101,19 @@ void renderer_resize(Renderer *r, int w, int h) {
     if(r->cols<1)r->cols=1; if(r->rows<1)r->rows=1;
 }
 
+
+/* Convert window pixel coords to cell col/row (-1 if outside grid) */
+void renderer_pixel_to_cell(const Renderer *r, int px, int py, int *col, int *row) {
+    int ox = r->padding_x;
+    int oy = r->padding_y + r->tab_bar_height;
+    *col = (r->cell_w > 0) ? (int)((px - ox) / r->cell_w) : -1;
+    *row = (r->cell_h > 0) ? (int)((py - oy) / r->cell_h) : -1;
+    if (*col < 0) *col = 0;
+    if (*row < 0) *row = 0;
+    if (*col >= r->cols) *col = r->cols - 1;
+    if (*row >= r->rows) *row = r->rows - 1;
+}
+
 void renderer_paint(Renderer *r, const ScreenBuffer *sb, bool cursor_shown, int cursor_x, int cursor_y) {
     if (!r->render_target||!r->font.fmt_normal) return;
     r->render_target->BeginDraw();
@@ -126,6 +139,26 @@ void renderer_paint(Renderer *r, const ScreenBuffer *sb, bool cursor_shown, int 
         if (bgcc.r!=r->bg_color.r||bgcc.g!=r->bg_color.g||bgcc.b!=r->bg_color.b) {
             D2D1_COLOR_F d=to_d2d(bgcc); r->bg_brush->SetColor(d);
             r->render_target->FillRectangle(cr,r->bg_brush);
+        }
+
+        /* Selection highlight */
+        bool in_sel = false;
+        if (r->sel_valid) {
+            int sr = r->sel_start_row, sc = r->sel_start_col;
+            int er = r->sel_end_row,   ec = r->sel_end_col;
+            /* Normalize start < end */
+            if (sr > er || (sr == er && sc > ec)) {
+                int tr=sr,tc=sc; sr=er;sc=ec; er=tr;ec=tc;
+            }
+            if (row > sr && row < er) in_sel = true;
+            else if (row == sr && row == er) in_sel = (col >= sc && col <= ec);
+            else if (row == sr) in_sel = (col >= sc);
+            else if (row == er) in_sel = (col <= ec);
+        }
+        if (in_sel) {
+            D2D1_COLOR_F selc = to_d2d(r->selection_color);
+            r->bg_brush->SetColor(selc);
+            r->render_target->FillRectangle(cr, r->bg_brush);
         }
 
         if (!cell->wide_cont&&cell->ch&&cell->ch!=' ') {

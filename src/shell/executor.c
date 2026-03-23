@@ -17,6 +17,9 @@
  *   on the same ShellContext.
  */
 #include <windows.h>
+#include <ctype.h>
+#include <shlwapi.h>
+#include "parser.h"
 #include <string.h>
 #include <stdio.h>
 #include "executor.h"
@@ -25,8 +28,8 @@
 #include "env.h"
 #include "jobs.h"
 #include "../core/str_util.h"
-#include "../core/path_util.h"
 #include "../core/log.h"
+#include "../core/path_util.h"
 
 /* ── Helpers ──────────────────────────────────────────────────────────────── */
 
@@ -216,10 +219,14 @@ static int exec_cmd_node(ShellContext *ctx, ASTNode *node, bool bg) {
     HANDLE si, so, se;
     if (!exec_apply_redirs(ctx, node->cmd.redirs, &si, &so, &se)) return 1;
 
-    /* Expand all arguments */
+    /* Expand all arguments.
+     * Disable IFS splitting for words that contain '=' (assignments/alias values)
+     * so that quoted spaces inside values are preserved intact. */
     char *eargv[1024]; int eargc = 0;
     for (int i = 0; i < node->cmd.argc && eargc < 1022; i++) {
-        WordList wl = expand_word(ctx, node->cmd.argv[i], true, true);
+        const char *arg = node->cmd.argv[i];
+        bool has_eq = strchr(arg, '=') != NULL;
+        WordList wl = expand_word(ctx, arg, !has_eq, !has_eq);
         for (int j = 0; j < wl.count && eargc < 1022; j++) {
             eargv[eargc++] = wl.words[j];
             wl.words[j]   = NULL; /* ownership transferred */
@@ -239,6 +246,32 @@ static int exec_cmd_node(ShellContext *ctx, ASTNode *node, bool bg) {
     }
 
     int ret = 0;
+
+    /* Pure assignment: if every argv word is NAME=VALUE, set env vars and return */
+    if (eargc > 0) {
+        bool all_assign = true;
+        for (int i = 0; i < eargc && all_assign; i++) {
+            const char *eq = strchr(eargv[i], '=');
+            if (!eq || eq == eargv[i]) { all_assign = false; break; }
+            for (const char *p = eargv[i]; p != eq; p++) {
+                if (!isalnum((unsigned char)*p) && *p != '_') { all_assign = false; break; }
+            }
+        }
+        if (all_assign) {
+            for (int i = 0; i < eargc; i++) {
+                char *eq = strchr(eargv[i], '=');
+                if (!eq) continue;
+                char name[256] = {0};
+                size_t nl = (size_t)(eq - eargv[i]);
+                if (nl > 255) nl = 255;
+                strncpy(name, eargv[i], nl);
+                env_set(ctx->env, name, eq + 1, false);
+            }
+            for (int i = 0; i < eargc; i++) str_free(eargv[i]);
+            exec_restore_redirs(ctx, si, so, se);
+            return 0;
+        }
+    }
 
     if (eargc > 0) {
         /* Resolve aliases (one level) */
@@ -401,6 +434,35 @@ int exec_node(ShellContext *ctx, ASTNode *node) {
                 str_free(val);
                 ret = exec_node(ctx, node->fornode.body);
             }
+            break;
+        }
+
+        case NODE_CASE: {
+            char *word = expand_string(ctx, node->casenode.word);
+            ret = 0;
+            for (int i = 0; i < node->casenode.count; i++) {
+                CaseArm *arm = &node->casenode.arms[i];
+                bool matched = false;
+                for (int j = 0; j < arm->pat_count && !matched; j++) {
+                    const char *pat = arm->patterns[j];
+                    if (!pat) continue;
+                    /* Expand the pattern, then match */
+                    char *epat = expand_string(ctx, pat);
+                    /* Use simple glob match: * matches any, ? matches one */
+                    wchar_t *wpat  = u8_to_u16(epat,  NULL);
+                    wchar_t *wword = u8_to_u16(word, NULL);
+                    if (wpat && wword) matched = !!PathMatchSpecW(wword, wpat);
+                    /* fallback: exact match */
+                    if (!matched && strcmp(epat, word) == 0) matched = true;
+                    str_free(wpat); str_free(wword); str_free(epat);
+                }
+                if (matched) {
+                    if (arm->body) ret = exec_node(ctx, arm->body);
+                    break;
+                }
+            }
+            str_free(word);
+            ctx->last_status = ret;
             break;
         }
 

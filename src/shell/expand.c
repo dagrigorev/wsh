@@ -298,6 +298,36 @@ char *expand_string(ShellContext *ctx, const char *s) {
             continue;
         }
         p++; /* skip $ */
+        /* $'...' ANSI-C quoting inline in expand_string */
+        if (*p == '\'') {
+            p++; /* skip opening ' */
+            while (*p && *p != '\'') {
+                if (*p == '\\' && p[1]) {
+                    p++;
+                    switch (*p) {
+                        case 'e': case 'E': sb_push(&out, '\x1B'); break;
+                        case 'n': sb_push(&out, '\n'); break;
+                        case 'r': sb_push(&out, '\r'); break;
+                        case 't': sb_push(&out, '\t'); break;
+                        case '\\': sb_push(&out, '\\'); break;
+                        case '\'': sb_push(&out, '\''); break;
+                        case '0': case '1': case '2': case '3':
+                        case '4': case '5': case '6': case '7': {
+                            int val = *p - '0';
+                            if (p[1]>='0'&&p[1]<='7') { p++; val=val*8+(*p-'0'); }
+                            if (p[1]>='0'&&p[1]<='7') { p++; val=val*8+(*p-'0'); }
+                            sb_push(&out, (char)val); break;
+                        }
+                        default: sb_push(&out, '\\'); sb_push(&out, *p); break;
+                    }
+                    p++;
+                } else {
+                    sb_push(&out, *p++);
+                }
+            }
+            if (*p == '\'') p++; /* skip closing ' */
+            continue;
+        }
         if (*p == '(') {
             p++;
             if (*p == '(') {

@@ -80,6 +80,12 @@ typedef enum {
 
 /* ── AST node ─────────────────────────────────────────────────────────────── */
 
+typedef struct CaseArm {
+    char              **patterns;
+    int                 pat_count;
+    struct ASTNode     *body;
+} CaseArm;
+
 typedef struct ASTNode {
     NodeKind kind;
     int      line;   /* source line for error messages */
@@ -141,6 +147,13 @@ typedef struct ASTNode {
         struct {
             char *expr;
         } arith;
+
+        /* NODE_CASE */
+        struct {
+            char     *word;   /* word being matched */
+            int       count;  /* number of case arms */
+            CaseArm  *arms;
+        } casenode;
     };
 } ASTNode;
 

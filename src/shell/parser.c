@@ -208,12 +208,77 @@ static ASTNode *parse_function(Parser *p, char *name) {
     return n;
 }
 
+
+static ASTNode *parse_case(Parser *p) {
+    ASTNode *n = node_new(p, NODE_CASE);
+    advance(p); /* consume 'case' */
+
+    n->casenode.word = at(p, TOK_WORD) ? p->cur.text : (char *)"";
+    if (at(p, TOK_WORD)) advance(p);
+
+    /* skip 'in' and newlines */
+    while (at(p, TOK_NEWLINE)) advance(p);
+    if (!eat(p, TOK_IN)) parse_error(p, "expected 'in' after case word");
+    while (at(p, TOK_NEWLINE)) advance(p);
+
+    /* Count arms (;;-delimited) */
+    #define MAX_CASE_ARMS 64
+    #define MAX_CASE_PATS 16
+    struct { char *pats[MAX_CASE_PATS]; int pc; ASTNode *body; } local_arms[MAX_CASE_ARMS];
+    int arm_count = 0;
+
+    while (!p->error && !at(p, TOK_ESAC) && !at(p, TOK_EOF)) {
+        while (at(p, TOK_NEWLINE)) advance(p);
+        if (at(p, TOK_ESAC) || at(p, TOK_EOF)) break;
+
+        /* Read patterns: PAT1|PAT2|...) */
+        int pc = 0;
+        while (!p->error && pc < MAX_CASE_PATS) {
+            if (at(p, TOK_WORD) || at(p, TOK_ASSIGN)) {
+                local_arms[arm_count].pats[pc++] = p->cur.text;
+                advance(p);
+            }
+            if (at(p, TOK_PIPE)) { advance(p); continue; } /* more patterns */
+            if (at(p, TOK_RPAREN)) { advance(p); break; }  /* end of patterns */
+            break;
+        }
+        local_arms[arm_count].pc = pc;
+        while (at(p, TOK_NEWLINE)) advance(p);
+
+        /* Parse body until ;; or esac */
+        local_arms[arm_count].body = parse_list(p);
+        arm_count++;
+
+        if (eat(p, TOK_DSEMI)) { while (at(p, TOK_NEWLINE)) advance(p); }
+        else if (at(p, TOK_ESAC)) break;
+        if (arm_count >= MAX_CASE_ARMS) break;
+    }
+
+    if (!eat(p, TOK_ESAC)) parse_error(p, "expected 'esac'");
+
+    /* Copy arms into arena */
+    n->casenode.count = arm_count;
+    n->casenode.arms  = (CaseArm *)arena_alloc(
+        p->arena, (size_t)arm_count * sizeof(*n->casenode.arms));
+    for (int i = 0; i < arm_count; i++) {
+        n->casenode.arms[i].pat_count = local_arms[i].pc;
+        n->casenode.arms[i].patterns  = (char **)arena_alloc(
+            p->arena, (size_t)(local_arms[i].pc + 1) * sizeof(char *));
+        for (int j = 0; j < local_arms[i].pc; j++)
+            n->casenode.arms[i].patterns[j] = local_arms[i].pats[j];
+        n->casenode.arms[i].patterns[local_arms[i].pc] = NULL;
+        n->casenode.arms[i].body = local_arms[i].body;
+    }
+    return n;
+}
+
 static ASTNode *parse_cmd(Parser *p) {
     /* Compound commands */
     if (at(p, TOK_IF))    return parse_if(p);
     if (at(p, TOK_WHILE)) return parse_while_until(p, NODE_WHILE);
     if (at(p, TOK_UNTIL)) return parse_while_until(p, NODE_UNTIL);
     if (at(p, TOK_FOR))   return parse_for(p);
+    if (at(p, TOK_CASE))  return parse_case(p);
 
     /* function keyword: 'function name [()]' */
     if (at(p, TOK_FUNCTION)) {

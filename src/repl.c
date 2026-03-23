@@ -65,11 +65,10 @@ void repl_show_prompt(Repl *r) {
     if (!fmt) fmt = "%~ %# ";   /* ZSH-like default */
 
     char *prompt = shell_expand_prompt(r->ctx, fmt);
-    /* Expand any $VAR in the prompt string too */
-    char *full = expand_string(r->ctx, prompt);
+    /* Emit directly — shell_expand_prompt has already handled % sequences.
+     * Do NOT call expand_string here: it would strip backslashes in CWD paths. */
+    emit(r, prompt);
     str_free(prompt);
-    emit(r, full);
-    str_free(full);
 }
 
 /* ── Line redraw (CR + erase line + reprint + reposition) ─────────────────── */

@@ -279,6 +279,93 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             return 0;
         }
 
+        /* ── Mouse selection ───────────────────────────────────────────── */
+        case WM_LBUTTONDOWN: {
+            SetCapture(hwnd);
+            int mx = (short)LOWORD(lParam), my = (short)HIWORD(lParam);
+            int col, row;
+            renderer_pixel_to_cell(&g_renderer, mx, my, &col, &row);
+            g_renderer.sel_start_col = g_renderer.sel_end_col = col;
+            g_renderer.sel_start_row = g_renderer.sel_end_row = row;
+            g_renderer.sel_active = true;
+            g_renderer.sel_valid  = false;
+            InvalidateRect(hwnd, NULL, FALSE);
+            return 0;
+        }
+        case WM_MOUSEMOVE: {
+            if (g_renderer.sel_active) {
+                int mx = (short)LOWORD(lParam), my = (short)HIWORD(lParam);
+                int col, row;
+                renderer_pixel_to_cell(&g_renderer, mx, my, &col, &row);
+                g_renderer.sel_end_col = col;
+                g_renderer.sel_end_row = row;
+                g_renderer.sel_valid = (col != g_renderer.sel_start_col ||
+                                        row != g_renderer.sel_start_row);
+                InvalidateRect(hwnd, NULL, FALSE);
+            }
+            return 0;
+        }
+        case WM_LBUTTONUP: {
+            ReleaseCapture();
+            g_renderer.sel_active = false;
+            if (g_renderer.sel_valid && OpenClipboard(hwnd)) {
+                int sr = g_renderer.sel_start_row, sc = g_renderer.sel_start_col;
+                int er = g_renderer.sel_end_row,   ec = g_renderer.sel_end_col;
+                if (sr > er || (sr == er && sc > ec)) {
+                    int tr=sr,tc=sc; sr=er;sc=ec; er=tr;ec=tc;
+                }
+                char text[65536]; int ti = 0;
+                EnterCriticalSection(&g_lock);
+                for (int r = sr; r <= er && ti < 65530; r++) {
+                    int c0 = (r == sr) ? sc : 0;
+                    int c1 = (r == er) ? ec : g_screen.cols - 1;
+                    int last_ns = c0 - 1;
+                    for (int c = c0; c <= c1; c++) {
+                        if (r < g_screen.rows && c < g_screen.cols &&
+                            g_screen.cells[r * g_screen.cols + c].ch > ' ')
+                            last_ns = c;
+                    }
+                    for (int c = c0; c <= last_ns && ti < 65528; c++) {
+                        uint32_t ch = (r < g_screen.rows && c < g_screen.cols)
+                            ? g_screen.cells[r * g_screen.cols + c].ch : ' ';
+                        if (!ch) ch = ' ';
+                        if (ch < 0x80) { text[ti++] = (char)ch; }
+                        else if (ch < 0x800) { text[ti++]=(char)(0xC0|(ch>>6)); text[ti++]=(char)(0x80|(ch&0x3F)); }
+                        else { text[ti++]=(char)(0xE0|(ch>>12)); text[ti++]=(char)(0x80|((ch>>6)&0x3F)); text[ti++]=(char)(0x80|(ch&0x3F)); }
+                    }
+                    if (r < er) { text[ti++] = '\r'; text[ti++] = '\n'; }
+                }
+                text[ti] = '\0';
+                LeaveCriticalSection(&g_lock);
+                HGLOBAL hg = GlobalAlloc(GMEM_MOVEABLE, (size_t)(ti + 1));
+                if (hg) {
+                    memcpy(GlobalLock(hg), text, (size_t)(ti + 1));
+                    GlobalUnlock(hg);
+                    EmptyClipboard();
+                    SetClipboardData(CF_TEXT, hg);
+                }
+                CloseClipboard();
+            }
+            InvalidateRect(hwnd, NULL, FALSE);
+            return 0;
+        }
+        case WM_RBUTTONDOWN: {
+            /* Right-click pastes from clipboard */
+            if (OpenClipboard(hwnd)) {
+                HANDLE hd = GetClipboardData(CF_TEXT);
+                if (hd) {
+                    const char *txt = (const char *)GlobalLock(hd);
+                    if (txt) {
+                        if (g_use_pty) pty_write(&g_pty, txt, (int)strlen(txt));
+                        else repl_handle_input(&g_repl, txt, (int)strlen(txt));
+                        GlobalUnlock(hd);
+                    }
+                }
+                CloseClipboard();
+            }
+            return 0;
+        }
+
         /* ── Mouse wheel ────────────────────────────────────────────────── */
         case WM_MOUSEWHEEL: {
             int delta = GET_WHEEL_DELTA_WPARAM(wParam) / WHEEL_DELTA;
@@ -369,10 +456,9 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR lpCmd, int nShow) {
     GetEnvironmentVariableA("USERPROFILE", profile, MAX_PATH);
     _snprintf(zshrc, MAX_PATH, "%s\\.zshrc", profile);
 
-    /* Copy bundled default .zshrc if user doesn't have one */
-    if (!path_exists(zshrc)) {
+    /* Always refresh ~/.zshrc from the bundled default so fixes take effect. */
+    {
         char default_zshrc[MAX_PATH];
-        /* Look next to the exe first */
         char exe_dir[MAX_PATH] = {0};
         GetModuleFileNameA(NULL, exe_dir, MAX_PATH);
         char *last_bs = strrchr(exe_dir, '\\');
@@ -381,9 +467,11 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR lpCmd, int nShow) {
         if (path_exists(default_zshrc)) {
             wchar_t *wsrc = u8_to_u16(default_zshrc, NULL);
             wchar_t *wdst = u8_to_u16(zshrc, NULL);
+            /* Delete then copy to ensure the latest bundled .zshrc is always used */
+            if (wdst) DeleteFileW(wdst);
             if (wsrc && wdst) CopyFileW(wsrc, wdst, FALSE);
             str_free(wsrc); str_free(wdst);
-            WSH_LOG_INFO("Installed default .zshrc to %s", zshrc);
+            WSH_LOG_INFO("Refreshed ~/.zshrc from bundled default");
         }
     }
 

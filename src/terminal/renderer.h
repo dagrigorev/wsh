@@ -46,6 +46,12 @@ typedef struct {
     Color4F cursor_color;
     Color4F selection_color;
 
+    /* Text selection (cell coordinates) */
+    int  sel_start_col, sel_start_row;
+    int  sel_end_col,   sel_end_row;
+    bool sel_active;    /* mouse button held */
+    bool sel_valid;     /* a non-empty selection exists */
+
     /* Cursor state */
     bool   cursor_visible;
     bool   cursor_blink_state; /* true = drawn */
@@ -73,6 +79,7 @@ void renderer_paint(Renderer *r, const ScreenBuffer *sb,
 void renderer_set_font(Renderer *r, const wchar_t *family, float pt_size);
 void renderer_update_dpi(Renderer *r, float dpi);
 void renderer_toggle_cursor_blink(Renderer *r);
+void renderer_pixel_to_cell(const Renderer *r, int px, int py, int *col, int *row);
 void renderer_destroy(Renderer *r);
 
 /* Map a 24-bit RGB color to Color4F */

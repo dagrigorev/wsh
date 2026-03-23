@@ -68,6 +68,59 @@ static void read_double_quoted(Lexer *l, TokBuf *buf) {
     if (peek(l) == '"') advance(l); /* consume closing " */
 }
 
+/* Read a $'...' ANSI-C quoted string; converts \e→ESC, \n→LF, \t→HT,
+ * \ooo→octal, \xNN→hex.  Opening $' already consumed. */
+static void read_ansi_c_quoted(Lexer *l, TokBuf *buf) {
+    advance(l); /* consume $ */
+    advance(l); /* consume opening \' */
+    while (peek(l) && peek(l) != '\'') {
+        if (peek(l) == '\\' && peek2(l)) {
+            advance(l); /* consume \\ */
+            int c = consume(l);
+            switch (c) {
+                case 'a':  tb_push(buf, '\a');  break;
+                case 'b':  tb_push(buf, '\b');  break;
+                case 'e':  tb_push(buf, '\x1B');break; /* ESC */
+                case 'E':  tb_push(buf, '\x1B');break; /* ESC */
+                case 'f':  tb_push(buf, '\f');  break;
+                case 'n':  tb_push(buf, '\n');  break;
+                case 'r':  tb_push(buf, '\r');  break;
+                case 't':  tb_push(buf, '\t');  break;
+                case 'v':  tb_push(buf, '\v');  break;
+                case '\\': tb_push(buf, '\\'); break;
+                case '\'':  tb_push(buf, '\'');  break;
+                case '0': case '1': case '2': case '3':
+                case '4': case '5': case '6': case '7': {
+                    /* Octal: up to 3 digits */
+                    int val = c - '0';
+                    if (peek(l) >= '0' && peek(l) <= '7') val = val*8 + (consume(l)-'0');
+                    if (peek(l) >= '0' && peek(l) <= '7') val = val*8 + (consume(l)-'0');
+                    tb_push(buf, (char)val);
+                    break;
+                }
+                case 'x': {
+                    /* Hex: up to 2 digits */
+                    int val = 0, nd = 0;
+                    while (nd < 2 && ((peek(l) >= '0' && peek(l) <= '9') ||
+                                      (peek(l) >= 'a' && peek(l) <= 'f') ||
+                                      (peek(l) >= 'A' && peek(l) <= 'F'))) {
+                        int d = consume(l);
+                        val = val*16 + (d>='a'?d-'a'+10:d>='A'?d-'A'+10:d-'0');
+                        nd++;
+                    }
+                    tb_push(buf, (char)val);
+                    break;
+                }
+                default: tb_push(buf, '\\'); tb_push(buf, (char)c); break;
+            }
+        } else {
+            tb_push(buf, consume(l));
+        }
+    }
+    if (peek(l) == '\'') advance(l); /* consume closing \' */
+}
+
+
 /* Read one complete word token (handles quoting and concatenation). */
 static Token read_word(Lexer *l, int start_line) {
     TokBuf buf = {0};
@@ -90,6 +143,30 @@ static Token read_word(Lexer *l, int start_line) {
             case '{': case '}':
                 done = true;
                 break;
+            case '$': {
+                /* $'...' ANSI-C quoting: convert escape sequences to literal bytes */
+                int nxt = peek2(l);
+                if (nxt == '\'') {
+                    read_ansi_c_quoted(l, &buf);
+                } else if (nxt == '(' || nxt == '{') {
+                    /* $(...) command substitution or ${...} parameter expansion:
+                     * read verbatim (balanced) so word is not split at '(' or '{' */
+                    tb_push(&buf, consume(l)); /* push '$' */
+                    int open = consume(l);
+                    char close = (open == '(') ? ')' : '}';
+                    tb_push(&buf, (char)open);
+                    int depth = 1;
+                    while (peek(l) && depth > 0) {
+                        int c2 = consume(l);
+                        tb_push(&buf, (char)c2);
+                        if (c2 == open)  depth++;
+                        else if (c2 == close) depth--;
+                    }
+                } else {
+                    tb_push(&buf, consume(l));
+                }
+                break;
+            }
             default:
                 tb_push(&buf, consume(l));
                 break;
@@ -148,6 +225,12 @@ Token lex_next(Lexer *l) {
         if (!c) return t; /* TOK_EOF */
 
         if (c == '#') { skip_comment(l); continue; } /* re-loop */
+
+        /* Top-level backslash-newline: line continuation between words */
+        if (c == '\\' && l->src[l->pos + 1] == '\n') {
+            advance(l); advance(l); /* skip both \ and \n */
+            continue;
+        }
 
         switch (c) {
             case '\n': advance(l); t.kind = TOK_NEWLINE; return t;

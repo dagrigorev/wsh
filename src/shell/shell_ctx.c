@@ -164,14 +164,50 @@ int shell_source(ShellContext *ctx, const char *path) {
         return 1;
     }
 
-    char line[8192]; int ret = 0;
-    ctx->call_depth++;
-    while (fgets(line, sizeof(line), f) && !ctx->exit_requested) {
-        str_rtrim(line);
-        if (line[0] && line[0] != '#') ret = shell_exec_line(ctx, line);
-    }
-    ctx->call_depth--;
+    /* Read entire file into memory so multi-line constructs (functions, if, for)
+     * are parsed as complete units rather than broken at line boundaries. */
+    fseek(f, 0, SEEK_END);
+    long fsz = ftell(f);
+    rewind(f);
+    if (fsz <= 0) { fclose(f); return 0; }
+
+    char *buf = (char *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, (size_t)fsz + 1);
+    if (!buf) { fclose(f); return 1; }
+    size_t nr = fread(buf, 1, (size_t)fsz, f);
+    buf[nr] = '\0';
     fclose(f);
+
+    ctx->call_depth++;
+    int ret = 0;
+
+    /* Parse and execute all statements in the file */
+    arena_reset(ctx->arena);
+    Lexer lex; lex_init(&lex, buf, ctx->arena);
+    Parser parser; parser_init(&parser, &lex, ctx->arena);
+
+    while (!ctx->exit_requested) {
+        /* Skip bare newlines/semis between statements using parser's own advance */
+        while (parser.cur.kind == TOK_NEWLINE || parser.cur.kind == TOK_SEMI) {
+            parser.cur = lex_next(parser.lex);
+        }
+        if (parser.cur.kind == TOK_EOF) break;
+
+        parser.error = 0; parser.errmsg[0] = '\0';
+        ASTNode *ast = parser_parse(&parser);
+
+        if (parser.error) {
+            io_writeln(ctx->io, parser.errmsg);
+            ret = 2;
+            break;
+        }
+        if (!ast) break;
+
+        ret = exec_node(ctx, ast);
+        ctx->last_status = ret;
+    }
+
+    ctx->call_depth--;
+    HeapFree(GetProcessHeap(), 0, buf);
     return ret;
 }
 

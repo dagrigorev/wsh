@@ -49,6 +49,7 @@ int builtin_wait_cmd(int,char**,ShellContext*);
 int builtin_pwd(int,char**,ShellContext*);
 int builtin_type(int,char**,ShellContext*);
 int builtin_which(int,char**,ShellContext*);
+int builtin_command(int,char**,ShellContext*);
 int builtin_eval(int,char**,ShellContext*);
 int builtin_exec(int,char**,ShellContext*);
 int builtin_local(int,char**,ShellContext*);
@@ -89,6 +90,7 @@ static const BuiltinEntry BUILTIN_TABLE[] = {
     { "pwd",      builtin_pwd         },
     { "type",     builtin_type        },
     { "which",    builtin_which       },
+    { "command",  builtin_command     },
     { "eval",     builtin_eval        },
     { "exec",     builtin_exec        },
     { "local",    builtin_local       },
@@ -447,6 +449,25 @@ int builtin_which(int argc, char **argv, ShellContext *ctx) {
     for (int i=1; i<argc; i++) {
         char *p=shell_which(ctx,argv[i]);
         if (p) { outln(ctx,p); str_free(p); } else outfmt(ctx,"%s not found\r\n",argv[i]);
+    }
+    return 0;
+}
+
+/* ── command ────────────────────────────────────────────────────────────────── */
+
+int builtin_command(int argc, char **argv, ShellContext *ctx) {
+    /* command -v name  — print path if found, exit 1 if not (like which) */
+    if (argc >= 3 && strcmp(argv[1], "-v") == 0) {
+        char *p = shell_which(ctx, argv[2]);
+        if (p) { outln(ctx, p); str_free(p); return 0; }
+        return 1;
+    }
+    /* command name [args...]  — run name as external command */
+    if (argc >= 2) {
+        char *line = str_join(argv + 1, argc - 1, " ");
+        int ret = shell_exec_line(ctx, line);
+        str_free(line);
+        return ret;
     }
     return 0;
 }
