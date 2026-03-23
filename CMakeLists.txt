@@ -41,6 +41,10 @@ add_compile_definitions(
     WSH_VERSION_PATCH=${PROJECT_VERSION_PATCH}
 )
 
+# Use the static MSVC runtime to avoid external VC++ CRT side-by-side
+# dependencies in NMake/standalone builds.
+set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+
 add_compile_options(
     /W4         # Warning level 4
     /WX-        # Warnings not errors (we audit manually)
@@ -53,8 +57,6 @@ add_compile_options(
     $<$<CONFIG:Release>:/GL>    # Whole-program optimisation
     $<$<CONFIG:Debug>:/Od>
     $<$<CONFIG:Debug>:/Zi>
-    $<$<CONFIG:Debug>:/MTd>
-    $<$<CONFIG:Release>:/MT>
 )
 
 add_link_options(
