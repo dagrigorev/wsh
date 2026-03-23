@@ -24,6 +24,8 @@ nmake
 :: 2. Run
 Wsh.exe
 
+![wsh_window](preview.png)
+
 :: 3. Install (Explorer context menu + PATH)
 ..\install.bat
 ```
