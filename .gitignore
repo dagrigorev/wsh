@@ -1,14 +1,111 @@
-CMakeLists.txt.user
+# ════════════════════════════════════════════════════════════════════════════
+#  Wsh — .gitignore
+# ════════════════════════════════════════════════════════════════════════════
+
+# ── CMake build directories ───────────────────────────────────────────────────
+build/
+build-*/
+out/
+cmake-build-*/
+CMakeFiles/
 CMakeCache.txt
-CMakeFiles
-CMakeScripts
-Testing
-Makefile
 cmake_install.cmake
+CTestTestfile.cmake
+_deps/
 install_manifest.txt
 compile_commands.json
-CTestTestfile.cmake
-_deps
-CMakeUserPresets.json
-.vs
-out
+
+# ── MSVC / Visual Studio ──────────────────────────────────────────────────────
+*.exe
+*.dll
+*.lib
+*.exp
+*.pdb
+*.ilk
+*.obj
+*.idb
+*.ipdb
+*.iobj
+*.tlog
+*.lastbuildstate
+*.res
+*.aps
+
+# Visual Studio project/solution files (we use CMake, not VS projects)
+*.vcxproj
+*.vcxproj.filters
+*.vcxproj.user
+*.sln
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+.vs/
+
+# Visual Studio Code
+.vscode/
+*.code-workspace
+
+# ── Compiled / generated output ───────────────────────────────────────────────
+*.o
+*.a
+*.so
+*.dylib
+*.map
+*.pch
+*.gch
+
+# ── CPack / packaging ─────────────────────────────────────────────────────────
+_CPack_Packages/
+*.zip
+*.tar.gz
+*.7z
+*.msi
+*.nsis
+
+# ── Runtime / user data ───────────────────────────────────────────────────────
+# Do NOT commit user config or history — these live in %APPDATA% and %USERPROFILE%
+*.wsh_history
+Wsh.toml
+.zshrc.local
+
+# Wsh log files
+*.wsh.log
+wsh_debug.log
+
+# ── Windows system junk ───────────────────────────────────────────────────────
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+ehthumbs_vista.db
+Desktop.ini
+$RECYCLE.BIN/
+*.lnk
+
+# ── Clang tools ───────────────────────────────────────────────────────────────
+.clangd/
+.clang-tidy
+.cache/
+
+# ── Ninja ─────────────────────────────────────────────────────────────────────
+.ninja_deps
+.ninja_log
+
+# ── Editor backup / swap files ────────────────────────────────────────────────
+*~
+*.bak
+*.swp
+*.swo
+*.orig
+\#*\#
+.\#*
+
+# ── Test artefacts ────────────────────────────────────────────────────────────
+Testing/
+CTestCostData.txt
+LastTest.log
+LastTestsFailed.log
+
+# ── CI / toolchain caches ─────────────────────────────────────────────────────
+.ccache/
+vcpkg_installed/

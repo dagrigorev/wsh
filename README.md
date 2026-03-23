@@ -1,81 +1,157 @@
-# wsh - A Zsh-inspired Shell for Windows
+# Wsh — ZSH-Compatible Windows Terminal Emulator
 
-_pet project made just for fun_
-_just for train c++ skills_
+A native Windows terminal written in **C11** with zero external dependencies.
 
-## Overview
+| Feature | Detail |
+|---------|--------|
+| Renderer | Direct2D + DirectWrite (GPU-accelerated) |
+| Shell | Built-in ZSH-compatible engine |
+| PTY | ConPTY bridge (run any .exe as child) |
+| Theme | Catppuccin Mocha (default) |
+| Build | CMake + MSVC |
+| Tests | CTest unit tests (no external framework) |
 
-wsh is a lightweight, customizable command shell for Windows that brings Zsh-like features to all Windows versions. Written in modern C++20, it offers:
-
-- Zsh-style command history and tab completion
-- Virtual environments with custom prompts
-- Alias support similar to Zsh
-- Customizable color themes
-- Cross-version Windows compatibility (Windows 7 through 11)
-
-## Demo
-
-![wsh demo](wsh.gif)
-
-## Features
-
-✨ **Zsh-like Experience**:
-- Command history navigation (Up/Down arrows)
-- Tab completion for files/directories
-- Recursive alias expansion
-
-🎨 **Customizable Themes**:
-- Configure colors and prompt symbols
-- Environment-specific theming
-- ANSI color support
-
-📁 **Virtual Environments**:
-- Directory-specific configurations
-- Automatic prompt customization
-- Environment variable management
-
-⚙️ **Easy Configuration**:
-- Single `.wshrc` configuration file
-- Supports comments and simple key=value syntax
-- Hierarchical configuration (directory > user > system)
+---
 
 ## Quick Start
 
-1. Build the project using CMake (requires C++20 compatible compiler)
-2. Run `wsh.exe`
-3. Create a `.wshrc` file in any directory to customize the environment
+```cmd
+:: 1. Open "Developer Command Prompt for VS 2022"
+mkdir build && cd build
+cmake .. -G "NMake Makefiles" -DCMAKE_BUILD_TYPE=Release
+nmake
 
-## Example `.wshrc`
+:: 2. Run
+Wsh.exe
 
-```sh
-# Environment definition
-env myproject
-
-# Theme customization
-prompt_fg=214     # Orange prompt
-dir_fg=81         # Light blue directories
-prompt_symbol=λ   # Custom prompt symbol
-
-# Aliases
-alias ll='ls -l'
-alias gs='git status'
-
-# Environment variables
-PYTHONPATH=./src
+:: 3. Install (Explorer context menu + PATH)
+..\install.bat
 ```
 
-## Commands
-
-- `alias` - Manage command aliases
-- `cd` - Change directory (auto-reloads config)
-- `exit` - Quit the shell
+---
 
 ## Requirements
 
-- Windows 7 or later
-- C++20 compatible compiler (for building)
-- CMake 3.20+ (for building)
+- **Windows 10 1809+** (ConPTY requires 1809; Direct2D on all Win10)
+- **Visual Studio Build Tools 2019+** (MSVC cl.exe, nmake/ninja)
+- **Windows SDK 10.0.17763+** (bundled with VS Build Tools)
+- **Cascadia Code NF** font (optional, for Nerd Font icons) — download from [nerdfonts.com](https://www.nerdfonts.com)
+
+---
+
+## Configuration
+
+On first run, Wsh writes:
+
+| File | Location |
+|------|----------|
+| `Wsh.toml` | `%APPDATA%\Wsh\Wsh.toml` |
+| `.zshrc` | `%USERPROFILE%\.zshrc` |
+
+Edit either file and restart Wsh.
+
+### ZSH-like prompt (default)
+
+```
+user@host ~/projects/myapp ❯
+```
+
+Prompt is configurable via the `PROMPT` variable in `.zshrc`:
+
+```zsh
+PROMPT='%n@%m %~ %# '  # classic ZSH
+PROMPT='%~ ❯ '          # minimal
+```
+
+### Switching to an external shell
+
+```toml
+# Wsh.toml
+[general]
+shell = "C:\\Program Files\\Git\\bin\\bash.exe"
+```
+
+---
+
+## Shell Features
+
+### Syntax (ZSH-compatible)
+
+```zsh
+# Variables
+FOO=bar; echo $FOO; echo ${FOO:-default}; echo ${#FOO}
+
+# Arithmetic
+echo $((2 ** 10))  # 1024
+
+# Control flow
+if [ $x -gt 5 ]; then echo big; else echo small; fi
+for f in *.txt; do echo $f; done
+while read line; do echo $line; done < file.txt
+
+# Functions
+greet() { echo "Hello, $1!"; }
+greet World
+
+# Pipelines and redirections
+ls -la | grep '.c' | sort > results.txt
+cat < input.txt | wc -l
+
+# Background jobs
+sleep 10 &; jobs; fg
+```
+
+### Built-ins
+
+`cd` `echo` `printf` `export` `unset` `alias` `unalias` `source` `.` `exit`
+`return` `true` `false` `test` `[` `read` `set` `setopt` `jobs` `fg` `bg`
+`kill` `wait` `pwd` `type` `which` `eval` `exec` `local` `typeset` `declare`
+`hash` `trap` `open` `clip` `env` `sudo`
+
+### ZSH options
+
+```zsh
+setopt AUTO_CD          # cd by typing directory name
+setopt CORRECT          # spell correction
+setopt GLOB_STAR_SHORT  # ** recursive glob
+setopt HIST_IGNORE_DUPS # skip duplicate history
+```
+
+---
+
+## Keyboard Shortcuts
+
+| Key | Action |
+|-----|--------|
+| `Ctrl+Shift+C` | Copy |
+| `Ctrl+Shift+V` | Paste |
+| `Ctrl+Shift+T` | New tab |
+| `Ctrl+Shift+=` | Zoom in |
+| `Ctrl+Shift+-` | Zoom out |
+| `Mouse wheel` / `PgUp/Dn` | Scroll |
+| `Ctrl+R` | Reverse history search |
+| `Ctrl+A/E` | Start / end of line |
+| `Ctrl+K/U` | Kill to end / start |
+| `Ctrl+W` | Kill word |
+| `Tab` | Complete / show menu |
+| `↑ ↓` | History navigation |
+| `Ctrl+← →` | Word movement |
+
+---
+
+## Running Tests
+
+```cmd
+cd build
+ctest --output-on-failure
+```
+
+Tests cover: `Arena` · `StrUtil` · `Lexer` · `Parser` · `Expand` · `Builtins` · `History`
+
+See `docs/ARCHITECTURE.md` for a full SOLID/OOP design writeup.
+
+---
 
 ## License
 
-MIT License - Free for personal and commercial use
+MIT — see `LICENSE`.

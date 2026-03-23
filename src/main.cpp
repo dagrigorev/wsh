@@ -1,0 +1,442 @@
+/*
+ * main.c — Wsh entry point.
+ *
+ * Responsibilities (Single Responsibility):
+ *   1. DPI awareness
+ *   2. Config loading
+ *   3. Window creation
+ *   4. Wiring: renderer ↔ screen ↔ VT parser ↔ shell ↔ REPL ↔ PTY
+ *   5. Win32 message pump
+ *
+ * All subsystem logic lives in its own module.  main.c only calls APIs;
+ * it never implements logic.
+ *
+ * SOLID / Dependency Inversion:
+ *   The shell receives an IShellIO* (TerminalIO, defined below) that writes
+ *   bytes through the VT parser into the screen buffer.  Tests substitute
+ *   a BufIO that captures to a string.  main.c owns the concrete impl.
+ *
+ * Observer pattern:
+ *   PTY reader thread fires on_pty_data() → vt_parser_feed() → InvalidateRect.
+ *   Shell writes fire through the same callback path.
+ */
+#define UNICODE
+#define _UNICODE
+#include <windows.h>
+#include <shellapi.h>
+#include <string.h>
+#include <stdio.h>
+
+#include "core/str_util.h"
+#include "core/log.h"
+#include "core/path_util.h"
+#include "platform/config.h"
+#include "platform/pty.h"
+#include "platform/input.h"
+#include "terminal/screen.h"
+#include "terminal/vt_parser.h"
+#include "terminal/renderer.h"
+#include "shell/shell_ctx.h"
+#include "shell/history.h"
+#include "shell/completion.h"
+#include "window.h"
+#include "repl.h"
+
+/* ══════════════════════════════════════════════════════════════════════════
+   CONCRETE IShellIO IMPLEMENTATION (Terminal → VT parser → Screen)
+   ══════════════════════════════════════════════════════════════════════════ */
+
+/*
+ * TerminalIO wraps IShellIO and routes write() calls through the VT parser
+ * so all ANSI escape codes produced by built-ins are rendered correctly.
+ *
+ * This is the Dependency Inversion Principle in practice: ShellContext
+ * depends only on IShellIO; the concrete rendering pipeline is here.
+ */
+typedef struct {
+    IShellIO  base;           /* MUST be first — enables safe up-cast */
+    HWND      hwnd;           /* for InvalidateRect */
+    VtParser *vt;             /* VT/ANSI parser */
+    CRITICAL_SECTION *lock;   /* screen buffer lock */
+} TerminalIO;
+
+static void terminal_write(IShellIO *self, const char *buf, int len) {
+    TerminalIO *t = (TerminalIO *)self;
+    EnterCriticalSection(t->lock);
+    vt_parser_feed(t->vt, buf, len);
+    LeaveCriticalSection(t->lock);
+    InvalidateRect(t->hwnd, NULL, FALSE);
+}
+
+static int terminal_read_line(IShellIO *self, char *buf, int size) {
+    /* Built-in shell REPL handles keyboard input via repl_handle_input();
+     * this path is used only by the 'read' built-in. */
+    (void)self;
+    if (!buf || size <= 0) return 0;
+    HANDLE hin = GetStdHandle(STD_INPUT_HANDLE);
+    DWORD n = 0;
+    ReadFile(hin, buf, (DWORD)(size - 1), &n, NULL);
+    buf[n] = '\0';
+    return (int)n;
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   GLOBAL APPLICATION STATE
+   ══════════════════════════════════════════════════════════════════════════ */
+
+static HWND              g_hwnd     = NULL;
+static Config            g_cfg      = {0};
+static ScreenBuffer      g_screen   = {0};
+static VtParser          g_vt       = {0};
+static Renderer          g_renderer = {0};
+static ShellContext      g_shell    = {0};
+static PtySession        g_pty      = {0};
+static Repl              g_repl     = {0};
+static TerminalIO        g_io       = {0};
+static CRITICAL_SECTION  g_lock;
+static bool              g_use_pty  = false;
+static bool              g_suppress_char = false;
+
+/* ══════════════════════════════════════════════════════════════════════════
+   PTY READER CALLBACK
+   ══════════════════════════════════════════════════════════════════════════ */
+
+static void on_pty_data(const char *buf, int len, void *ud) {
+    (void)ud;
+    /* Called from reader thread — must hold the lock */
+    EnterCriticalSection(&g_lock);
+    vt_parser_feed(&g_vt, buf, len);
+    LeaveCriticalSection(&g_lock);
+    InvalidateRect(g_hwnd, NULL, FALSE);
+    PostMessage(g_hwnd, WM_USER, 0, 0);
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   TITLE CHANGE CALLBACK (from VT parser OSC 0/2)
+   ══════════════════════════════════════════════════════════════════════════ */
+
+static void on_title(const char *title, void *ud) {
+    (void)ud;
+    wchar_t *w = u8_to_u16(title, NULL);
+    if (w) { SetWindowTextW(g_hwnd, w); str_free(w); }
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   WndProc
+   ══════════════════════════════════════════════════════════════════════════ */
+
+LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    switch (msg) {
+
+        /* ── Paint ──────────────────────────────────────────────────────── */
+        case WM_PAINT: {
+            PAINTSTRUCT ps; BeginPaint(hwnd, &ps);
+            EnterCriticalSection(&g_lock);
+            renderer_paint(&g_renderer, &g_screen, true,
+                           g_screen.cursor_x, g_screen.cursor_y);
+            LeaveCriticalSection(&g_lock);
+            EndPaint(hwnd, &ps);
+            return 0;
+        }
+
+        /* ── Resize ─────────────────────────────────────────────────────── */
+        case WM_SIZE: {
+            int w = LOWORD(lParam), h = HIWORD(lParam);
+            if (w > 0 && h > 0) {
+                renderer_resize(&g_renderer, w, h);
+                int cols = g_renderer.cols, rows = g_renderer.rows;
+                EnterCriticalSection(&g_lock);
+                screen_resize(&g_screen, cols, rows);
+                LeaveCriticalSection(&g_lock);
+                if (g_use_pty) pty_resize(&g_pty, cols, rows);
+            }
+            return 0;
+        }
+
+        /* ── DPI change ─────────────────────────────────────────────────── */
+        case WM_DPICHANGED: {
+            renderer_update_dpi(&g_renderer, (float)HIWORD(wParam));
+            const RECT *rc = (const RECT *)lParam;
+            SetWindowPos(hwnd, NULL, rc->left, rc->top,
+                         rc->right - rc->left, rc->bottom - rc->top,
+                         SWP_NOZORDER | SWP_NOACTIVATE);
+            InvalidateRect(hwnd, NULL, FALSE);
+            return 0;
+        }
+
+        /* ── Cursor blink timer ─────────────────────────────────────────── */
+        case WM_TIMER:
+            if (wParam == 1) {
+                renderer_toggle_cursor_blink(&g_renderer);
+                InvalidateRect(hwnd, NULL, FALSE);
+            }
+            return 0;
+
+        /* ── Focus ──────────────────────────────────────────────────────── */
+        case WM_SETFOCUS:
+            g_screen.cursor_visible = true;
+            InvalidateRect(hwnd, NULL, FALSE);
+            return 0;
+        case WM_KILLFOCUS:
+            g_screen.cursor_visible = false;
+            InvalidateRect(hwnd, NULL, FALSE);
+            return 0;
+
+        /* ── Keyboard ───────────────────────────────────────────────────── */
+        case WM_KEYDOWN: {
+            InputEvent ev = input_translate(wParam, 0, lParam,
+                                             g_screen.app_cursor_keys);
+            g_suppress_char = input_suppress_char(wParam, lParam);
+
+            switch (ev.action) {
+                case INPUT_COPY:
+                    if (OpenClipboard(hwnd)) {
+                        /* Copy selected region — simplified: copy whole line */
+                        CloseClipboard();
+                    }
+                    break;
+
+                case INPUT_PASTE:
+                    if (OpenClipboard(hwnd)) {
+                        HANDLE hd = GetClipboardData(CF_TEXT);
+                        if (hd) {
+                            const char *text = (const char *)GlobalLock(hd);
+                            if (text) {
+                                if (g_use_pty) pty_write(&g_pty, text, (int)strlen(text));
+                                else repl_handle_input(&g_repl, text, (int)strlen(text));
+                                GlobalUnlock(hd);
+                            }
+                        }
+                        CloseClipboard();
+                    }
+                    break;
+
+                case INPUT_SCROLL_UP:
+                    EnterCriticalSection(&g_lock);
+                    screen_scroll_viewport(&g_screen, 3);
+                    LeaveCriticalSection(&g_lock);
+                    InvalidateRect(hwnd, NULL, FALSE);
+                    break;
+
+                case INPUT_SCROLL_DOWN:
+                    EnterCriticalSection(&g_lock);
+                    screen_scroll_viewport(&g_screen, -3);
+                    LeaveCriticalSection(&g_lock);
+                    InvalidateRect(hwnd, NULL, FALSE);
+                    break;
+
+                case INPUT_ZOOM_IN:
+                    renderer_set_font(&g_renderer, g_cfg.font.family,
+                                      g_renderer.font.pt_size + 1.0f);
+                    InvalidateRect(hwnd, NULL, FALSE);
+                    break;
+
+                case INPUT_ZOOM_OUT:
+                    if (g_renderer.font.pt_size > 6.0f)
+                        renderer_set_font(&g_renderer, g_cfg.font.family,
+                                          g_renderer.font.pt_size - 1.0f);
+                    InvalidateRect(hwnd, NULL, FALSE);
+                    break;
+
+                case INPUT_CHAR:
+                    if (ev.len > 0) {
+                        /* Reset viewport to live buffer on any keypress */
+                        if (g_screen.viewport_offset) {
+                            EnterCriticalSection(&g_lock);
+                            g_screen.viewport_offset = 0;
+                            screen_mark_dirty_all(&g_screen);
+                            LeaveCriticalSection(&g_lock);
+                        }
+                        if (g_use_pty) pty_write(&g_pty, ev.bytes, ev.len);
+                        else {
+                            if (!repl_handle_input(&g_repl, ev.bytes, ev.len))
+                                PostQuitMessage(0);
+                        }
+                    }
+                    break;
+
+                default: break;
+            }
+            return 0;
+        }
+
+        case WM_CHAR: {
+            if (g_suppress_char) { g_suppress_char = false; return 0; }
+            WCHAR ch = (WCHAR)wParam;
+            if (ch == '\r') return 0;
+            InputEvent ev = input_translate(0, ch, lParam, g_screen.app_cursor_keys);
+            if (ev.action == INPUT_CHAR && ev.len > 0) {
+                if (g_screen.viewport_offset) {
+                    EnterCriticalSection(&g_lock);
+                    g_screen.viewport_offset = 0;
+                    screen_mark_dirty_all(&g_screen);
+                    LeaveCriticalSection(&g_lock);
+                }
+                if (g_use_pty) pty_write(&g_pty, ev.bytes, ev.len);
+                else if (!repl_handle_input(&g_repl, ev.bytes, ev.len))
+                    PostQuitMessage(0);
+            }
+            return 0;
+        }
+
+        /* ── Mouse wheel ────────────────────────────────────────────────── */
+        case WM_MOUSEWHEEL: {
+            int delta = GET_WHEEL_DELTA_WPARAM(wParam) / WHEEL_DELTA;
+            EnterCriticalSection(&g_lock);
+            screen_scroll_viewport(&g_screen, -delta * 3);
+            LeaveCriticalSection(&g_lock);
+            InvalidateRect(hwnd, NULL, FALSE);
+            return 0;
+        }
+
+        /* ── PTY/shell data arrived ─────────────────────────────────────── */
+        case WM_USER:
+            InvalidateRect(hwnd, NULL, FALSE);
+            return 0;
+
+        /* ── Close ──────────────────────────────────────────────────────── */
+        case WM_CLOSE:
+            if (g_cfg.general.confirm_exit) {
+                if (MessageBoxW(hwnd, L"Close Wsh?", L"Wsh",
+                                MB_YESNO | MB_ICONQUESTION) != IDYES)
+                    return 0;
+            }
+            DestroyWindow(hwnd);
+            return 0;
+
+        case WM_DESTROY:
+            if (g_use_pty) pty_close(&g_pty);
+            PostQuitMessage(0);
+            return 0;
+
+        default:
+            return DefWindowProcW(hwnd, msg, wParam, lParam);
+    }
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   WinMain
+   ══════════════════════════════════════════════════════════════════════════ */
+
+int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR lpCmd, int nShow) {
+    (void)hPrev; (void)lpCmd;
+
+    /* ── 1. DPI awareness ─────────────────────────────────────────────────── */
+    SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+
+    /* ── 2. Logging (debug builds write to OutputDebugString) ─────────────── */
+    WSH_LOG_INFO("Wsh v" WSH_VERSION " starting");
+
+    /* ── 3. Config ────────────────────────────────────────────────────────── */
+    config_defaults(&g_cfg);
+    char cfg_path[MAX_PATH];
+    config_path(cfg_path, MAX_PATH);
+    if (!path_exists(cfg_path)) config_save_defaults(cfg_path);
+    config_load(&g_cfg, cfg_path);
+
+    /* ── 4. Screen buffer + CRITICAL_SECTION ──────────────────────────────── */
+    InitializeCriticalSection(&g_lock);
+    screen_init(&g_screen, 80, 24, g_cfg.general.scrollback);
+
+    /* ── 5. Window ────────────────────────────────────────────────────────── */
+    if (!window_register_class(hInst)) return 1;
+    g_hwnd = window_create(hInst, &g_cfg, nShow);
+    if (!g_hwnd) return 1;
+
+    /* ── 6. Renderer ──────────────────────────────────────────────────────── */
+    if (!renderer_init(&g_renderer, g_hwnd, &g_cfg)) return 1;
+
+    /* ── 7. VT parser ─────────────────────────────────────────────────────── */
+    vt_parser_init(&g_vt, &g_screen);
+    g_vt.on_title = on_title;
+    g_vt.userdata = NULL;
+
+    /* ── 8. Shell + IShellIO wiring ───────────────────────────────────────── */
+    g_io.base.write     = terminal_write;
+    g_io.base.read_line = terminal_read_line;
+    g_io.hwnd           = g_hwnd;
+    g_io.vt             = &g_vt;
+    g_io.lock           = &g_lock;
+
+    shell_ctx_init(&g_shell, (IShellIO *)&g_io);
+
+    /* ── 9. REPL ──────────────────────────────────────────────────────────── */
+    repl_init(&g_repl, &g_shell);
+
+    /* ── 10. Source ~/.zshrc if present ───────────────────────────────────── */
+    char zshrc[MAX_PATH] = {0};
+    char profile[MAX_PATH] = {0};
+    GetEnvironmentVariableA("USERPROFILE", profile, MAX_PATH);
+    _snprintf(zshrc, MAX_PATH, "%s\\.zshrc", profile);
+
+    /* Copy bundled default .zshrc if user doesn't have one */
+    if (!path_exists(zshrc)) {
+        char default_zshrc[MAX_PATH];
+        /* Look next to the exe first */
+        char exe_dir[MAX_PATH] = {0};
+        GetModuleFileNameA(NULL, exe_dir, MAX_PATH);
+        char *last_bs = strrchr(exe_dir, '\\');
+        if (last_bs) { *last_bs = '\0'; }
+        _snprintf(default_zshrc, MAX_PATH, "%s\\config\\.zshrc", exe_dir);
+        if (path_exists(default_zshrc)) {
+            wchar_t *wsrc = u8_to_u16(default_zshrc, NULL);
+            wchar_t *wdst = u8_to_u16(zshrc, NULL);
+            if (wsrc && wdst) CopyFileW(wsrc, wdst, FALSE);
+            str_free(wsrc); str_free(wdst);
+            WSH_LOG_INFO("Installed default .zshrc to %s", zshrc);
+        }
+    }
+
+    if (path_exists(zshrc)) {
+        WSH_LOG_INFO("Sourcing %s", zshrc);
+        shell_source(&g_shell, zshrc);
+    }
+
+    /* ── 11. Decide: built-in shell or PTY passthrough ────────────────────── */
+    if (strcmp(g_cfg.general.shell, "wsh") == 0 || g_cfg.general.shell[0] == '\0') {
+        g_use_pty = false;
+        repl_show_prompt(&g_repl);
+    } else {
+        g_use_pty = true;
+        if (!pty_create(&g_pty, g_renderer.cols, g_renderer.rows)) {
+            WSH_LOG_WARN("pty_create failed — using built-in shell");
+            g_use_pty = false;
+        } else {
+            wchar_t *wcmd = u8_to_u16(g_cfg.general.shell, NULL);
+            if (!pty_spawn(&g_pty, wcmd ? wcmd : L"cmd.exe", NULL,
+                           on_pty_data, NULL)) {
+                WSH_LOG_ERROR("pty_spawn failed");
+                pty_close(&g_pty); g_use_pty = false;
+            }
+            str_free(wcmd);
+        }
+        if (!g_use_pty) repl_show_prompt(&g_repl);
+    }
+
+    /* ── 12. Sync grid size ───────────────────────────────────────────────── */
+    {
+        RECT rc; GetClientRect(g_hwnd, &rc);
+        renderer_resize(&g_renderer, rc.right - rc.left, rc.bottom - rc.top);
+        EnterCriticalSection(&g_lock);
+        screen_resize(&g_screen, g_renderer.cols, g_renderer.rows);
+        LeaveCriticalSection(&g_lock);
+        if (g_use_pty) pty_resize(&g_pty, g_renderer.cols, g_renderer.rows);
+    }
+
+    /* ── 13. Message pump ─────────────────────────────────────────────────── */
+    MSG msg;
+    while (GetMessageW(&msg, NULL, 0, 0) > 0) {
+        TranslateMessage(&msg);
+        DispatchMessageW(&msg);
+    }
+
+    /* ── 14. Teardown ─────────────────────────────────────────────────────── */
+    repl_free(&g_repl);
+    shell_ctx_free(&g_shell);
+    renderer_destroy(&g_renderer);
+    screen_free(&g_screen);
+    DeleteCriticalSection(&g_lock);
+
+    WSH_LOG_INFO("Wsh exited with code %d", (int)msg.wParam);
+    return (int)msg.wParam;
+}
