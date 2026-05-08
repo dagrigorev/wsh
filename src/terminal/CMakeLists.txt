@@ -4,6 +4,7 @@
 add_library(wsh_terminal STATIC
     screen.c
     vt_parser.c
+    layout.c
     renderer.cpp
     font.cpp
     guid_init.cpp

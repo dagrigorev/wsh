@@ -11,6 +11,7 @@
 #include "screen.h"
 #include "../platform/config.h"
 #include "font.h"
+#include "layout.h"
 #include "../core/str_util.h"
 #include "../core/log.h"
 
@@ -95,23 +96,22 @@ bool renderer_init(Renderer *r, HWND hwnd, const Config *cfg) {
 void renderer_resize(Renderer *r, int w, int h) {
     if (w<1)w=1; if(h <1)h=1;
     if (r->render_target) { D2D1_SIZE_U sz={(UINT32)w,(UINT32)h}; r->render_target->Resize(sz); }
-    int uw=w-2*r->padding_x, uh=h-2*r->padding_y -r->tab_bar_height;
-    if(uw<0)uw=0; if(uh<0)uh=0;
-    r->cols=r->cell_w>0?(int)(uw/r->cell_w):80; r->rows=r->cell_h>0?(int)(uh/r->cell_h):24;
-    if(r->cols<1)r->cols=1; if(r->rows<1)r->rows=1;
+    TerminalGridLayout layout = terminal_compute_grid_layout(w, h, r->cell_w, r->cell_h,
+                                                               r->padding_x, r->padding_y,
+                                                               r->tab_bar_height);
+    r->cols = layout.cols;
+    r->rows = layout.rows;
 }
 
 
 /* Convert window pixel coords to cell col/row (-1 if outside grid) */
 void renderer_pixel_to_cell(const Renderer *r, int px, int py, int *col, int *row) {
-    int ox = r->padding_x;
-    int oy = r->padding_y + r->tab_bar_height;
-    *col = (r->cell_w > 0) ? (int)((px - ox) / r->cell_w) : -1;
-    *row = (r->cell_h > 0) ? (int)((py - oy) / r->cell_h) : -1;
-    if (*col < 0) *col = 0;
-    if (*row < 0) *row = 0;
-    if (*col >= r->cols) *col = r->cols - 1;
-    if (*row >= r->rows) *row = r->rows - 1;
+    TerminalGridLayout layout = {0};
+    layout.cols = r->cols;
+    layout.rows = r->rows;
+    terminal_pixel_to_cell(&layout, px, py, r->cell_w, r->cell_h,
+                           r->padding_x, r->padding_y, r->tab_bar_height,
+                           col, row);
 }
 
 void renderer_paint(Renderer *r, const ScreenBuffer *sb, bool cursor_shown, int cursor_x, int cursor_y) {

@@ -7,8 +7,9 @@ function(add_wsh_test name src)
         ${CMAKE_SOURCE_DIR}/src/core
         ${CMAKE_SOURCE_DIR}/src/shell
         ${CMAKE_SOURCE_DIR}/src/platform
+        ${CMAKE_SOURCE_DIR}/src/terminal
     )
-    target_link_libraries(${name} PRIVATE wsh_core wsh_shell wsh_platform)
+    target_link_libraries(${name} PRIVATE wsh_core wsh_shell wsh_platform wsh_terminal)
     if(MSVC)
         # Compile as C++ so the auto-registration struct trick in test_helpers.h works
         target_compile_options(${name} PRIVATE /TP)
@@ -28,3 +29,10 @@ add_wsh_test(test_builtins     test_builtins.c)
 add_wsh_test(test_history      test_history.c)
 
 add_wsh_test(test_prompt       test_prompt.c)
+
+add_wsh_test(test_config       test_config.c)
+add_wsh_test(test_completion   test_completion.c)
+add_wsh_test(test_executor     test_executor.c)
+add_wsh_test(test_screen       test_screen.c)
+add_wsh_test(test_vt_parser    test_vt_parser.c)
+add_wsh_test(test_layout       test_layout.c)

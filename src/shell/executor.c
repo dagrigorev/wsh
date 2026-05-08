@@ -286,7 +286,6 @@ static int exec_cmd_node(ShellContext *ctx, ASTNode *node, bool bg) {
                         strncat(combined, eargv[i], sizeof(combined) - strlen(combined) - 1);
                     }
                 }
-                for (int i = 0; i < eargc; i++) str_free(eargv[i]);
                 ret = shell_exec_line(ctx, combined);
                 goto done;
             }

@@ -60,5 +60,13 @@ ctest --output-on-failure
 
 ## Testing
 
-The included tests cover parser/lexer/expand/history/builtins/core utilities.
-Windows GUI, Direct2D and ConPTY behavior still require manual verification on a real Windows machine.
+The included tests now cover:
+
+- core utilities and arena helpers
+- lexer, parser, prompt expansion and word expansion
+- builtins, executor basics, history and completion
+- config parsing
+- terminal screen buffer and VT parser behavior
+- renderer/layout calculations for DPI-sensitive grid sizing and startup-message visibility
+
+True Win32 GUI, Direct2D drawing, minimize/restore, and ConPTY behavior still require manual verification on a real Windows machine. See `TEST_MATRIX.md`.

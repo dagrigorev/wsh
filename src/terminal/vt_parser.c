@@ -323,6 +323,23 @@ static void feed_utf8_byte(VtParser *vt, uint8_t b) {
 static void process_char(VtParser *vt, uint32_t cp) {
     ScreenBuffer *sb = vt->screen;
 
+    if (vt->state == VT_OSC_STRING) {
+        if (cp == '' || cp == '') {
+            dispatch_osc(vt);
+            vt->state = VT_GROUND;
+            return;
+        }
+        if (cp == '') {
+            dispatch_osc(vt);
+            vt->state = VT_GROUND;
+            return;
+        }
+        if (vt->osc_len < VT_MAX_OSC - 1) {
+            vt->osc_buf[vt->osc_len++] = (char)(cp & 0xFF);
+        }
+        return;
+    }
+
     /* C0 controls handled in most states */
     if (cp < 0x20 || cp == 0x7F) {
         switch (cp) {

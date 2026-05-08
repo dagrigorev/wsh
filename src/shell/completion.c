@@ -6,6 +6,7 @@
 #include "completion.h"
 #include "shell_ctx.h"
 #include "expand.h"
+#include "env.h"
 #include "../core/str_util.h"
 #include "../core/path_util.h"
 #include "../core/log.h"
@@ -135,6 +136,21 @@ static void collect_commands(const char *prefix, const ShellContext *ctx, MatchL
     str_split_free(dirs, ndir);
 }
 
+static void collect_shell_env_vars(const char *varprefix, const ShellContext *ctx, MatchList *m) {
+    if (!ctx || !ctx->env) return;
+    size_t vplen = strlen(varprefix);
+    for (const EnvScope *scope = ctx->env; scope; scope = scope->parent) {
+        for (const EnvVar *v = scope->vars; v; v = v->next) {
+            if (!v->name) continue;
+            if (strncasecmp(v->name, varprefix, vplen) == 0) {
+                char full[256];
+                _snprintf(full, sizeof(full), "$%s", v->name);
+                ml_push(m, str_dup(full));
+            }
+        }
+    }
+}
+
 /* ─── Compute common prefix of all matches ───────────────────────────────── */
 
 static int common_prefix(char **items, int count) {
@@ -197,6 +213,7 @@ CompletionResult completion_compute(const char *line, int cursor_pos,
     if (prefix[0] == '$') {
         const char *varprefix = prefix + 1;
         size_t vplen = strlen(varprefix);
+        collect_shell_env_vars(varprefix, ctx, &m);
         wchar_t *envblock = GetEnvironmentStringsW();
         if (envblock) {
             for (wchar_t *p = envblock; *p; p += wcslen(p)+1) {
