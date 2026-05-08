@@ -37,6 +37,8 @@ void config_defaults(Config *cfg) {
     cfg->general.confirm_exit  = true;
     strcpy(cfg->general.bell, "visual");
     strcpy(cfg->general.default_cwd, "~");
+    strcpy(cfg->general.theme, "catppuccin-mocha");
+    strcpy(cfg->general.title, "Wsh - ${cwd}");
 
     /* Font */
     wcscpy(cfg->font.family, L"Cascadia Code");
@@ -112,7 +114,33 @@ static char *unquote(char *s) {
     size_t l = strlen(s);
     if (l >= 2 && s[0] == '"' && s[l-1] == '"') {
         s[l-1] = '\0';
-        return s + 1;
+        s++;
+
+        /* Minimal TOML string unescaping.
+         * Important for Windows paths: default_cwd = "C:\\work"
+         * must become C:\work, not C:\\work. */
+        char *src = s;
+        char *dst = s;
+        while (*src) {
+            if (*src == '\\' && src[1]) {
+                src++;
+                switch (*src) {
+                    case 'n':  *dst++ = '\n'; break;
+                    case 'r':  *dst++ = '\r'; break;
+                    case 't':  *dst++ = '\t'; break;
+                    case '"': *dst++ = '"'; break;
+                    case '\\': *dst++ = '\\'; break;
+                    default:
+                        *dst++ = *src;
+                        break;
+                }
+                src++;
+            } else {
+                *dst++ = *src++;
+            }
+        }
+        *dst = '\0';
+        return s;
     }
     return s;
 }
@@ -128,6 +156,8 @@ static void apply_kv(ParseCtx *ctx, const char *key, char *val) {
         else if (!strcmp(key, "confirm_exit")) c->general.confirm_exit  = !strcmp(v,"true");
         else if (!strcmp(key, "bell"))         strncpy(c->general.bell, v, sizeof(c->general.bell)-1);
         else if (!strcmp(key, "default_cwd"))  strncpy(c->general.default_cwd, v, sizeof(c->general.default_cwd)-1);
+        else if (!strcmp(key, "theme"))        strncpy(c->general.theme, v, sizeof(c->general.theme)-1);
+        else if (!strcmp(key, "title"))        strncpy(c->general.title, v, sizeof(c->general.title)-1);
     } else if (strcmp(sec, "font") == 0) {
         if (!strcmp(key, "family")) {
             wchar_t *w = u8_to_u16(v, NULL);
@@ -180,7 +210,7 @@ static void apply_kv(ParseCtx *ctx, const char *key, char *val) {
     }
 }
 
-bool config_load(Config *cfg, const char *toml_path) {
+static bool config_parse_file(Config *cfg, const char *toml_path) {
     FILE *f = fopen(toml_path, "r");
     if (!f) return false;
 
@@ -227,6 +257,19 @@ bool config_load(Config *cfg, const char *toml_path) {
     return true;
 }
 
+bool config_load(Config *cfg, const char *toml_path) {
+    return config_parse_file(cfg, toml_path);
+}
+
+bool config_apply_theme_file(Config *cfg, const char *toml_path) {
+    if (!cfg || !toml_path || !*toml_path) return false;
+
+    Config themed = *cfg;
+    if (!config_parse_file(&themed, toml_path)) return false;
+    cfg->colors = themed.colors;
+    return true;
+}
+
 /* ─── Path Resolution ────────────────────────────────────────────────────── */
 
 void config_path(char *out, int out_size) {
@@ -251,7 +294,9 @@ bool config_save_defaults(const char *toml_path) {
         "scrollback = 10000\n"
         "confirm_exit = true\n"
         "bell = \"visual\"\n"
-        "default_cwd = \"~\"\n\n"
+        "default_cwd = \"~\"\n"
+        "theme = \"catppuccin-mocha\"\n"
+        "title = \"Wsh - ${cwd}\"\n\n"
         "[font]\n"
         "family = \"Cascadia Code\"\n"
         "size = 13.0\n"

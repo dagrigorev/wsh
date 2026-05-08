@@ -29,6 +29,8 @@ typedef struct {
     bool  confirm_exit;
     char  bell[16];         /* "visual", "audio", "none" */
     char  default_cwd[MAX_PATH];
+    char  theme[64];        /* built-in or user theme name */
+    char  title[256];       /* window title template */
 } ConfigGeneral;
 
 typedef struct {
@@ -85,6 +87,9 @@ typedef struct {
 void config_defaults(Config *cfg);
 bool config_load(Config *cfg, const char *toml_path);
 bool config_save_defaults(const char *toml_path);
+
+/* Apply colors from a theme TOML file. Theme file may contain [colors]. */
+bool config_apply_theme_file(Config *cfg, const char *toml_path);
 
 /* Resolve config file path: %APPDATA%\Wsh\Wsh.toml */
 void config_path(char *out, int out_size);

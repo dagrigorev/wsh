@@ -26,6 +26,7 @@
 #include <shellapi.h>
 #include <string.h>
 #include <stdio.h>
+#include <exception>
 
 #include "core/str_util.h"
 #include "core/log.h"
@@ -96,6 +97,67 @@ static TerminalIO        g_io       = {0};
 static CRITICAL_SECTION  g_lock;
 static bool              g_use_pty  = false;
 static bool              g_suppress_char = false;
+
+static void get_exe_dir(char *out, int out_size) {
+    if (!out || out_size <= 0) return;
+    out[0] = '\0';
+    GetModuleFileNameA(NULL, out, (DWORD)out_size);
+    char *last_bs = strrchr(out, '\\');
+    if (last_bs) *last_bs = '\0';
+}
+
+static void expand_title_template(const Config *cfg, char *out, int out_size) {
+    if (!out || out_size <= 0) return;
+    const char *tmpl = (cfg && cfg->general.title[0]) ? cfg->general.title : "Wsh - ${cwd}";
+    char cwd[MAX_PATH] = {0};
+    GetCurrentDirectoryA(MAX_PATH, cwd);
+
+    int oi = 0;
+    for (const char *p = tmpl; *p && oi < out_size - 1; ) {
+        if (strncmp(p, "${cwd}", 6) == 0) {
+            for (const char *c = cwd; *c && oi < out_size - 1; c++) out[oi++] = *c;
+            p += 6;
+        } else if (strncmp(p, "${theme}", 8) == 0) {
+            const char *theme = (cfg && cfg->general.theme[0]) ? cfg->general.theme : "default";
+            for (const char *c = theme; *c && oi < out_size - 1; c++) out[oi++] = *c;
+            p += 8;
+        } else if (strncmp(p, "${version}", 10) == 0) {
+            const char *ver = WSH_VERSION;
+            for (const char *c = ver; *c && oi < out_size - 1; c++) out[oi++] = *c;
+            p += 10;
+        } else {
+            out[oi++] = *p++;
+        }
+    }
+    out[oi] = '\0';
+}
+
+static void apply_configured_theme(Config *cfg) {
+    if (!cfg || !cfg->general.theme[0]) return;
+    if (strchr(cfg->general.theme, '\\') || strchr(cfg->general.theme, '/') || strchr(cfg->general.theme, ':')) {
+        if (!config_apply_theme_file(cfg, cfg->general.theme))
+            WSH_LOG_WARN("Theme file not found: %s", cfg->general.theme);
+        return;
+    }
+
+    char exe_dir[MAX_PATH]; get_exe_dir(exe_dir, MAX_PATH);
+    char theme_path[MAX_PATH];
+    _snprintf(theme_path, MAX_PATH, "%s\\themes\\%s.toml", exe_dir, cfg->general.theme);
+    if (config_apply_theme_file(cfg, theme_path)) return;
+
+    char appdata[MAX_PATH] = {0};
+    GetEnvironmentVariableA("APPDATA", appdata, MAX_PATH);
+    _snprintf(theme_path, MAX_PATH, "%s\\Wsh\\themes\\%s.toml", appdata, cfg->general.theme);
+    if (!config_apply_theme_file(cfg, theme_path))
+        WSH_LOG_WARN("Configured theme was not found: %s", cfg->general.theme);
+}
+
+static void apply_window_title(HWND hwnd, const Config *cfg) {
+    char title[512];
+    expand_title_template(cfg, title, (int)sizeof(title));
+    wchar_t *wtitle = u8_to_u16(title, NULL);
+    if (wtitle) { SetWindowTextW(hwnd, wtitle); str_free(wtitle); }
+}
 
 /* ══════════════════════════════════════════════════════════════════════════
    PTY READER CALLBACK
@@ -405,7 +467,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
    WinMain
    ══════════════════════════════════════════════════════════════════════════ */
 
-int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR lpCmd, int nShow) {
+static int wsh_run(HINSTANCE hInst, HINSTANCE hPrev, LPSTR lpCmd, int nShow) {
     (void)hPrev; (void)lpCmd;
 
     /* ── 1. DPI awareness ─────────────────────────────────────────────────── */
@@ -420,6 +482,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR lpCmd, int nShow) {
     config_path(cfg_path, MAX_PATH);
     if (!path_exists(cfg_path)) config_save_defaults(cfg_path);
     config_load(&g_cfg, cfg_path);
+    apply_configured_theme(&g_cfg);
 
     if (g_cfg.general.default_cwd[0] && strcmp(g_cfg.general.default_cwd, "~") != 0) {
         wchar_t *wcwd = u8_to_u16(g_cfg.general.default_cwd, NULL);
@@ -439,6 +502,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR lpCmd, int nShow) {
     if (!window_register_class(hInst)) return 1;
     g_hwnd = window_create(hInst, &g_cfg, nShow);
     if (!g_hwnd) return 1;
+    apply_window_title(g_hwnd, &g_cfg);
 
     /* ── 6. Renderer ──────────────────────────────────────────────────────── */
     if (!renderer_init(&g_renderer, g_hwnd, &g_cfg)) return 1;
@@ -470,9 +534,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR lpCmd, int nShow) {
     {
         char default_zshrc[MAX_PATH];
         char exe_dir[MAX_PATH] = {0};
-        GetModuleFileNameA(NULL, exe_dir, MAX_PATH);
-        char *last_bs = strrchr(exe_dir, '\\');
-        if (last_bs) { *last_bs = '\0'; }
+        get_exe_dir(exe_dir, MAX_PATH);
         _snprintf(default_zshrc, MAX_PATH, "%s\\config\\.zshrc", exe_dir);
         if (!path_exists(zshrc) && path_exists(default_zshrc)) {
             wchar_t *wsrc = u8_to_u16(default_zshrc, NULL);
@@ -538,5 +600,25 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR lpCmd, int nShow) {
     DeleteCriticalSection(&g_lock);
 
     WSH_LOG_INFO("Wsh exited with code %d", (int)msg.wParam);
+    wsh_log_close();
     return (int)msg.wParam;
+}
+
+int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR lpCmd, int nShow) {
+    wsh_log_init_default("Wsh");
+    wsh_log_set_max_file_size(10ULL * 1024ULL * 1024ULL);
+    wsh_log_install_crash_handlers();
+
+    try {
+        return wsh_run(hInst, hPrev, lpCmd, nShow);
+    } catch (const std::exception& ex) {
+        WSH_LOG_ERROR("Unhandled C++ exception: %s", ex.what());
+    } catch (...) {
+        WSH_LOG_ERROR("Unhandled unknown C++ exception");
+    }
+
+    wsh_log_close();
+    MessageBoxW(NULL, L"Wsh crashed. Details were written to %LOCALAPPDATA%\\Wsh\\logs\\wsh.log",
+                L"Wsh error", MB_OK | MB_ICONERROR);
+    return 1;
 }

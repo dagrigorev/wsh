@@ -60,6 +60,8 @@ int builtin_open(int,char**,ShellContext*);
 int builtin_clip(int,char**,ShellContext*);
 int builtin_env_cmd(int,char**,ShellContext*);
 int builtin_sudo(int,char**,ShellContext*);
+int builtin_man(int,char**,ShellContext*);
+int builtin_help(int,char**,ShellContext*);
 int builtin_noop(int,char**,ShellContext*);
 
 static const BuiltinEntry BUILTIN_TABLE[] = {
@@ -102,6 +104,8 @@ static const BuiltinEntry BUILTIN_TABLE[] = {
     { "clip",     builtin_clip        },
     { "env",      builtin_env_cmd     },
     { "sudo",     builtin_sudo        },
+    { "man",      builtin_man         },
+    { "help",     builtin_help        },
     { "umask",    builtin_noop        },
     { "ulimit",   builtin_noop        },
     { "autoload", builtin_noop        },
@@ -562,6 +566,72 @@ int builtin_sudo(int argc, char **argv, ShellContext *ctx) {
     if (!wcmd) return 1;
     HINSTANCE hi=ShellExecuteW(NULL,L"runas",wcmd,NULL,NULL,SW_SHOWNORMAL);
     str_free(wcmd); return ((INT_PTR)hi>32)?0:1;
+}
+
+
+/* ── man / help ─────────────────────────────────────────────────────────────── */
+
+static void exe_dir(char *out, int out_size) {
+    if (!out || out_size <= 0) return;
+    out[0] = '\0';
+    GetModuleFileNameA(NULL, out, (DWORD)out_size);
+    char *last_bs = strrchr(out, '\\');
+    if (last_bs) *last_bs = '\0';
+}
+
+static int print_text_file(ShellContext *ctx, const char *path) {
+    wchar_t *wpath = u8_to_u16(path, NULL);
+    if (!wpath) return 0;
+    FILE *f = _wfopen(wpath, L"rb");
+    str_free(wpath);
+    if (!f) return 0;
+
+    char buf[2048];
+    size_t n;
+    while ((n = fread(buf, 1, sizeof(buf), f)) > 0) {
+        if (ctx->io && ctx->io->write) ctx->io->write(ctx->io, buf, (int)n);
+    }
+    fclose(f);
+    return 1;
+}
+
+static int print_man_topic(ShellContext *ctx, const char *topic) {
+    if (!topic || !*topic) topic = "wsh";
+
+    char path[MAX_PATH];
+    char dir[MAX_PATH];
+    exe_dir(dir, MAX_PATH);
+    _snprintf(path, MAX_PATH, "%s\\man\\%s.txt", dir, topic);
+    if (print_text_file(ctx, path)) return 0;
+
+    char appdata[MAX_PATH] = {0};
+    GetEnvironmentVariableA("APPDATA", appdata, MAX_PATH);
+    _snprintf(path, MAX_PATH, "%s\\Wsh\\man\\%s.txt", appdata, topic);
+    if (print_text_file(ctx, path)) return 0;
+
+    outfmt(ctx, "man: no manual entry for %s\r\n", topic);
+    outln(ctx, "Try: man wsh, man ls, man md, man tree, man wshinit, help");
+    return 1;
+}
+
+int builtin_man(int argc, char **argv, ShellContext *ctx) {
+    if (argc < 2) return print_man_topic(ctx, "wsh");
+    int ret = 0;
+    for (int i = 1; i < argc; i++) if (print_man_topic(ctx, argv[i]) != 0) ret = 1;
+    return ret;
+}
+
+int builtin_help(int argc, char **argv, ShellContext *ctx) {
+    if (argc > 1) return print_man_topic(ctx, argv[1]);
+    outln(ctx, "Wsh built-ins:");
+    outln(ctx, "  cd pwd echo printf export unset alias unalias source exit return");
+    outln(ctx, "  set setopt jobs fg bg kill wait type which command eval exec");
+    outln(ctx, "  open clip env sudo man help");
+    outln(ctx, "Utilities distributed with Wsh:");
+    outln(ctx, "  ls md tree wshinit");
+    outln(ctx, "Use: man <topic> or <utility> --help");
+    (void)argc; (void)argv;
+    return 0;
 }
 
 /* ── noop ────────────────────────────────────────────────────────────────────── */

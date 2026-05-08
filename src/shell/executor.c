@@ -46,6 +46,20 @@ static char *find_exe(ShellContext *ctx, const char *name) {
         return NULL;
     }
 
+    /* First search the directory that contains Wsh.exe.  This makes dist\ls.exe,
+     * dist\tree.exe, etc. available even when PATH has not been updated yet. */
+    char exe_dir[MAX_PATH] = {0};
+    GetModuleFileNameA(NULL, exe_dir, MAX_PATH);
+    char *bs = strrchr(exe_dir, '\\');
+    if (bs) {
+        *bs = '\0';
+        for (int e = 0; EXT[e]; e++) {
+            char full[MAX_PATH];
+            _snprintf(full, MAX_PATH, "%s\\%s%s", exe_dir, name, EXT[e]);
+            if (path_exists(full) && !path_is_dir(full)) return str_dup(full);
+        }
+    }
+
     char pathenv[32768] = {0};
     GetEnvironmentVariableA("PATH", pathenv, sizeof(pathenv));
     char **dirs = NULL;
@@ -151,6 +165,52 @@ void exec_restore_redirs(ShellContext *ctx,
 
 /* ── External process spawn ───────────────────────────────────────────────── */
 
+static bool handle_is_usable(HANDLE h) {
+    if (h == NULL || h == INVALID_HANDLE_VALUE) return false;
+    SetLastError(ERROR_SUCCESS);
+    DWORD t = GetFileType(h);
+    if (t == FILE_TYPE_UNKNOWN && GetLastError() != ERROR_SUCCESS) return false;
+    return true;
+}
+
+static void append_quoted_arg(char *out, int out_size, int *pos, const char *arg) {
+    if (!out || !pos || *pos >= out_size - 1) return;
+    if (!arg) arg = "";
+    bool q = !arg[0] || strchr(arg, ' ') || strchr(arg, '\t') || strchr(arg, '"');
+    if (q && *pos < out_size - 1) out[(*pos)++] = '"';
+    for (const char *p = arg; *p && *pos < out_size - 2; ++p) {
+        if (*p == '"' && *pos < out_size - 2) out[(*pos)++] = '\\';
+        out[(*pos)++] = *p;
+    }
+    if (q && *pos < out_size - 1) out[(*pos)++] = '"';
+    out[*pos] = '\0';
+}
+
+static void forward_pipe_to_io(ShellContext *ctx, HANDLE hread, HANDLE hprocess) {
+    char buf[4096];
+    for (;;) {
+        DWORD available = 0;
+        if (!PeekNamedPipe(hread, NULL, 0, NULL, &available, NULL)) break;
+        if (available > 0) {
+            DWORD to_read = available > sizeof(buf) ? sizeof(buf) : available;
+            DWORD got = 0;
+            if (!ReadFile(hread, buf, to_read, &got, NULL) || got == 0) break;
+            if (ctx->io && ctx->io->write) ctx->io->write(ctx->io, buf, (int)got);
+            continue;
+        }
+        DWORD wait = WaitForSingleObject(hprocess, 15);
+        if (wait == WAIT_OBJECT_0) {
+            while (PeekNamedPipe(hread, NULL, 0, NULL, &available, NULL) && available > 0) {
+                DWORD to_read = available > sizeof(buf) ? sizeof(buf) : available;
+                DWORD got = 0;
+                if (!ReadFile(hread, buf, to_read, &got, NULL) || got == 0) break;
+                if (ctx->io && ctx->io->write) ctx->io->write(ctx->io, buf, (int)got);
+            }
+            break;
+        }
+    }
+}
+
 static int spawn_external(ShellContext *ctx, char **argv, int argc, bool bg) {
     if (argc < 1 || !argv[0]) return 127;
 
@@ -158,36 +218,64 @@ static int spawn_external(ShellContext *ctx, char **argv, int argc, bool bg) {
     if (!exe) {
         char msg[512]; _snprintf(msg, sizeof(msg), "wsh: %s: command not found", argv[0]);
         io_writeln(ctx->io, msg);
+        WSH_LOG_WARN("command not found: %s", argv[0]);
         return 127;
     }
 
-    /* Build a quoted command line string */
+    /* Build a quoted command line string.  Use the resolved executable path as
+     * argv[0]; otherwise CreateProcessW may fail when Wsh.exe was launched
+     * without dist in PATH. */
     char cmdline[32768]; int ci = 0;
-    for (int i = 0; i < argc && ci < 32760; i++) {
-        if (i > 0) cmdline[ci++] = ' ';
-        bool q = strchr(argv[i], ' ') || strchr(argv[i], '\t') || !argv[i][0];
-        if (q) cmdline[ci++] = '"';
-        for (const char *p = argv[i]; *p && ci < 32762; p++) cmdline[ci++] = *p;
-        if (q) cmdline[ci++] = '"';
+    append_quoted_arg(cmdline, sizeof(cmdline), &ci, exe);
+    for (int i = 1; i < argc && ci < 32760; i++) {
+        if (ci < (int)sizeof(cmdline) - 1) cmdline[ci++] = ' ';
+        append_quoted_arg(cmdline, sizeof(cmdline), &ci, argv[i]);
     }
     cmdline[ci] = '\0';
     str_free(exe);
 
     wchar_t *wcmd = u8_to_u16(cmdline, NULL);
-    if (!wcmd) return 1;
+    wchar_t *wcwd = u8_to_u16(ctx->cwd[0] ? ctx->cwd : ".", NULL);
+    if (!wcmd) { str_free(wcwd); return 1; }
 
-    STARTUPINFOW si = { .cb = sizeof(si), .dwFlags = STARTF_USESTDHANDLES };
-    si.hStdInput  = ctx->h_stdin;
-    si.hStdOutput = ctx->h_stdout;
-    si.hStdError  = ctx->h_stderr;
+    SECURITY_ATTRIBUTES sa = { sizeof(sa), NULL, TRUE };
+    HANDLE cap_read = NULL, cap_write = NULL;
+    bool capture = !bg && ctx->io && ctx->io->write && !handle_is_usable(ctx->h_stdout);
+    if (capture) {
+        if (!CreatePipe(&cap_read, &cap_write, &sa, 65536)) {
+            WSH_LOG_WARN("CreatePipe failed for external command capture");
+            capture = false;
+        } else {
+            SetHandleInformation(cap_read, HANDLE_FLAG_INHERIT, 0);
+        }
+    }
+
+    HANDLE nul_in = NULL;
+    STARTUPINFOW si;
+    memset(&si, 0, sizeof(si));
+    si.cb = sizeof(si);
+    si.dwFlags = STARTF_USESTDHANDLES;
+    si.hStdInput = handle_is_usable(ctx->h_stdin) ? ctx->h_stdin : GetStdHandle(STD_INPUT_HANDLE);
+    if (!handle_is_usable(si.hStdInput)) {
+        nul_in = CreateFileW(L"NUL", GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                             &sa, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+        si.hStdInput = nul_in;
+    }
+    si.hStdOutput = capture ? cap_write : ctx->h_stdout;
+    si.hStdError  = capture ? cap_write : ctx->h_stderr;
 
     PROCESS_INFORMATION pi = {0};
     BOOL ok = CreateProcessW(NULL, wcmd, NULL, NULL, TRUE,
-                              CREATE_UNICODE_ENVIRONMENT, NULL, NULL, &si, &pi);
+                              CREATE_UNICODE_ENVIRONMENT, NULL, wcwd, &si, &pi);
     str_free(wcmd);
+    str_free(wcwd);
+    if (cap_write) CloseHandle(cap_write);
+    if (nul_in) CloseHandle(nul_in);
 
     if (!ok) {
         WSH_LOG_ERROR("CreateProcessW failed for: %s", cmdline);
+        wsh_log_win32("CreateProcessW (external)");
+        if (cap_read) CloseHandle(cap_read);
         char msg[512]; _snprintf(msg, sizeof(msg), "wsh: %s: exec failed", argv[0]);
         io_writeln(ctx->io, msg);
         return 126;
@@ -200,13 +288,17 @@ static int spawn_external(ShellContext *ctx, char **argv, int argc, bool bg) {
         char msg[64]; _snprintf(msg, sizeof(msg), "[%d] %lu",
                                  ctx->jobs.count, (unsigned long)pi.dwProcessId);
         io_writeln(ctx->io, msg);
+        if (cap_read) CloseHandle(cap_read);
         return 0;
     }
 
-    WaitForSingleObject(pi.hProcess, INFINITE);
+    if (capture && cap_read) forward_pipe_to_io(ctx, cap_read, pi.hProcess);
+    else WaitForSingleObject(pi.hProcess, INFINITE);
+
     DWORD code = 0;
     GetExitCodeProcess(pi.hProcess, &code);
     CloseHandle(pi.hProcess);
+    if (cap_read) CloseHandle(cap_read);
     return (int)code;
 }
 

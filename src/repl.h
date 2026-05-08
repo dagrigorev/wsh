@@ -32,6 +32,8 @@ extern "C" {
 
 typedef struct {
     ShellContext   *ctx;          /* Shell context (not owned) */
+    char            prompt[1024]; /* last rendered prompt, needed for redraw */
+    int             prompt_len;   /* byte length of prompt */
     char            line[REPL_LINE_MAX];
     int             len;          /* current content length */
     int             cursor;       /* insertion point (0..len) */

@@ -16,6 +16,8 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 # ── Build types ─────────────────────────────────────────────────────────────
+set(WSH_DIST_DIR "${CMAKE_BINARY_DIR}/dist" CACHE PATH "Runtime distribution directory")
+
 if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
 endif()
@@ -72,6 +74,20 @@ add_subdirectory(src/platform)
 # ── Main executable ──────────────────────────────────────────────────────────
 add_subdirectory(src)
 
+# ── Companion utilities ─────────────────────────────────────────────────────
+add_subdirectory(tools)
+
+# ── Runtime resources ───────────────────────────────────────────────────────
+add_custom_target(wsh_runtime_resources ALL
+    COMMAND ${CMAKE_COMMAND} -E make_directory "${WSH_DIST_DIR}/config"
+    COMMAND ${CMAKE_COMMAND} -E make_directory "${WSH_DIST_DIR}/themes"
+    COMMAND ${CMAKE_COMMAND} -E make_directory "${WSH_DIST_DIR}/man"
+    COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_SOURCE_DIR}/config" "${WSH_DIST_DIR}/config"
+    COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_SOURCE_DIR}/themes" "${WSH_DIST_DIR}/themes"
+    COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_SOURCE_DIR}/man" "${WSH_DIST_DIR}/man"
+    COMMENT "Copying Wsh runtime resources to dist"
+)
+
 # ── Tests ────────────────────────────────────────────────────────────────────
 option(WSH_BUILD_TESTS "Build unit tests" ON)
 if(WSH_BUILD_TESTS)
@@ -80,8 +96,8 @@ if(WSH_BUILD_TESTS)
 endif()
 
 # ── Install rules ────────────────────────────────────────────────────────────
-install(TARGETS Wsh RUNTIME DESTINATION bin)
-install(DIRECTORY config/ DESTINATION share/Wsh)
+install(TARGETS Wsh ls md tree wshinit cat pwd cp mv rm mkdir rmdir touch head tail wc grep sort uniq basename dirname whoami hostname uname date clear which sleep yes true false echo env printenv more less find tee cut RUNTIME DESTINATION bin)
+install(DIRECTORY config themes man DESTINATION share/Wsh)
 
 # ── CPack (ZIP distribution) ─────────────────────────────────────────────────
 set(CPACK_GENERATOR "ZIP")

@@ -35,9 +35,21 @@ target_compile_definitions(Wsh PRIVATE
     WSH_VERSION="${CMAKE_PROJECT_VERSION}"
 )
 
+set_target_properties(Wsh PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${WSH_DIST_DIR}"
+    RUNTIME_OUTPUT_DIRECTORY_DEBUG "${WSH_DIST_DIR}"
+    RUNTIME_OUTPUT_DIRECTORY_RELEASE "${WSH_DIST_DIR}"
+)
+
 add_custom_command(TARGET Wsh POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_directory
             ${CMAKE_SOURCE_DIR}/config
             $<TARGET_FILE_DIR:Wsh>/config
-    COMMENT "Copying default config files"
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+            ${CMAKE_SOURCE_DIR}/themes
+            $<TARGET_FILE_DIR:Wsh>/themes
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+            ${CMAKE_SOURCE_DIR}/man
+            $<TARGET_FILE_DIR:Wsh>/man
+    COMMENT "Copying default config, themes and man pages"
 )

@@ -67,7 +67,15 @@ void repl_show_prompt(Repl *r) {
     char *prompt = shell_expand_prompt(r->ctx, fmt);
     /* Emit directly — shell_expand_prompt has already handled % sequences.
      * Do NOT call expand_string here: it would strip backslashes in CWD paths. */
-    emit(r, prompt);
+    if (prompt) {
+        strncpy(r->prompt, prompt, sizeof(r->prompt) - 1);
+        r->prompt[sizeof(r->prompt) - 1] = '\0';
+        r->prompt_len = (int)strlen(r->prompt);
+        emit(r, prompt);
+    } else {
+        r->prompt[0] = '\0';
+        r->prompt_len = 0;
+    }
     str_free(prompt);
 }
 
@@ -78,6 +86,7 @@ void repl_redraw_line(Repl *r) {
      * Sequence:
      *   \r          — carriage return (go to column 0)
      *   ESC[K       — erase to end of line
+     *   <prompt>    — the current prompt
      *   <line_buf>  — current line content
      *   ESC[<n>D    — move cursor left by (len - cursor) columns
      */
@@ -87,6 +96,11 @@ void repl_redraw_line(Repl *r) {
     seq[n++] = '\r';
     seq[n++] = '\x1B'; seq[n++] = '['; seq[n++] = 'K'; /* erase EOL */
 
+    if (r->prompt_len > 0) {
+        int p_len = r->prompt_len;
+        if (p_len > (int)sizeof(r->prompt) - 1) p_len = (int)sizeof(r->prompt) - 1;
+        memcpy(seq + n, r->prompt, (size_t)p_len); n += p_len;
+    }
     memcpy(seq + n, r->line, (size_t)r->len); n += r->len;
 
     int move_left = r->len - r->cursor;

@@ -12,12 +12,12 @@ PROMPT="[1;32m%n[0m[2m@[0m[1;34m%m[0m [1;36m%~[0m [1;35m>[0m "
 RPROMPT=""
 
 # ── Aliases ───────────────────────────────────────────────────────────────────
-alias ls="ls --color=auto"
-alias ll="ls -lh --color=auto"
-alias la="ls -lha --color=auto"
+alias ls="ls"
+alias ll="ls -l"
+alias la="ls -a -l"
 alias ..="cd .."
 alias ...="cd ../.."
-alias grep="grep --color=auto"
+alias cls="cmd.exe /c cls"
 alias reload="source ~/.zshrc"
 alias notepad="notepad.exe"
 alias explorer="explorer.exe"
@@ -63,4 +63,4 @@ fi
 
 # ── Startup message ───────────────────────────────────────────────────────────
 echo "[1;35m Wsh[0m [2mv1.0[0m"
-echo "[36mhelp[0m for commands, [36mreload[0m to re-source ~/.zshrc"
+echo "[36mhelp[0m for commands, [36mman wsh[0m for manual, [36mreload[0m to re-source ~/.zshrc"

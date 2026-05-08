@@ -51,6 +51,24 @@ void shell_ctx_init(ShellContext *ctx, IShellIO *io) {
     /* Import process environment so $PATH, $HOME etc. are visible */
     env_import_process(ctx->env);
 
+    /* Make companion utilities from the dist/executable directory available
+     * without requiring the user to edit PATH manually. */
+    {
+        char exe_dir[MAX_PATH] = {0};
+        GetModuleFileNameA(NULL, exe_dir, MAX_PATH);
+        char *bs = strrchr(exe_dir, '\\');
+        if (bs) {
+            *bs = '\0';
+            const char *old_path = env_get(ctx->env, "PATH");
+            if (old_path && !strstr(old_path, exe_dir)) {
+                char merged[32768];
+                _snprintf(merged, sizeof(merged), "%s;%s", exe_dir, old_path);
+                env_set(ctx->env, "PATH", merged, true);
+                SetEnvironmentVariableA("PATH", merged);
+            }
+        }
+    }
+
     /* Ensure HOME and PWD are set */
     if (!env_get(ctx->env, "HOME")) {
         char profile[MAX_PATH] = {0};
