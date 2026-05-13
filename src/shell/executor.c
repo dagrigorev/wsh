@@ -29,6 +29,7 @@
 #include "jobs.h"
 #include "../core/str_util.h"
 #include "../core/log.h"
+#include "../core/unicode.h"
 #include "../core/path_util.h"
 
 /* ── Helpers ──────────────────────────────────────────────────────────────── */
@@ -81,6 +82,28 @@ static char *find_exe(ShellContext *ctx, const char *name) {
 
 /* ── Redirection ──────────────────────────────────────────────────────────── */
 
+
+static HANDLE ctx_get_fd_handle(ShellContext *ctx, int fd) {
+    if (fd == 0) return ctx->h_stdin;
+    if (fd == 2) return ctx->h_stderr;
+    return ctx->h_stdout;
+}
+
+static void ctx_replace_fd_handle(ShellContext *ctx, int fd, HANDLE h,
+                                  HANDLE saved_in, HANDLE saved_out, HANDLE saved_err) {
+    if (fd == 0) {
+        if (ctx->h_stdin != saved_in) CloseHandle(ctx->h_stdin);
+        ctx->h_stdin = h;
+    } else if (fd == 2) {
+        if (ctx->h_stderr != saved_err) CloseHandle(ctx->h_stderr);
+        ctx->h_stderr = h;
+    } else {
+        if (ctx->h_stdout != saved_out) CloseHandle(ctx->h_stdout);
+        ctx->h_stdout = h;
+    }
+}
+
+
 bool exec_apply_redirs(ShellContext *ctx, Redir *redirs,
                        HANDLE *saved_in, HANDLE *saved_out, HANDLE *saved_err) {
     /* We store I/O state in the IShellIO but for file redirections we need
@@ -130,13 +153,18 @@ bool exec_apply_redirs(ShellContext *ctx, Redir *redirs,
                 }
                 if (r->kind == REDIR_APPEND)
                     SetFilePointer(h, 0, NULL, FILE_END);
-                if (r->fd == 2) {
-                    if (ctx->h_stderr != *saved_err) CloseHandle(ctx->h_stderr);
-                    ctx->h_stderr = h;
-                } else {
-                    if (ctx->h_stdout != *saved_out) CloseHandle(ctx->h_stdout);
-                    ctx->h_stdout = h;
+                ctx_replace_fd_handle(ctx, r->fd, h, *saved_in, *saved_out, *saved_err);
+                break;
+            }
+            case REDIR_DUP: {
+                HANDLE src = ctx_get_fd_handle(ctx, r->target_fd);
+                HANDLE dup = INVALID_HANDLE_VALUE;
+                if (!DuplicateHandle(GetCurrentProcess(), src, GetCurrentProcess(),
+                                     &dup, 0, TRUE, DUPLICATE_SAME_ACCESS)) {
+                    WSH_LOG_WARN("Cannot duplicate fd %d to fd %d", r->target_fd, r->fd);
+                    goto err;
                 }
+                ctx_replace_fd_handle(ctx, r->fd, dup, *saved_in, *saved_out, *saved_err);
                 break;
             }
             default: break;
@@ -195,7 +223,12 @@ static void forward_pipe_to_io(ShellContext *ctx, HANDLE hread, HANDLE hprocess)
             DWORD to_read = available > sizeof(buf) ? sizeof(buf) : available;
             DWORD got = 0;
             if (!ReadFile(hread, buf, to_read, &got, NULL) || got == 0) break;
-            if (ctx->io && ctx->io->write) ctx->io->write(ctx->io, buf, (int)got);
+            if (ctx->io && ctx->io->write) {
+                int out_len = 0;
+                char *out = wsh_bytes_to_utf8_for_terminal(buf, (int)got, &out_len);
+                ctx->io->write(ctx->io, out ? out : buf, out ? out_len : (int)got);
+                str_free(out);
+            }
             continue;
         }
         DWORD wait = WaitForSingleObject(hprocess, 15);
@@ -204,7 +237,12 @@ static void forward_pipe_to_io(ShellContext *ctx, HANDLE hread, HANDLE hprocess)
                 DWORD to_read = available > sizeof(buf) ? sizeof(buf) : available;
                 DWORD got = 0;
                 if (!ReadFile(hread, buf, to_read, &got, NULL) || got == 0) break;
-                if (ctx->io && ctx->io->write) ctx->io->write(ctx->io, buf, (int)got);
+                if (ctx->io && ctx->io->write) {
+                    int out_len = 0;
+                    char *out = wsh_bytes_to_utf8_for_terminal(buf, (int)got, &out_len);
+                    ctx->io->write(ctx->io, out ? out : buf, out ? out_len : (int)got);
+                    str_free(out);
+                }
             }
             break;
         }
@@ -302,6 +340,16 @@ static int spawn_external(ShellContext *ctx, char **argv, int argc, bool bg) {
     return (int)code;
 }
 
+
+static bool alias_value_starts_with_name(const char *value, const char *name) {
+    if (!value || !name) return false;
+    while (*value == ' ' || *value == '\t') value++;
+    size_t n = strlen(name);
+    if (strncmp(value, name, n) != 0) return false;
+    char c = value[n];
+    return c == '\0' || c == ' ' || c == '\t' || c == '\r' || c == '\n';
+}
+
 /* ── Execute NODE_CMD ─────────────────────────────────────────────────────── */
 
 static int exec_cmd_node(ShellContext *ctx, ASTNode *node, bool bg) {
@@ -366,20 +414,36 @@ static int exec_cmd_node(ShellContext *ctx, ASTNode *node, bool bg) {
     }
 
     if (eargc > 0) {
-        /* Resolve aliases (one level) */
-        for (Alias *a = ctx->aliases; a; a = a->next) {
-            if (strcmp(a->name, eargv[0]) == 0) {
-                char combined[8192];
-                _snprintf(combined, sizeof(combined), "%s", a->value);
-                if (eargc > 1) {
-                    strcat(combined, " ");
-                    for (int i = 1; i < eargc; i++) {
-                        if (i > 1) strcat(combined, " ");
-                        strncat(combined, eargv[i], sizeof(combined) - strlen(combined) - 1);
+        /* Resolve aliases. zsh suppresses recursive re-expansion of the
+         * same alias during one expansion. Wsh used to recurse forever on
+         * alias ls="ls" from the default .zshrc. Skip immediate self aliases
+         * and guard against alias loops such as a=b; b=a. */
+        if (!ctx->suppress_alias) {
+            for (Alias *a = ctx->aliases; a; a = a->next) {
+                if (strcmp(a->name, eargv[0]) == 0) {
+                    if (alias_value_starts_with_name(a->value, a->name)) {
+                        break; /* self-referential alias: run command normally */
                     }
+                    if (ctx->alias_depth >= 32) {
+                        io_writeln(ctx->io, "wsh: alias expansion depth exceeded");
+                        ret = 1;
+                        goto done;
+                    }
+
+                    char combined[8192];
+                    _snprintf(combined, sizeof(combined), "%s", a->value);
+                    if (eargc > 1) {
+                        strncat(combined, " ", sizeof(combined) - strlen(combined) - 1);
+                        for (int i = 1; i < eargc; i++) {
+                            if (i > 1) strncat(combined, " ", sizeof(combined) - strlen(combined) - 1);
+                            strncat(combined, eargv[i], sizeof(combined) - strlen(combined) - 1);
+                        }
+                    }
+                    ctx->alias_depth++;
+                    ret = shell_exec_line(ctx, combined);
+                    ctx->alias_depth--;
+                    goto done;
                 }
-                ret = shell_exec_line(ctx, combined);
-                goto done;
             }
         }
 
@@ -562,6 +626,7 @@ int exec_node(ShellContext *ctx, ASTNode *node) {
             for (ShellFunc *f = ctx->functions; f; f = f->next) {
                 if (strcmp(f->name, node->func.name) == 0) {
                     f->body = node->func.body; /* arena owns the body */
+                    ctx->preserve_ast_arena = true;
                     ret = 0; goto done;
                 }
             }
@@ -571,6 +636,7 @@ int exec_node(ShellContext *ctx, ASTNode *node) {
             fn->body     = node->func.body;
             fn->next     = ctx->functions;
             ctx->functions = fn;
+            ctx->preserve_ast_arena = true;
             ret = 0;
             break;
         }

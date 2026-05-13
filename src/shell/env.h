@@ -20,7 +20,7 @@
 #define WSH_ENV_H
 
 #include <windows.h>
-#include <stdbool.h>
+#include "wsh_bool.h"
 
 
 #ifdef __cplusplus

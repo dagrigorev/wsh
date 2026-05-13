@@ -2,7 +2,7 @@
 #ifndef WSH_TERMINAL_LAYOUT_H
 #define WSH_TERMINAL_LAYOUT_H
 
-#include <stdbool.h>
+#include "wsh_bool.h"
 
 #ifdef __cplusplus
 extern "C" {

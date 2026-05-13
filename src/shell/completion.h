@@ -2,7 +2,7 @@
 #ifndef WSH_COMPLETION_H
 #define WSH_COMPLETION_H
 
-#include <stdbool.h>
+#include "wsh_bool.h"
 #include "shell_ctx.h"
 
 

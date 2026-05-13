@@ -25,6 +25,7 @@
 #include "shell/expand.h"
 #include "core/str_util.h"
 #include "core/log.h"
+#include "core/unicode.h"
 
 /* ── Internal helpers ─────────────────────────────────────────────────────── */
 
@@ -71,10 +72,12 @@ void repl_show_prompt(Repl *r) {
         strncpy(r->prompt, prompt, sizeof(r->prompt) - 1);
         r->prompt[sizeof(r->prompt) - 1] = '\0';
         r->prompt_len = (int)strlen(r->prompt);
+        r->prompt_cols = wsh_utf8_display_width_n(r->prompt, r->prompt_len);
         emit(r, prompt);
     } else {
         r->prompt[0] = '\0';
         r->prompt_len = 0;
+        r->prompt_cols = 0;
     }
     str_free(prompt);
 }
@@ -103,7 +106,7 @@ void repl_redraw_line(Repl *r) {
     }
     memcpy(seq + n, r->line, (size_t)r->len); n += r->len;
 
-    int move_left = r->len - r->cursor;
+    int move_left = wsh_utf8_display_width_n(r->line + r->cursor, r->len - r->cursor);
     if (move_left > 0) {
         char mv[24];
         int ml = _snprintf(mv, sizeof(mv), "\x1B[%dD", move_left);
@@ -130,11 +133,9 @@ static void insert_bytes(Repl *r, const char *bytes, int len) {
 
 static void delete_backward(Repl *r) {
     if (r->cursor == 0) return;
-    /* For multi-byte UTF-8: step back over continuation bytes */
-    int back = 1;
-    while (r->cursor - back > 0 &&
-           (r->line[r->cursor - back] & 0xC0) == 0x80)
-        back++;
+    /* For multi-byte UTF-8: delete one character, not one byte. */
+    int prev = wsh_utf8_prev_offset(r->line, r->cursor);
+    int back = r->cursor - prev;
     memmove(r->line + r->cursor - back,
             r->line + r->cursor,
             (size_t)(r->len - r->cursor));
@@ -314,8 +315,10 @@ bool repl_handle_input(Repl *r, const char *bytes, int len) {
             /* Ctrl+W — kill word before cursor */
             case 0x17: {
                 int end = r->cursor;
-                while (r->cursor > 0 && r->line[r->cursor-1] == ' ') r->cursor--;
-                while (r->cursor > 0 && r->line[r->cursor-1] != ' ') r->cursor--;
+                while (r->cursor > 0 && r->line[wsh_utf8_prev_offset(r->line, r->cursor)] == ' ')
+                r->cursor = wsh_utf8_prev_offset(r->line, r->cursor);
+                while (r->cursor > 0 && r->line[wsh_utf8_prev_offset(r->line, r->cursor)] != ' ')
+                    r->cursor = wsh_utf8_prev_offset(r->line, r->cursor);
                 memmove(r->line + r->cursor, r->line + end,
                         (size_t)(r->len - end + 1));
                 r->len -= (end - r->cursor);
@@ -358,20 +361,13 @@ bool repl_handle_input(Repl *r, const char *bytes, int len) {
             }
             case 'C': /* Right */
                 if (r->cursor < r->len) {
-                    /* Advance over UTF-8 character */
-                    r->cursor++;
-                    while (r->cursor < r->len &&
-                           (r->line[r->cursor] & 0xC0) == 0x80)
-                        r->cursor++;
+                    r->cursor = wsh_utf8_next_offset(r->line, r->len, r->cursor);
                     repl_redraw_line(r);
                 }
                 return true;
             case 'D': /* Left */
                 if (r->cursor > 0) {
-                    r->cursor--;
-                    while (r->cursor > 0 &&
-                           (r->line[r->cursor] & 0xC0) == 0x80)
-                        r->cursor--;
+                    r->cursor = wsh_utf8_prev_offset(r->line, r->cursor);
                     repl_redraw_line(r);
                 }
                 return true;
@@ -382,9 +378,8 @@ bool repl_handle_input(Repl *r, const char *bytes, int len) {
             case '3': /* Del — ESC [ 3 ~ */
                 if (len >= 4 && bytes[3] == '~') {
                     if (r->cursor < r->len) {
-                        int fwd = 1;
-                        while (r->cursor + fwd < r->len &&
-                               (r->line[r->cursor+fwd] & 0xC0) == 0x80) fwd++;
+                        int next = wsh_utf8_next_offset(r->line, r->len, r->cursor);
+                        int fwd = next - r->cursor;
                         memmove(r->line + r->cursor,
                                 r->line + r->cursor + fwd,
                                 (size_t)(r->len - r->cursor - fwd + 1));
@@ -401,12 +396,16 @@ bool repl_handle_input(Repl *r, const char *bytes, int len) {
     if (len >= 6 && bytes[0] == '\x1B' && bytes[1] == '[' &&
         bytes[2] == '1' && bytes[3] == ';' && bytes[4] == '5') {
         if (bytes[5] == 'D') { /* Ctrl+Left — back word */
-            while (r->cursor > 0 && r->line[r->cursor-1] == ' ') r->cursor--;
-            while (r->cursor > 0 && r->line[r->cursor-1] != ' ') r->cursor--;
+            while (r->cursor > 0 && r->line[wsh_utf8_prev_offset(r->line, r->cursor)] == ' ')
+                r->cursor = wsh_utf8_prev_offset(r->line, r->cursor);
+            while (r->cursor > 0 && r->line[wsh_utf8_prev_offset(r->line, r->cursor)] != ' ')
+                r->cursor = wsh_utf8_prev_offset(r->line, r->cursor);
             repl_redraw_line(r);
         } else if (bytes[5] == 'C') { /* Ctrl+Right — forward word */
-            while (r->cursor < r->len && r->line[r->cursor] == ' ') r->cursor++;
-            while (r->cursor < r->len && r->line[r->cursor] != ' ') r->cursor++;
+            while (r->cursor < r->len && r->line[r->cursor] == ' ')
+                r->cursor = wsh_utf8_next_offset(r->line, r->len, r->cursor);
+            while (r->cursor < r->len && r->line[r->cursor] != ' ')
+                r->cursor = wsh_utf8_next_offset(r->line, r->len, r->cursor);
             repl_redraw_line(r);
         }
         return true;

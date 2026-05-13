@@ -4,6 +4,7 @@
 add_library(wsh_core STATIC
     arena.c
     str_util.c
+    unicode.c
     log.c
     path_util.c
 )

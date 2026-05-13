@@ -8,7 +8,7 @@
 #ifndef WSH_PATH_UTIL_H
 #define WSH_PATH_UTIL_H
 
-#include <stdbool.h>
+#include "wsh_bool.h"
 
 
 #ifdef __cplusplus

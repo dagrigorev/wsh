@@ -48,3 +48,25 @@ TEST(Executor, ExpandsOneLevelOfAlias) {
     ASSERT_TRUE(strstr(io.buf, "hello world") != NULL);
     shell_ctx_free(&ctx);
 }
+
+TEST(Executor, SelfAliasDoesNotRecurse) {
+    ShellContext ctx; BufIO io;
+    make_ctx(&ctx, &io);
+    ASSERT_EQ(shell_exec_line(&ctx, "alias ls='ls'"), 0);
+    io.len = 0; io.buf[0] = '\0';
+    int rc = shell_exec_line(&ctx, "ls --definitely-not-a-real-wsh-option-for-recursion-test");
+    ASSERT_TRUE(rc != 0 || strstr(io.buf, "maximum nesting") == NULL);
+    ASSERT_TRUE(strstr(io.buf, "maximum nesting") == NULL);
+    ASSERT_TRUE(strstr(io.buf, "alias expansion depth exceeded") == NULL);
+    shell_ctx_free(&ctx);
+}
+
+TEST(Executor, CommandSuppressesAliasExpansion) {
+    ShellContext ctx; BufIO io;
+    make_ctx(&ctx, &io);
+    ASSERT_EQ(shell_exec_line(&ctx, "alias hi='echo aliased'"), 0);
+    io.len = 0; io.buf[0] = '\0';
+    (void)shell_exec_line(&ctx, "command hi raw");
+    ASSERT_TRUE(strstr(io.buf, "aliased") == NULL);
+    shell_ctx_free(&ctx);
+}

@@ -5,7 +5,7 @@
 #include <windows.h>
 #include <d2d1.h>
 #include <dwrite.h>
-#include <stdbool.h>
+#include "wsh_bool.h"
 #include "screen.h"
 #include "config.h"
 #include "font.h"

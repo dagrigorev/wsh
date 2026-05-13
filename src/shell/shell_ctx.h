@@ -21,7 +21,7 @@
 #define WSH_SHELL_CTX_H
 
 #include <windows.h>
-#include <stdbool.h>
+#include "wsh_bool.h"
 #include <string.h>
 #include "env.h"
 #include "history.h"
@@ -137,8 +137,15 @@ typedef struct ShellContext {
     bool          exit_requested;
     int           exit_code;
 
-    /* Depth counter for recursion guard (source, eval) */
+    /* Depth counters / execution guards.
+     * call_depth tracks function/source nesting.
+     * exec_depth tracks nested shell_exec_line() calls (alias, eval, command substitution).
+     * suppress_alias is used by the zsh-compatible `command` builtin. */
     int           call_depth;
+    int           exec_depth;
+    int           alias_depth;
+    bool          suppress_alias;
+    bool          preserve_ast_arena; /* function bodies currently reference arena AST nodes */
 } ShellContext;
 
 /* ── Lifecycle ─────────────────────────────────────────────────────────────── */

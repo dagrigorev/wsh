@@ -3,7 +3,7 @@
 #define WSH_WINDOW_H
 
 #include <windows.h>
-#include <stdbool.h>
+#include "wsh_bool.h"
 #include "platform/config.h"
 
 

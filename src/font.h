@@ -6,7 +6,7 @@
 
 #include <windows.h>
 #include <dwrite.h>
-#include <stdbool.h>
+#include "wsh_bool.h"
 
 typedef struct {
     IDWriteFactory    *factory;

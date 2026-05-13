@@ -3,7 +3,7 @@
 #define WSH_SCREEN_H
 
 #include <windows.h>
-#include <stdbool.h>
+#include "wsh_bool.h"
 #include <stdint.h>
 
 /* ─── Cell Attribute ─────────────────────────────────────────────────────── */

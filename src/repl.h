@@ -17,7 +17,7 @@
 #ifndef WSH_REPL_H
 #define WSH_REPL_H
 
-#include <stdbool.h>
+#include "wsh_bool.h"
 #include "../shell/shell_ctx.h"
 #include "../shell/completion.h"
 
@@ -34,6 +34,7 @@ typedef struct {
     ShellContext   *ctx;          /* Shell context (not owned) */
     char            prompt[1024]; /* last rendered prompt, needed for redraw */
     int             prompt_len;   /* byte length of prompt */
+    int             prompt_cols;  /* display columns occupied by prompt */
     char            line[REPL_LINE_MAX];
     int             len;          /* current content length */
     int             cursor;       /* insertion point (0..len) */

@@ -5,6 +5,7 @@
 #include "screen.h"
 #include "../core/str_util.h"
 #include "../core/log.h"
+#include "../core/unicode.h"
 
 /* ─── Helpers ────────────────────────────────────────────────────────────── */
 
@@ -218,14 +219,13 @@ void screen_carriage_return(ScreenBuffer *sb) {
 }
 
 void screen_put_char(ScreenBuffer *sb, uint32_t ch, const CellAttr *attr) {
-    /* Detect wide (CJK) characters — simplified: U+1100..U+115F, U+2E80..U+A4CF, etc. */
-    bool wide = (ch >= 0x1100 && ch <= 0x115F) ||
-                (ch >= 0x2E80 && ch <= 0xA4CF) ||
-                (ch >= 0xAC00 && ch <= 0xD7AF) ||
-                (ch >= 0xF900 && ch <= 0xFAFF) ||
-                (ch >= 0xFE10 && ch <= 0xFE6F) ||
-                (ch >= 0xFF00 && ch <= 0xFF60) ||
-                (ch >= 0x1F300 && ch <= 0x1FAFF);
+    int char_width = wsh_utf8_codepoint_width(ch);
+    if (char_width == 0) {
+        /* Combining marks are currently stored as spacing replacement cells.
+         * Full grapheme composition is a later ZLE-level enhancement. */
+        char_width = 1;
+    }
+    bool wide = char_width >= 2;
 
     /* Auto-wrap */
     if (sb->cursor_x >= sb->cols) {

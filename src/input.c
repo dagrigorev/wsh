@@ -1,7 +1,7 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <string.h>
-#include <stdbool.h>
+#include "wsh_bool.h"
 #include "input.h"
 
 /* ─── Modifier helper ────────────────────────────────────────────────────── */

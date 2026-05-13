@@ -175,7 +175,7 @@ static Token read_word(Lexer *l, int start_line) {
 
     /* Classify the word */
     char *text = tb_to_arena(&buf, l->arena);
-    Token t    = { .kind = TOK_WORD, .text = text, .line = start_line };
+    Token t    = { .kind = TOK_WORD, .text = text, .line = start_line, .fd = -1 };
 
     /* Keyword detection */
     static const struct { const char *word; TokenKind kind; } KEYWORDS[] = {
@@ -215,7 +215,7 @@ void lex_init(Lexer *l, const char *src, Arena *arena) {
 }
 
 Token lex_next(Lexer *l) {
-    Token t = { .kind = TOK_EOF, .text = NULL, .line = l->line };
+    Token t = { .kind = TOK_EOF, .text = NULL, .line = l->line, .fd = -1 };
 
     for (;;) {  /* retry loop for whitespace / comments */
         skip_ws(l);
@@ -262,7 +262,14 @@ Token lex_next(Lexer *l) {
 
             case '>':
                 advance(l);
-                if (peek(l) == '>') { advance(l); t.kind = TOK_REDIR_APPEND; }
+                if (peek(l) == '&') {
+                    advance(l);
+                    TokBuf b = {0};
+                    while (isdigit((unsigned char)peek(l))) tb_push(&b, consume(l));
+                    t.kind = TOK_REDIR_DUP;
+                    t.fd = 1;
+                    t.text = tb_to_arena(&b, l->arena);
+                } else if (peek(l) == '>') { advance(l); t.kind = TOK_REDIR_APPEND; }
                 else t.kind = TOK_REDIR_OUT;
                 return t;
 
@@ -277,15 +284,23 @@ Token lex_next(Lexer *l) {
                  * e.g. 2>> 1> 2< — consume the fd, return the redirect token kind */
                 if (isdigit((unsigned char)c)) {
                     int saved_pos = l->pos;
-                    while (isdigit((unsigned char)peek(l))) advance(l);
+                    int fd = 0;
+                    while (isdigit((unsigned char)peek(l))) fd = fd * 10 + (consume(l) - '0');
                     int nc = peek(l);
                     if (nc == '<' || nc == '>') {
                         advance(l); /* consume < or > */
+                        t.fd = fd;
                         if (nc == '<') {
                             if (peek(l) == '<') { advance(l); t.kind = TOK_REDIR_HEREDOC; }
                             else t.kind = TOK_REDIR_IN;
                         } else {
-                            if (peek(l) == '>') { advance(l); t.kind = TOK_REDIR_APPEND; }
+                            if (peek(l) == '&') {
+                                advance(l);
+                                TokBuf b = {0};
+                                while (isdigit((unsigned char)peek(l))) tb_push(&b, consume(l));
+                                t.kind = TOK_REDIR_DUP;
+                                t.text = tb_to_arena(&b, l->arena);
+                            } else if (peek(l) == '>') { advance(l); t.kind = TOK_REDIR_APPEND; }
                             else t.kind = TOK_REDIR_OUT;
                         }
                         return t;
@@ -314,6 +329,7 @@ const char *tok_name(TokenKind k) {
         case TOK_REDIR_OUT:    return ">";
         case TOK_REDIR_APPEND: return ">>";
         case TOK_REDIR_HEREDOC:return "<<";
+        case TOK_REDIR_DUP:    return ">&";
         case TOK_LPAREN:       return "(";
         case TOK_RPAREN:       return ")";
         case TOK_LBRACE:       return "{";

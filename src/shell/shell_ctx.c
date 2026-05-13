@@ -21,6 +21,7 @@
 #include "../core/str_util.h"
 #include "../core/path_util.h"
 #include "../core/log.h"
+#include "../core/unicode.h"
 
 /* ── Handle fields (child process I/O; stored directly in ctx) ────────────── */
 /*
@@ -127,16 +128,28 @@ void shell_ctx_free(ShellContext *ctx) {
 
 int shell_exec_line(ShellContext *ctx, const char *line) {
     if (!line || !line[0]) return 0;
-    if (ctx->call_depth > 64) {
+
+    /* zsh has several internal execution contexts (aliases, eval, command
+     * substitution, prompt hooks). Wsh used to reuse one arena and reset it on
+     * every shell_exec_line() call. That invalidated the currently executing
+     * AST when shell_exec_line() was called from inside expansion/alias logic.
+     * Only the outermost call is allowed to reset the arena. */
+    if (ctx->exec_depth > 64 || ctx->call_depth > 64) {
         io_writeln(ctx->io, "wsh: maximum nesting depth exceeded");
         return 1;
     }
+
+    bool top_level_exec = (ctx->exec_depth == 0);
+    ctx->exec_depth++;
+
+    int ret = 0;
 
     /* History expansion: !! !n !str */
     char expanded_line[8192];
     if (line[0] == '!') {
         if (!history_expand(&ctx->history, line, expanded_line, sizeof(expanded_line)))
             strncpy(expanded_line, line, sizeof(expanded_line)-1);
+        expanded_line[sizeof(expanded_line)-1] = '\0';
         line = expanded_line;
     }
 
@@ -145,15 +158,16 @@ int shell_exec_line(ShellContext *ctx, const char *line) {
         char *trial = expand_tilde(ctx, line);
         if (path_is_dir(trial)) {
             char *argv2[2] = { "cd", trial };
-            int r = builtin_cd(2, argv2, ctx);
+            ret = builtin_cd(2, argv2, ctx);
             str_free(trial);
-            return r;
+            ctx->exec_depth--;
+            return ret;
         }
         str_free(trial);
     }
 
     /* Tokenise → Parse → Execute */
-    arena_reset(ctx->arena);
+    if (top_level_exec && !ctx->preserve_ast_arena) arena_reset(ctx->arena);
 
     Lexer  lex;  lex_init(&lex, line, ctx->arena);
     Parser parser; parser_init(&parser, &lex, ctx->arena);
@@ -161,19 +175,22 @@ int shell_exec_line(ShellContext *ctx, const char *line) {
 
     if (parser.error) {
         io_writeln(ctx->io, parser.errmsg);
-        return 2; /* syntax error */
+        ret = 2; /* syntax error */
+    } else if (!ast) {
+        ret = 0;
+    } else {
+        ret = exec_node(ctx, ast);
+        ctx->last_status = ret;
     }
-    if (!ast) return 0;
 
-    int ret = exec_node(ctx, ast);
-    ctx->last_status = ret;
+    ctx->exec_depth--;
     return ret;
 }
 
 int shell_source(ShellContext *ctx, const char *path) {
     if (!path) return 1;
     wchar_t *wp = u8_to_u16(path, NULL);
-    FILE *f = wp ? _wfopen(wp, L"r") : NULL;
+    FILE *f = wp ? _wfopen(wp, L"rb") : NULL;
     str_free(wp);
 
     if (!f) {
@@ -189,17 +206,32 @@ int shell_source(ShellContext *ctx, const char *path) {
     rewind(f);
     if (fsz <= 0) { fclose(f); return 0; }
 
-    char *buf = (char *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, (size_t)fsz + 1);
-    if (!buf) { fclose(f); return 1; }
-    size_t nr = fread(buf, 1, (size_t)fsz, f);
-    buf[nr] = '\0';
+    char *raw = (char *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, (size_t)fsz + 1);
+    if (!raw) { fclose(f); return 1; }
+    size_t nr = fread(raw, 1, (size_t)fsz, f);
+    raw[nr] = '\0';
     fclose(f);
+
+    char *buf = raw;
+    if (nr >= 3 && (unsigned char)raw[0] == 0xEF &&
+        (unsigned char)raw[1] == 0xBB && (unsigned char)raw[2] == 0xBF) {
+        buf = str_ndup(raw + 3, nr - 3);
+        str_free(raw);
+    } else if (!wsh_utf8_validate_n(raw, (int)nr)) {
+        int out_len = 0;
+        buf = wsh_bytes_to_utf8_for_terminal(raw, (int)nr, &out_len);
+        str_free(raw);
+    }
+    if (!buf) return 1;
 
     ctx->call_depth++;
     int ret = 0;
 
-    /* Parse and execute all statements in the file */
-    arena_reset(ctx->arena);
+    /* Parse and execute all statements in the file.
+     * Do not reset the arena while source is executed as part of a larger
+     * already parsed list: the right side of `source file; next` still lives
+     * in that arena. */
+    if (ctx->exec_depth == 0 && !ctx->preserve_ast_arena) arena_reset(ctx->arena);
     Lexer lex; lex_init(&lex, buf, ctx->arena);
     Parser parser; parser_init(&parser, &lex, ctx->arena);
 
@@ -275,6 +307,22 @@ char *shell_which(ShellContext *ctx, const char *name) {
 
 /* ── Prompt expansion ─────────────────────────────────────────────────────── */
 
+
+static void prompt_push(char *buf, int *bi, int cap, const char *s) {
+    if (!s) return;
+    while (*s && *bi < cap - 1) buf[(*bi)++] = *s++;
+}
+
+static const char *path_basename_u8(const char *path) {
+    if (!path || !*path) return "";
+    const char *end = path + strlen(path);
+    while (end > path && (end[-1] == '\\' || end[-1] == '/')) end--;
+    const char *p = end;
+    while (p > path && p[-1] != '\\' && p[-1] != '/') p--;
+    return p;
+}
+
+
 char *shell_expand_prompt(ShellContext *ctx, const char *fmt) {
     if (!fmt) fmt = "%~ %# ";
     char buf[1024]; int bi = 0;
@@ -292,6 +340,16 @@ char *shell_expand_prompt(ShellContext *ctx, const char *fmt) {
                     } else {
                         while (*cwd && bi < 1020) buf[bi++] = *cwd++;
                     }
+                    break;
+                }
+                case '/':
+                case 'd': { /* full CWD */
+                    prompt_push(buf, &bi, sizeof(buf), ctx->cwd);
+                    break;
+                }
+                case 'c':
+                case 'C': { /* basename of CWD */
+                    prompt_push(buf, &bi, sizeof(buf), path_basename_u8(ctx->cwd));
                     break;
                 }
                 case 'n': { /* username */
@@ -337,11 +395,20 @@ char *shell_expand_prompt(ShellContext *ctx, const char *fmt) {
                     for (char *x = s; *x && bi < 1020; x++) buf[bi++] = *x;
                     break;
                 }
-                case 't': { /* time HH:MM:SS */
+                case 't':
+                case 'T':
+                case '*': { /* time HH:MM:SS */
                     SYSTEMTIME st; GetLocalTime(&st);
                     char s[16]; _snprintf(s, sizeof(s), "%02d:%02d:%02d",
                                           st.wHour, st.wMinute, st.wSecond);
-                    for (char *x = s; *x && bi < 1020; x++) buf[bi++] = *x;
+                    prompt_push(buf, &bi, sizeof(buf), s);
+                    break;
+                }
+                case 'w': { /* date, short zsh-like */
+                    SYSTEMTIME st; GetLocalTime(&st);
+                    char s[16]; _snprintf(s, sizeof(s), "%02d/%02d/%02d",
+                                          st.wMonth, st.wDay, st.wYear % 100);
+                    prompt_push(buf, &bi, sizeof(buf), s);
                     break;
                 }
                 case '%': buf[bi++] = '%'; break;

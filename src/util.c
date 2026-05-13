@@ -4,7 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdarg.h>
-#include <stdbool.h>
+#include "wsh_bool.h"
 #include <stdint.h>
 #include "util.h"
 

@@ -35,3 +35,33 @@ TEST(Repl, RedrawKeepsPromptAndInputOnSameLine) {
     repl_free(&repl);
     shell_ctx_free(&ctx);
 }
+
+TEST(Repl, CyrillicCursorRedrawUsesCharacterColumnsNotBytes) {
+    BufIO io; memset(&io, 0, sizeof(io));
+    io.base.write = buf_write;
+    io.base.read_line = buf_read;
+
+    ShellContext ctx;
+    shell_ctx_init(&ctx, (IShellIO *)&io);
+    shell_setenv(&ctx, "PROMPT", "wsh> ", false);
+
+    Repl repl;
+    repl_init(&repl, &ctx);
+    repl_show_prompt(&repl);
+
+    io.len = 0; io.buf[0] = '\0';
+    ASSERT_TRUE(repl_handle_input(&repl, "пр", (int)strlen("пр")));
+    ASSERT_EQ(repl.cursor, (int)strlen("пр"));
+
+    ASSERT_TRUE(repl_handle_input(&repl, "\x1B[D", 3));
+    ASSERT_EQ(repl.cursor, (int)strlen("п"));
+
+    io.len = 0; io.buf[0] = '\0';
+    ASSERT_TRUE(repl_handle_input(&repl, "и", (int)strlen("и")));
+    ASSERT_TRUE(strstr(repl.line, "пир") != NULL);
+    ASSERT_TRUE(strstr(io.buf, "\x1B[1D") != NULL);
+    ASSERT_TRUE(strstr(io.buf, "\x1B[2D") == NULL);
+
+    repl_free(&repl);
+    shell_ctx_free(&ctx);
+}

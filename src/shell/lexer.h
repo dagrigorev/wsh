@@ -15,7 +15,7 @@
 #define WSH_LEXER_H
 
 #include "../core/arena.h"
-#include <stdbool.h>
+#include "wsh_bool.h"
 
 
 #ifdef __cplusplus
@@ -44,6 +44,7 @@ typedef enum {
     TOK_REDIR_OUT,     /* > */
     TOK_REDIR_APPEND,  /* >> */
     TOK_REDIR_HEREDOC, /* << */
+    TOK_REDIR_DUP,     /* >& or n>&m */
 
     /* Grouping */
     TOK_LPAREN,  /* ( */
@@ -66,6 +67,7 @@ typedef struct {
     TokenKind  kind;
     char      *text;    /* arena-allocated; valid only while arena is live */
     int        line;    /* source line number (1-based) */
+    int        fd;      /* fd prefix for redirections, -1 when absent */
 } Token;
 
 /* ── Lexer state ──────────────────────────────────────────────────────────── */

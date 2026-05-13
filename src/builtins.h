@@ -2,7 +2,7 @@
 #ifndef WSH_BUILTINS_H
 #define WSH_BUILTINS_H
 
-#include <stdbool.h>
+#include "wsh_bool.h"
 #include "shell.h"
 
 /* Signature for all built-in handlers */

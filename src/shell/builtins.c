@@ -28,6 +28,7 @@ typedef struct { const char *name; BuiltinFn fn; } BuiltinEntry;
 int builtin_cd(int,char**,ShellContext*);
 int builtin_echo(int,char**,ShellContext*);
 int builtin_printf_cmd(int,char**,ShellContext*);
+int builtin_print(int,char**,ShellContext*);
 int builtin_export(int,char**,ShellContext*);
 int builtin_unset(int,char**,ShellContext*);
 int builtin_alias(int,char**,ShellContext*);
@@ -41,6 +42,7 @@ int builtin_test(int,char**,ShellContext*);
 int builtin_read(int,char**,ShellContext*);
 int builtin_set_cmd(int,char**,ShellContext*);
 int builtin_setopt(int,char**,ShellContext*);
+int builtin_unsetopt(int,char**,ShellContext*);
 int builtin_jobs(int,char**,ShellContext*);
 int builtin_fg(int,char**,ShellContext*);
 int builtin_bg(int,char**,ShellContext*);
@@ -48,6 +50,7 @@ int builtin_kill_cmd(int,char**,ShellContext*);
 int builtin_wait_cmd(int,char**,ShellContext*);
 int builtin_pwd(int,char**,ShellContext*);
 int builtin_type(int,char**,ShellContext*);
+int builtin_whence(int,char**,ShellContext*);
 int builtin_which(int,char**,ShellContext*);
 int builtin_command(int,char**,ShellContext*);
 int builtin_eval(int,char**,ShellContext*);
@@ -68,6 +71,7 @@ static const BuiltinEntry BUILTIN_TABLE[] = {
     { "cd",       builtin_cd          },
     { "echo",     builtin_echo        },
     { "printf",   builtin_printf_cmd  },
+    { "print",    builtin_print       },
     { "export",   builtin_export      },
     { "unset",    builtin_unset       },
     { "alias",    builtin_alias       },
@@ -83,6 +87,7 @@ static const BuiltinEntry BUILTIN_TABLE[] = {
     { "read",     builtin_read        },
     { "set",      builtin_set_cmd     },
     { "setopt",   builtin_setopt      },
+    { "unsetopt", builtin_unsetopt    },
     { "shopt",    builtin_setopt      },
     { "jobs",     builtin_jobs        },
     { "fg",       builtin_fg          },
@@ -91,6 +96,8 @@ static const BuiltinEntry BUILTIN_TABLE[] = {
     { "wait",     builtin_wait_cmd    },
     { "pwd",      builtin_pwd         },
     { "type",     builtin_type        },
+    { "whence",   builtin_whence      },
+    { "where",    builtin_whence      },
     { "which",    builtin_which       },
     { "command",  builtin_command     },
     { "eval",     builtin_eval        },
@@ -205,6 +212,27 @@ int builtin_printf_cmd(int argc, char **argv, ShellContext *ctx) {
         default:_snprintf(buf,sizeof(buf),fmt,argv[2],argv[3],argv[4],argv[5]); break;
     }
     buf[sizeof(buf)-1]='\0'; out(ctx,buf); return 0;
+}
+
+/* ── print (zsh-compatible practical subset) ───────────────────────────────── */
+
+int builtin_print(int argc, char **argv, ShellContext *ctx) {
+    bool no_newline = false;
+    bool raw = false;
+    int start = 1;
+    for (; start < argc && argv[start][0] == '-'; start++) {
+        if (!strcmp(argv[start], "-n")) no_newline = true;
+        else if (!strcmp(argv[start], "-r")) raw = true;
+        else if (!strcmp(argv[start], "--")) { start++; break; }
+        else break;
+    }
+    (void)raw; /* lexer already preserves literal backslashes for this subset */
+    for (int i = start; i < argc; i++) {
+        if (i > start) out(ctx, " ");
+        out(ctx, argv[i]);
+    }
+    if (!no_newline) out(ctx, "\r\n");
+    return 0;
 }
 
 /* ── export ─────────────────────────────────────────────────────────────────── */
@@ -367,19 +395,53 @@ int builtin_set_cmd(int argc, char **argv, ShellContext *ctx) {
 
 /* ── setopt ──────────────────────────────────────────────────────────────────── */
 
+static void print_option_if(ShellContext *ctx, const char *name, int enabled) {
+    if (enabled) outfmt(ctx, "%s\r\n", name);
+}
+
+static int set_one_option(ShellContext *ctx, const char *opt, int val) {
+    if      (!_stricmp(opt,"AUTO_CD") || !_stricmp(opt,"AUTOCD")) ctx->opts.auto_cd=val;
+    else if (!_stricmp(opt,"CORRECT"))                             ctx->opts.correct=val;
+    else if (!_stricmp(opt,"GLOB_STAR") || !_stricmp(opt,"GLOBSTAR") ||
+             !_stricmp(opt,"GLOB_STAR_SHORT"))                    ctx->opts.glob_star=val;
+    else if (!_stricmp(opt,"HIST_IGNORE_DUPS") || !_stricmp(opt,"HISTIGNOREDUPS")) ctx->opts.hist_ignore_dups=val;
+    else if (!_stricmp(opt,"SHARE_HISTORY") || !_stricmp(opt,"SHAREHISTORY"))       ctx->opts.share_history=val;
+    else if (!_stricmp(opt,"NO_CLOBBER") || !_stricmp(opt,"NOCLOBBER"))             ctx->opts.no_clobber=val;
+    else if (!_stricmp(opt,"ERR_EXIT") || !_stricmp(opt,"ERREXIT"))                 ctx->opts.err_exit=val;
+    else if (!_stricmp(opt,"XTRACE"))                                                ctx->opts.xtrace=val;
+    else if (!_stricmp(opt,"NOUNSET"))                                               ctx->opts.nounset=val;
+    else return 0;
+    return 1;
+}
+
 int builtin_setopt(int argc, char **argv, ShellContext *ctx) {
+    if (argc == 1) {
+        print_option_if(ctx, "AUTO_CD", ctx->opts.auto_cd);
+        print_option_if(ctx, "CORRECT", ctx->opts.correct);
+        print_option_if(ctx, "GLOB_STAR", ctx->opts.glob_star);
+        print_option_if(ctx, "HIST_IGNORE_DUPS", ctx->opts.hist_ignore_dups);
+        print_option_if(ctx, "SHARE_HISTORY", ctx->opts.share_history);
+        print_option_if(ctx, "NO_CLOBBER", ctx->opts.no_clobber);
+        print_option_if(ctx, "ERR_EXIT", ctx->opts.err_exit);
+        print_option_if(ctx, "XTRACE", ctx->opts.xtrace);
+        print_option_if(ctx, "NOUNSET", ctx->opts.nounset);
+        return 0;
+    }
+    int rc = 0;
     for (int i=1; i<argc; i++) {
         const char *opt=argv[i]; int unset=0;
         if (str_startswith(opt,"NO_")||str_startswith(opt,"no_")) { unset=1; opt+=3; }
-        int val=!unset;
-        if      (!_stricmp(opt,"AUTO_CD"))           ctx->opts.auto_cd=val;
-        else if (!_stricmp(opt,"CORRECT"))           ctx->opts.correct=val;
-        else if (!_stricmp(opt,"GLOB_STAR")||
-                 !_stricmp(opt,"GLOB_STAR_SHORT"))   ctx->opts.glob_star=val;
-        else if (!_stricmp(opt,"HIST_IGNORE_DUPS"))  ctx->opts.hist_ignore_dups=val;
-        else if (!_stricmp(opt,"SHARE_HISTORY"))     ctx->opts.share_history=val;
+        if (!set_one_option(ctx, opt, !unset)) { outfmt(ctx, "setopt: no such option: %s\r\n", argv[i]); rc = 1; }
     }
-    return 0;
+    return rc;
+}
+
+int builtin_unsetopt(int argc, char **argv, ShellContext *ctx) {
+    int rc = 0;
+    for (int i=1; i<argc; i++) {
+        if (!set_one_option(ctx, argv[i], 0)) { outfmt(ctx, "unsetopt: no such option: %s\r\n", argv[i]); rc = 1; }
+    }
+    return rc;
 }
 
 /* ── jobs / fg / bg ──────────────────────────────────────────────────────────── */
@@ -447,6 +509,32 @@ int builtin_type(int argc, char **argv, ShellContext *ctx) {
     return 0;
 }
 
+int builtin_whence(int argc, char **argv, ShellContext *ctx) {
+    bool verbose = false;
+    int start = 1;
+    if (argc > 1 && (!strcmp(argv[1], "-v") || !strcmp(argv[1], "-w"))) {
+        verbose = true;
+        start = 2;
+    }
+    for (int i=start; i<argc; i++) {
+        int found = 0;
+        for (Alias *a=ctx->aliases; a; a=a->next) {
+            if (!strcmp(a->name, argv[i])) {
+                if (verbose) outfmt(ctx, "%s: alias for %s\r\n", argv[i], a->value);
+                else outln(ctx, a->value);
+                found = 1;
+                break;
+            }
+        }
+        if (found) continue;
+        if (builtin_find(argv[i])) { if (verbose) outfmt(ctx, "%s: shell builtin\r\n", argv[i]); else outln(ctx, argv[i]); continue; }
+        char *p=shell_which(ctx,argv[i]);
+        if (p) { outln(ctx,p); str_free(p); }
+        else { if (verbose) outfmt(ctx, "%s: not found\r\n", argv[i]); }
+    }
+    return 0;
+}
+
 /* ── which ───────────────────────────────────────────────────────────────────── */
 
 int builtin_which(int argc, char **argv, ShellContext *ctx) {
@@ -460,16 +548,23 @@ int builtin_which(int argc, char **argv, ShellContext *ctx) {
 /* ── command ────────────────────────────────────────────────────────────────── */
 
 int builtin_command(int argc, char **argv, ShellContext *ctx) {
-    /* command -v name  — print path if found, exit 1 if not (like which) */
+    /* zsh-compatible basics:
+     *   command -v name  -> identify a command without running aliases
+     *   command name ... -> execute while suppressing alias expansion
+     * This prevents aliases such as `alias ls="ls"` from recursing forever and
+     * gives users an explicit escape hatch, just like zsh. */
     if (argc >= 3 && strcmp(argv[1], "-v") == 0) {
+        if (builtin_find(argv[2])) { outln(ctx, argv[2]); return 0; }
         char *p = shell_which(ctx, argv[2]);
         if (p) { outln(ctx, p); str_free(p); return 0; }
         return 1;
     }
-    /* command name [args...]  — run name as external command */
     if (argc >= 2) {
         char *line = str_join(argv + 1, argc - 1, " ");
+        bool saved = ctx->suppress_alias;
+        ctx->suppress_alias = true;
         int ret = shell_exec_line(ctx, line);
+        ctx->suppress_alias = saved;
         str_free(line);
         return ret;
     }

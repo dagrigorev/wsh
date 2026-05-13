@@ -3,7 +3,7 @@
 #define WSH_JOBS_H
 
 #include <windows.h>
-#include <stdbool.h>
+#include "wsh_bool.h"
 
 #define JOBS_MAX 64
 

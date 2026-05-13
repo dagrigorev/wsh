@@ -23,6 +23,7 @@
 #include <windows.h>
 #include <string.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include "parser.h"
 #include "lexer.h"
 #include "../core/log.h"
@@ -75,14 +76,22 @@ static Redir *parse_redirs(Parser *p) {
     while (!p->error) {
         TokenKind k = p->cur.kind;
         if (k != TOK_REDIR_IN  && k != TOK_REDIR_OUT &&
-            k != TOK_REDIR_APPEND && k != TOK_REDIR_HEREDOC) break;
+            k != TOK_REDIR_APPEND && k != TOK_REDIR_HEREDOC &&
+            k != TOK_REDIR_DUP) break;
 
         Redir *r  = (Redir *)arena_alloc(p->arena, sizeof(Redir));
         switch (k) {
-            case TOK_REDIR_IN:     r->kind = REDIR_IN;     r->fd = 0; break;
-            case TOK_REDIR_OUT:    r->kind = REDIR_OUT;    r->fd = 1; break;
-            case TOK_REDIR_APPEND: r->kind = REDIR_APPEND; r->fd = 1; break;
-            case TOK_REDIR_HEREDOC:r->kind = REDIR_HEREDOC;r->fd = 0; break;
+            case TOK_REDIR_IN:     r->kind = REDIR_IN;     r->fd = (p->cur.fd >= 0 ? p->cur.fd : 0); break;
+            case TOK_REDIR_OUT:    r->kind = REDIR_OUT;    r->fd = (p->cur.fd >= 0 ? p->cur.fd : 1); break;
+            case TOK_REDIR_APPEND: r->kind = REDIR_APPEND; r->fd = (p->cur.fd >= 0 ? p->cur.fd : 1); break;
+            case TOK_REDIR_HEREDOC:r->kind = REDIR_HEREDOC;r->fd = (p->cur.fd >= 0 ? p->cur.fd : 0); break;
+            case TOK_REDIR_DUP:
+                r->kind = REDIR_DUP;
+                r->fd = (p->cur.fd >= 0 ? p->cur.fd : 1);
+                r->target_fd = p->cur.text && p->cur.text[0] ? atoi(p->cur.text) : -1;
+                advance(p);
+                *tail = r; tail = &r->next;
+                continue;
             default: break;
         }
         advance(p);

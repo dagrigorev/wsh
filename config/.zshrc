@@ -12,7 +12,7 @@ PROMPT="[1;32m%n[0m[2m@[0m[1;34m%m[0m [1;36m%~[0m [1;35m>[0m "
 RPROMPT=""
 
 # ── Aliases ───────────────────────────────────────────────────────────────────
-alias ls="ls"
+# Self-recursive aliases are intentionally avoided; use `command ls` to bypass aliases.
 alias ll="ls -l"
 alias la="ls -a -l"
 alias ..="cd .."

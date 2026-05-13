@@ -19,7 +19,7 @@
 #ifndef WSH_EXPAND_H
 #define WSH_EXPAND_H
 
-#include <stdbool.h>
+#include "wsh_bool.h"
 
 
 #ifdef __cplusplus

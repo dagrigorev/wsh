@@ -103,3 +103,15 @@ TEST(Lexer, Redirections) {
     ASSERT_EQ(next_tok(&l).kind, TOK_WORD);
     arena_destroy(a);
 }
+
+TEST(Lexer, ParsesFdDupRedirection) {
+    Arena *arena = arena_create(4096);
+    Lexer l;
+    lex_init(&l, "echo hi 2>&1", arena);
+    Token t;
+    do { t = lex_next(&l); } while (t.kind != TOK_REDIR_DUP && t.kind != TOK_EOF);
+    ASSERT_EQ(t.kind, TOK_REDIR_DUP);
+    ASSERT_EQ(t.fd, 2);
+    ASSERT_STR_EQ(t.text, "1");
+    arena_destroy(arena);
+}

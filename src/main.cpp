@@ -31,6 +31,7 @@
 #include "core/str_util.h"
 #include "core/log.h"
 #include "core/path_util.h"
+#include "core/unicode.h"
 #include "platform/config.h"
 #include "platform/pty.h"
 #include "platform/input.h"
@@ -260,13 +261,33 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
                 case INPUT_PASTE:
                     if (OpenClipboard(hwnd)) {
-                        HANDLE hd = GetClipboardData(CF_TEXT);
+                        HANDLE hd = GetClipboardData(CF_UNICODETEXT);
                         if (hd) {
-                            const char *text = (const char *)GlobalLock(hd);
-                            if (text) {
-                                if (g_use_pty) pty_write(&g_pty, text, (int)strlen(text));
-                                else repl_handle_input(&g_repl, text, (int)strlen(text));
+                            const wchar_t *wtext = (const wchar_t *)GlobalLock(hd);
+                            if (wtext) {
+                                int u8len = 0;
+                                char *text = wsh_utf16_to_utf8_clipboard(wtext, &u8len);
+                                if (text) {
+                                    if (g_use_pty) pty_write(&g_pty, text, u8len);
+                                    else repl_handle_input(&g_repl, text, u8len);
+                                    str_free(text);
+                                }
                                 GlobalUnlock(hd);
+                            }
+                        } else {
+                            hd = GetClipboardData(CF_TEXT);
+                            if (hd) {
+                                const char *raw = (const char *)GlobalLock(hd);
+                                if (raw) {
+                                    int u8len = 0;
+                                    char *text = wsh_bytes_to_utf8_for_terminal(raw, (int)strlen(raw), &u8len);
+                                    if (text) {
+                                        if (g_use_pty) pty_write(&g_pty, text, u8len);
+                                        else repl_handle_input(&g_repl, text, u8len);
+                                        str_free(text);
+                                    }
+                                    GlobalUnlock(hd);
+                                }
                             }
                         }
                         CloseClipboard();
@@ -378,33 +399,43 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 }
                 char text[65536]; int ti = 0;
                 EnterCriticalSection(&g_lock);
-                for (int r = sr; r <= er && ti < 65530; r++) {
+                for (int r = sr; r <= er && ti < 65520; r++) {
                     int c0 = (r == sr) ? sc : 0;
                     int c1 = (r == er) ? ec : g_screen.cols - 1;
                     int last_ns = c0 - 1;
                     for (int c = c0; c <= c1; c++) {
-                        if (r < g_screen.rows && c < g_screen.cols &&
-                            g_screen.cells[r * g_screen.cols + c].ch > ' ')
-                            last_ns = c;
+                        if (r < g_screen.rows && c < g_screen.cols) {
+                            ScreenCell *cell = &g_screen.cells[r * g_screen.cols + c];
+                            if (!cell->wide_cont && cell->ch > ' ') last_ns = c;
+                        }
                     }
-                    for (int c = c0; c <= last_ns && ti < 65528; c++) {
-                        uint32_t ch = (r < g_screen.rows && c < g_screen.cols)
-                            ? g_screen.cells[r * g_screen.cols + c].ch : ' ';
+                    for (int c = c0; c <= last_ns && ti < 65512; c++) {
+                        ScreenCell *cell = (r < g_screen.rows && c < g_screen.cols)
+                            ? &g_screen.cells[r * g_screen.cols + c] : NULL;
+                        if (cell && cell->wide_cont) continue;
+                        uint32_t ch = cell ? cell->ch : ' ';
                         if (!ch) ch = ' ';
-                        if (ch < 0x80) { text[ti++] = (char)ch; }
-                        else if (ch < 0x800) { text[ti++]=(char)(0xC0|(ch>>6)); text[ti++]=(char)(0x80|(ch&0x3F)); }
-                        else { text[ti++]=(char)(0xE0|(ch>>12)); text[ti++]=(char)(0x80|((ch>>6)&0x3F)); text[ti++]=(char)(0x80|(ch&0x3F)); }
+                        char enc[4];
+                        int n = utf8_encode(ch, enc);
+                        if (ti + n >= 65512) break;
+                        memcpy(text + ti, enc, (size_t)n);
+                        ti += n;
                     }
                     if (r < er) { text[ti++] = '\r'; text[ti++] = '\n'; }
                 }
                 text[ti] = '\0';
                 LeaveCriticalSection(&g_lock);
-                HGLOBAL hg = GlobalAlloc(GMEM_MOVEABLE, (size_t)(ti + 1));
-                if (hg) {
-                    memcpy(GlobalLock(hg), text, (size_t)(ti + 1));
-                    GlobalUnlock(hg);
-                    EmptyClipboard();
-                    SetClipboardData(CF_TEXT, hg);
+                int wchars = 0;
+                wchar_t *wtext = wsh_utf8_to_utf16_clipboard(text, ti, &wchars);
+                if (wtext) {
+                    HGLOBAL hg = GlobalAlloc(GMEM_MOVEABLE, ((size_t)wchars + 1) * sizeof(wchar_t));
+                    if (hg) {
+                        memcpy(GlobalLock(hg), wtext, ((size_t)wchars + 1) * sizeof(wchar_t));
+                        GlobalUnlock(hg);
+                        EmptyClipboard();
+                        SetClipboardData(CF_UNICODETEXT, hg);
+                    }
+                    str_free(wtext);
                 }
                 CloseClipboard();
             }
@@ -414,12 +445,17 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         case WM_RBUTTONDOWN: {
             /* Right-click pastes from clipboard */
             if (OpenClipboard(hwnd)) {
-                HANDLE hd = GetClipboardData(CF_TEXT);
+                HANDLE hd = GetClipboardData(CF_UNICODETEXT);
                 if (hd) {
-                    const char *txt = (const char *)GlobalLock(hd);
-                    if (txt) {
-                        if (g_use_pty) pty_write(&g_pty, txt, (int)strlen(txt));
-                        else repl_handle_input(&g_repl, txt, (int)strlen(txt));
+                    const wchar_t *wtxt = (const wchar_t *)GlobalLock(hd);
+                    if (wtxt) {
+                        int u8len = 0;
+                        char *txt = wsh_utf16_to_utf8_clipboard(wtxt, &u8len);
+                        if (txt) {
+                            if (g_use_pty) pty_write(&g_pty, txt, u8len);
+                            else repl_handle_input(&g_repl, txt, u8len);
+                            str_free(txt);
+                        }
                         GlobalUnlock(hd);
                     }
                 }
@@ -469,6 +505,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
 static int wsh_run(HINSTANCE hInst, HINSTANCE hPrev, LPSTR lpCmd, int nShow) {
     (void)hPrev; (void)lpCmd;
+
+    wsh_unicode_init_process();
 
     /* ── 1. DPI awareness ─────────────────────────────────────────────────── */
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);

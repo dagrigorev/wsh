@@ -3,7 +3,7 @@
 #define WSH_EXPAND_H
 
 #include <windows.h>
-#include <stdbool.h>
+#include "wsh_bool.h"
 #include "util.h"
 
 /* Forward-declare ShellContext to avoid circular include */
