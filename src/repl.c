@@ -48,6 +48,42 @@ void repl_init(Repl *r, ShellContext *ctx) {
 
 void repl_free(Repl *r) {
     completion_free(&r->completion);
+
+    if (r->execute_line) {
+        str_free(r->execute_line);
+        r->execute_line = NULL;
+    }
+
+    r->executing = false;
+    r->execute_thread = NULL;
+}
+
+static DWORD WINAPI repl_execute_thread_proc(LPVOID param) {
+    Repl *r = (Repl *)param;
+    if (!r || !r->execute_line) return 0;
+
+    const char *line = r->execute_line;
+
+    /* preexec hook */
+    for (ShellFunc *f = r->ctx->functions; f; f = f->next) {
+        if (strcmp(f->name, "preexec") == 0) {
+            shell_exec_line(r->ctx, "preexec");
+            break;
+        }
+    }
+
+    shell_exec_line(r->ctx, line);
+
+    str_free(r->execute_line);
+    r->execute_line = NULL;
+
+    r->executing = false;
+
+    if (!r->ctx->exit_requested) {
+        repl_show_prompt(r);
+    }
+
+    return 0;
 }
 
 /* ── Prompt ────────────────────────────────────────────────────────────────── */
@@ -211,23 +247,45 @@ static void execute_line(Repl *r) {
     emit(r, "\r\n");
     r->line[r->len] = '\0';
 
-    /* Record non-empty lines in history */
+    if (r->executing) {
+        emitln(r, "wsh: command is already running");
+        r->len = 0;
+        r->cursor = 0;
+        completion_free(&r->completion);
+        r->completing = false;
+        return;
+    }
+
     if (r->len > 0) {
         history_push(&r->ctx->history, r->line);
 
-        /* preexec hook */
-        for (ShellFunc *f = r->ctx->functions; f; f = f->next) {
-            if (strcmp(f->name, "preexec") == 0) {
-                shell_exec_line(r->ctx, "preexec");
-                break;
+        r->execute_line = str_dup(r->line);
+        if (!r->execute_line) {
+            emitln(r, "wsh: failed to allocate command line");
+        } else {
+            r->executing = true;
+            r->execute_thread = CreateThread(
+                NULL,
+                0,
+                repl_execute_thread_proc,
+                r,
+                0,
+                NULL
+            );
+
+            if (!r->execute_thread) {
+                r->executing = false;
+                str_free(r->execute_line);
+                r->execute_line = NULL;
+                emitln(r, "wsh: failed to start command thread");
+            } else {
+                CloseHandle(r->execute_thread);
+                r->execute_thread = NULL;
             }
         }
-
-        shell_exec_line(r->ctx, r->line);
     }
 
-    /* Reset line state */
-    r->len    = 0;
+    r->len = 0;
     r->cursor = 0;
     completion_free(&r->completion);
     r->completing = false;
@@ -237,6 +295,15 @@ static void execute_line(Repl *r) {
 
 bool repl_handle_input(Repl *r, const char *bytes, int len) {
     if (!bytes || len == 0) return true;
+
+    if (r->executing) {
+        if (len == 1 && bytes[0] == 0x03) {
+            emit(r, "^C\r\n");
+            return true;
+        }
+
+        return true;
+    }
 
     /* Cancel any in-progress completion on non-Tab input */
     if (bytes[0] != '\t') { r->completing = false; }
@@ -280,7 +347,7 @@ bool repl_handle_input(Repl *r, const char *bytes, int len) {
             case '\r': case '\n':
                 execute_line(r);
                 if (r->ctx->exit_requested) return false;
-                repl_show_prompt(r);
+                if (!r->executing) repl_show_prompt(r);
                 return true;
 
             /* Tab */

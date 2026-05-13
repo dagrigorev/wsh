@@ -42,6 +42,9 @@ typedef struct {
     bool            completing;   /* true = second Tab press pending */
     bool            hist_search;  /* Ctrl+R incremental search active */
     char            hist_pat[256];
+    bool            executing;
+    HANDLE          execute_thread;
+    char           *execute_line;
 } Repl;
 
 /* ── API ───────────────────────────────────────────────────────────────────── */
