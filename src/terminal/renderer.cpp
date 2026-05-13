@@ -114,6 +114,110 @@ void renderer_pixel_to_cell(const Renderer *r, int px, int py, int *col, int *ro
                            col, row);
 }
 
+
+void renderer_begin_frame(Renderer *r) {
+    if (!r->render_target) return;
+    r->render_target->BeginDraw();
+    D2D1_COLOR_F bgc = to_d2d(r->bg_color);
+    r->render_target->Clear(&bgc);
+}
+
+void renderer_end_frame(Renderer *r) {
+    if (!r->render_target) return;
+    HRESULT hr = r->render_target->EndDraw();
+    if (hr == D2DERR_RECREATE_TARGET) create_rt(r);
+}
+
+static void renderer_draw_pane_border(Renderer *r, const RECT *rect, bool active) {
+    if (!r || !r->render_target || !rect) return;
+    D2D1_COLOR_F c = active ? to_d2d(r->cursor_color) : to_d2d(r->fg_color);
+    c.a = active ? 0.75f : 0.25f;
+    r->fg_brush->SetColor(c);
+    D2D1_RECT_F rr = {(float)rect->left + 0.5f, (float)rect->top + 0.5f,
+                      (float)rect->right - 0.5f, (float)rect->bottom - 0.5f};
+    r->render_target->DrawRectangle(rr, r->fg_brush, active ? 2.0f : 1.0f);
+}
+
+void renderer_paint_region(Renderer *r, const ScreenBuffer *sb, const RECT *rect,
+                           bool active, bool cursor_shown, int cursor_x, int cursor_y) {
+    if (!r || !r->render_target || !r->font.fmt_normal || !sb || !rect) return;
+
+    float pane_w = (float)(rect->right - rect->left);
+    float pane_h = (float)(rect->bottom - rect->top);
+    if (pane_w <= 1.0f || pane_h <= 1.0f) return;
+
+    D2D1_RECT_F clip = {(float)rect->left, (float)rect->top, (float)rect->right, (float)rect->bottom};
+    r->render_target->PushAxisAlignedClip(clip, D2D1_ANTIALIAS_MODE_ALIASED);
+
+    D2D1_COLOR_F bgc = to_d2d(r->bg_color);
+    r->bg_brush->SetColor(bgc);
+    r->render_target->FillRectangle(clip, r->bg_brush);
+
+    int max_cols = (int)((pane_w - (float)(r->padding_x * 2)) / r->cell_w);
+    int max_rows = (int)((pane_h - (float)(r->padding_y * 2)) / r->cell_h);
+    if (max_cols < 1) max_cols = 1;
+    if (max_rows < 1) max_rows = 1;
+
+    int rows = sb->rows < max_rows ? sb->rows : max_rows;
+    int cols = sb->cols < max_cols ? sb->cols : max_cols;
+    float ox = (float)rect->left + (float)r->padding_x;
+    float oy = (float)rect->top  + (float)r->padding_y;
+    wchar_t wch[4];
+
+    for (int row = 0; row < rows; row++) {
+        for (int col = 0; col < cols; col++) {
+            const ScreenCell *cell = screen_visible_cell(sb, row, col);
+            if (!cell) cell = &sb->cells[row * sb->cols + col];
+
+            float cx = ox + col * r->cell_w;
+            float cy = oy + row * r->cell_h;
+            D2D1_RECT_F cr = {cx, cy, cx + r->cell_w, cy + r->cell_h};
+            Color4F fg = renderer_resolve_fg(r, cell), bgcc = renderer_resolve_bg(r, cell);
+            if (cell->attr.reverse) { Color4F t = fg; fg = bgcc; bgcc = t; }
+
+            if (bgcc.r != r->bg_color.r || bgcc.g != r->bg_color.g || bgcc.b != r->bg_color.b) {
+                D2D1_COLOR_F d = to_d2d(bgcc); r->bg_brush->SetColor(d);
+                r->render_target->FillRectangle(cr, r->bg_brush);
+            }
+
+            if (!cell->wide_cont && cell->ch && cell->ch != ' ') {
+                if (cell->ch < 0x10000) { wch[0] = (wchar_t)cell->ch; wch[1] = 0; }
+                else { uint32_t cp = cell->ch - 0x10000; wch[0] = (wchar_t)(0xD800 | (cp >> 10)); wch[1] = (wchar_t)(0xDC00 | (cp & 0x3FF)); wch[2] = 0; }
+
+                IDWriteTextFormat *fmt = r->font.fmt_normal;
+                if (cell->attr.bold && cell->attr.italic) fmt = r->font.fmt_bold_italic;
+                else if (cell->attr.bold) fmt = r->font.fmt_bold;
+                else if (cell->attr.italic) fmt = r->font.fmt_italic;
+
+                IDWriteTextLayout *layout = NULL;
+                if (r->font.factory) r->font.factory->CreateTextLayout(wch, (UINT32)(cell->ch >= 0x10000 ? 2 : 1), fmt, r->cell_w * (cell->wide ? 2.0f : 1.0f), r->cell_h, &layout);
+                if (layout) {
+                    D2D1_POINT_2F orig = {cx, cy}; D2D1_COLOR_F d = to_d2d(fg); r->fg_brush->SetColor(d);
+                    r->render_target->DrawTextLayout(orig, layout, r->fg_brush, D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT);
+                    layout->Release();
+                }
+                if (cell->attr.underline) {
+                    float uy = cy + r->cell_h - 2.0f;
+                    D2D1_POINT_2F p1 = {cx, uy}, p2 = {cx + r->cell_w, uy}; D2D1_COLOR_F d = to_d2d(fg); r->fg_brush->SetColor(d);
+                    r->render_target->DrawLine(p1, p2, r->fg_brush, 1.0f, NULL);
+                }
+            }
+
+            if (cursor_shown && active && r->cursor_blink_state && col == cursor_x && row == cursor_y && sb->cursor_visible) {
+                D2D1_COLOR_F cc = to_d2d(r->cursor_color); r->cursor_brush->SetColor(cc);
+                switch (r->cursor_style) {
+                    case CURSOR_BLOCK: r->render_target->FillRectangle(cr, r->cursor_brush); break;
+                    case CURSOR_BAR: { D2D1_RECT_F b = {cx, cy, cx + 2.0f, cy + r->cell_h}; r->render_target->FillRectangle(b, r->cursor_brush); break; }
+                    case CURSOR_UNDERLINE: { D2D1_RECT_F u = {cx, cy + r->cell_h - 2.0f, cx + r->cell_w, cy + r->cell_h}; r->render_target->FillRectangle(u, r->cursor_brush); break; }
+                }
+            }
+        }
+    }
+
+    r->render_target->PopAxisAlignedClip();
+    renderer_draw_pane_border(r, rect, active);
+}
+
 void renderer_paint(Renderer *r, const ScreenBuffer *sb, bool cursor_shown, int cursor_x, int cursor_y) {
     if (!r->render_target||!r->font.fmt_normal) return;
     r->render_target->BeginDraw();

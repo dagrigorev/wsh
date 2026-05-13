@@ -76,6 +76,10 @@ bool renderer_init(Renderer *r, HWND hwnd, const Config *cfg);
 void renderer_resize(Renderer *r, int width_px, int height_px);
 void renderer_paint(Renderer *r, const ScreenBuffer *sb,
                     bool cursor_at_x, int cursor_x, int cursor_y);
+void renderer_begin_frame(Renderer *r);
+void renderer_paint_region(Renderer *r, const ScreenBuffer *sb, const RECT *rect,
+                           bool active, bool cursor_shown, int cursor_x, int cursor_y);
+void renderer_end_frame(Renderer *r);
 void renderer_set_font(Renderer *r, const wchar_t *family, float pt_size);
 void renderer_update_dpi(Renderer *r, float dpi);
 void renderer_toggle_cursor_blink(Renderer *r);
