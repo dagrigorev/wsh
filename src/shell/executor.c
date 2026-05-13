@@ -302,9 +302,24 @@ static int spawn_external(ShellContext *ctx, char **argv, int argc, bool bg) {
     si.hStdOutput = capture ? cap_write : ctx->h_stdout;
     si.hStdError  = capture ? cap_write : ctx->h_stderr;
 
+    DWORD creation_flags =
+    CREATE_UNICODE_ENVIRONMENT |
+    CREATE_NO_WINDOW;
+
     PROCESS_INFORMATION pi = {0};
-    BOOL ok = CreateProcessW(NULL, wcmd, NULL, NULL, TRUE,
-                              CREATE_UNICODE_ENVIRONMENT, NULL, wcwd, &si, &pi);
+    BOOL ok = CreateProcessW(
+        NULL,
+        wcmd,
+        NULL,
+        NULL,
+        TRUE,
+        creation_flags,
+        NULL,
+        wcwd,
+        &si,
+        &pi
+    );
+
     str_free(wcmd);
     str_free(wcwd);
     if (cap_write) CloseHandle(cap_write);
