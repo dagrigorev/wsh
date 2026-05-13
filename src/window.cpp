@@ -1,0 +1,67 @@
+#include <windows.h>
+#include <string.h>
+#include "window.h"
+#include "core/str_util.h"
+#include "core/log.h"
+
+extern LRESULT CALLBACK WndProc(HWND, UINT, WPARAM, LPARAM);
+
+bool window_register_class(HINSTANCE hInst) {
+    WNDCLASSEXW wc = {0};
+    wc.cbSize        = sizeof(wc);
+    wc.style         = CS_OWNDC | CS_HREDRAW | CS_VREDRAW;
+    wc.lpfnWndProc   = WndProc;
+    wc.hInstance     = hInst;
+    wc.hCursor       = LoadCursor(NULL, IDC_ARROW);
+    wc.hbrBackground = NULL; /* We paint our own background */
+    wc.lpszClassName = L"Wsh";
+    wc.hIcon         = LoadIcon(hInst, MAKEINTRESOURCE(1));
+    wc.hIconSm       = LoadIcon(hInst, MAKEINTRESOURCE(1));
+
+    if (!RegisterClassExW(&wc)) {
+        wsh_log_win32("RegisterClassExW");
+        return false;
+    }
+    return true;
+}
+
+HWND window_create(HINSTANCE hInst, const Config *cfg, int nShow) {
+    (void)cfg;
+    /* Initial size: 80x24 cells approx — will be resized by renderer */
+    int w = 800, h = 600;
+
+    DWORD style    = WS_OVERLAPPEDWINDOW | WS_VSCROLL;
+    DWORD ex_style = WS_EX_APPWINDOW;
+
+    /* Adjust for client area */
+    RECT r = { 0, 0, w, h };
+    AdjustWindowRectEx(&r, style, FALSE, ex_style);
+    int win_w = r.right  - r.left;
+    int win_h = r.bottom - r.top;
+
+    HWND hwnd = CreateWindowExW(
+        ex_style,
+        L"Wsh",
+        L"Wsh",
+        style,
+        CW_USEDEFAULT, CW_USEDEFAULT,
+        win_w, win_h,
+        NULL, NULL,
+        hInst, (LPVOID)cfg   /* Pass config as creation param */
+    );
+
+    if (!hwnd) {
+        wsh_log_win32("CreateWindowExW");
+        return NULL;
+    }
+
+    ShowWindow(hwnd, nShow);
+    UpdateWindow(hwnd);
+    return hwnd;
+}
+
+bool window_has_running_jobs(HWND hwnd) {
+    /* Retrieved from global job table via message or global pointer */
+    (void)hwnd;
+    return false; /* Simplified — main.c checks directly */
+}

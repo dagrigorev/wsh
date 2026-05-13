@@ -1,0 +1,14 @@
+more(1) — Wsh companion utility
+
+SYNOPSIS
+    more [options] [arguments...]
+
+DESCRIPTION
+    Lightweight Windows-native implementation of the familiar Linux `more` utility.
+
+OPTIONS
+    -h, --help, /?
+        Show command help.
+
+SEE ALSO
+    man wsh
