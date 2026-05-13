@@ -20,6 +20,10 @@ static ScreenCell *active_grid(ScreenBuffer *sb) {
     return sb->alt_screen_active ? sb->alt_cells : sb->cells;
 }
 
+/* Public functions used before their definitions in this translation unit. */
+int screen_max_viewport_offset(const ScreenBuffer *sb);
+void screen_mark_dirty_all(ScreenBuffer *sb);
+
 /* ─── Init / Free ────────────────────────────────────────────────────────── */
 
 void screen_init(ScreenBuffer *sb, int cols, int rows, int scrollback_lines) {
@@ -28,6 +32,7 @@ void screen_init(ScreenBuffer *sb, int cols, int rows, int scrollback_lines) {
     sb->rows           = rows;
     sb->cursor_visible = true;
     sb->auto_wrap      = true;
+    sb->scroll_on_output = true;
     sb->scroll_top     = 0;
     sb->scroll_bot     = rows - 1;
 
@@ -89,6 +94,8 @@ void screen_resize(ScreenBuffer *sb, int new_cols, int new_rows) {
     /* Clamp cursor */
     if (sb->cursor_x >= new_cols) sb->cursor_x = new_cols - 1;
     if (sb->cursor_y >= new_rows) sb->cursor_y = new_rows - 1;
+    if (sb->cursor_x < 0) sb->cursor_x = 0;
+    if (sb->cursor_y < 0) sb->cursor_y = 0;
 
     /* Reset scroll region */
     sb->scroll_top = 0;
@@ -103,7 +110,10 @@ void screen_resize(ScreenBuffer *sb, int new_cols, int new_rows) {
         sb->scrollback       = nsb;
         sb->scrollback_head  = 0;
         sb->scrollback_count = 0;
+        sb->viewport_offset  = 0;
     }
+    int max_view = screen_max_viewport_offset(sb);
+    if (sb->viewport_offset > max_view) sb->viewport_offset = max_view;
 }
 
 /* ─── Cell Access ────────────────────────────────────────────────────────── */
@@ -152,6 +162,24 @@ static void push_line_to_scrollback(ScreenBuffer *sb, ScreenCell *line) {
     if (sb->scrollback_count < sb->scrollback_capacity) sb->scrollback_count++;
 }
 
+int screen_max_viewport_offset(const ScreenBuffer *sb) {
+    if (!sb || sb->alt_screen_active) return 0;
+    return sb->scrollback_count < 0 ? 0 : sb->scrollback_count;
+}
+
+void screen_reset_viewport(ScreenBuffer *sb) {
+    if (!sb) return;
+    if (sb->viewport_offset != 0) {
+        sb->viewport_offset = 0;
+        screen_mark_dirty_all(sb);
+    }
+}
+
+static void screen_note_output(ScreenBuffer *sb) {
+    if (!sb || sb->alt_screen_active) return;
+    if (sb->scroll_on_output) screen_reset_viewport(sb);
+}
+
 /* ─── Scroll Region Scroll ───────────────────────────────────────────────── */
 
 void screen_scroll_up(ScreenBuffer *sb, int top, int bot, int n) {
@@ -196,17 +224,31 @@ void screen_scroll_down(ScreenBuffer *sb, int top, int bot, int n) {
     }
 }
 
+void screen_set_viewport_offset(ScreenBuffer *sb, int offset) {
+    if (!sb || sb->alt_screen_active) return;
+    int old = sb->viewport_offset;
+    int max_offset = screen_max_viewport_offset(sb);
+    if (offset < 0) offset = 0;
+    if (offset > max_offset) offset = max_offset;
+    sb->viewport_offset = offset;
+    if (sb->viewport_offset != old) screen_mark_dirty_all(sb);
+}
+
 void screen_scroll_viewport(ScreenBuffer *sb, int delta) {
-    sb->viewport_offset += delta;
-    if (sb->viewport_offset < 0) sb->viewport_offset = 0;
-    if (sb->viewport_offset > sb->scrollback_count)
-        sb->viewport_offset = sb->scrollback_count;
-    screen_mark_dirty_all(sb);
+    if (!sb || sb->alt_screen_active) return;
+    screen_set_viewport_offset(sb, sb->viewport_offset + delta);
+}
+
+void screen_page_viewport(ScreenBuffer *sb, int pages) {
+    if (!sb || pages == 0) return;
+    int page = sb->rows > 1 ? sb->rows - 1 : 1;
+    screen_scroll_viewport(sb, pages * page);
 }
 
 /* ─── Character Output ───────────────────────────────────────────────────── */
 
 void screen_newline(ScreenBuffer *sb) {
+    screen_note_output(sb);
     if (sb->cursor_y < sb->scroll_bot) {
         sb->cursor_y++;
     } else {
@@ -219,6 +261,7 @@ void screen_carriage_return(ScreenBuffer *sb) {
 }
 
 void screen_put_char(ScreenBuffer *sb, uint32_t ch, const CellAttr *attr) {
+    screen_note_output(sb);
     int char_width = wsh_utf8_codepoint_width(ch);
     if (char_width == 0) {
         /* Combining marks are currently stored as spacing replacement cells.
@@ -313,6 +356,7 @@ void screen_erase_display(ScreenBuffer *sb, int mode) {
             /* Also clear scrollback */
             sb->scrollback_head  = 0;
             sb->scrollback_count = 0;
+            sb->viewport_offset  = 0;
         }
     }
 }
@@ -376,6 +420,7 @@ void screen_delete_chars(ScreenBuffer *sb, int n) {
 
 void screen_enter_alt(ScreenBuffer *sb) {
     if (sb->alt_screen_active) return;
+    screen_reset_viewport(sb);
     sb->alt_screen_active = true;
     fill_cells(sb->alt_cells, sb->cols * sb->rows, NULL);
     screen_mark_dirty_all(sb);
@@ -398,10 +443,44 @@ void screen_mark_dirty_all(ScreenBuffer *sb) {
 /* ─── Scrollback Access ──────────────────────────────────────────────────── */
 
 ScreenCell *screen_scrollback_line(ScreenBuffer *sb, int line_offset, int col) {
-    if (!sb->scrollback || line_offset < 0 || line_offset >= sb->scrollback_count)
+    if (!sb || !sb->scrollback || line_offset < 0 || line_offset >= sb->scrollback_count)
         return NULL;
     if (col < 0 || col >= sb->cols) return NULL;
     int idx = (sb->scrollback_head - 1 - line_offset + sb->scrollback_capacity)
               % sb->scrollback_capacity;
     return sb->scrollback + idx * sb->cols + col;
+}
+
+ScreenCell *screen_scrollback_line_from_oldest(ScreenBuffer *sb, int chronological_index, int col) {
+    if (!sb || !sb->scrollback || chronological_index < 0 || chronological_index >= sb->scrollback_count)
+        return NULL;
+    if (col < 0 || col >= sb->cols) return NULL;
+    int oldest = (sb->scrollback_head - sb->scrollback_count + sb->scrollback_capacity)
+                 % sb->scrollback_capacity;
+    int idx = (oldest + chronological_index) % sb->scrollback_capacity;
+    return sb->scrollback + idx * sb->cols + col;
+}
+
+const ScreenCell *screen_visible_cell(const ScreenBuffer *sb, int viewport_row, int col) {
+    if (!sb || viewport_row < 0 || viewport_row >= sb->rows || col < 0 || col >= sb->cols) return NULL;
+
+    const ScreenCell *grid = sb->alt_screen_active ? sb->alt_cells : sb->cells;
+    if (sb->alt_screen_active || sb->viewport_offset <= 0 || sb->scrollback_count <= 0) {
+        return grid + viewport_row * sb->cols + col;
+    }
+
+    int max_offset = screen_max_viewport_offset(sb);
+    int offset = sb->viewport_offset > max_offset ? max_offset : sb->viewport_offset;
+    int total_lines = sb->scrollback_count + sb->rows;
+    int first_line = total_lines - sb->rows - offset;
+    int logical_line = first_line + viewport_row;
+
+    if (logical_line < 0) return NULL;
+    if (logical_line < sb->scrollback_count) {
+        return screen_scrollback_line_from_oldest((ScreenBuffer *)sb, logical_line, col);
+    }
+
+    int screen_row = logical_line - sb->scrollback_count;
+    if (screen_row < 0 || screen_row >= sb->rows) return NULL;
+    return grid + screen_row * sb->cols + col;
 }

@@ -23,8 +23,10 @@ typedef enum {
     INPUT_PREV_TAB,     /* Ctrl+Shift+Tab */
     INPUT_ZOOM_IN,      /* Ctrl+Shift+= */
     INPUT_ZOOM_OUT,     /* Ctrl+Shift+- */
-    INPUT_SCROLL_UP,    /* PageUp / Ctrl+Shift+Up */
-    INPUT_SCROLL_DOWN,  /* PageDown / Ctrl+Shift+Down */
+    INPUT_SCROLL_UP,       /* Ctrl+Shift+Up */
+    INPUT_SCROLL_DOWN,     /* Ctrl+Shift+Down */
+    INPUT_SCROLL_PAGE_UP,  /* Shift+PageUp / Ctrl+Shift+PageUp */
+    INPUT_SCROLL_PAGE_DOWN /* Shift+PageDown / Ctrl+Shift+PageDown */
 } InputAction;
 
 typedef struct {

@@ -124,12 +124,8 @@ void renderer_paint(Renderer *r, const ScreenBuffer *sb, bool cursor_shown, int 
     wchar_t wch[4];
 
     for (int row=0;row<rows;row++) for (int col=0;col<cols;col++) {
-        const ScreenCell *cell=NULL;
-        if (sb->viewport_offset>0) {
-            int sl=sb->viewport_offset-(rows-row);
-            if (sl>=0&&sl<sb->scrollback_count) cell=screen_scrollback_line((ScreenBuffer*)sb,sl,col);
-        }
-        if (!cell) cell=&sb->cells[row*sb->cols+col];
+        const ScreenCell *cell = screen_visible_cell(sb, row, col);
+        if (!cell) cell = &sb->cells[row * sb->cols + col];
 
         float cx=ox+col*r->cell_w, cy=oy+row*r->cell_h;
         D2D1_RECT_F cr={cx,cy,cx+r->cell_w,cy+r->cell_h};
@@ -192,6 +188,43 @@ void renderer_paint(Renderer *r, const ScreenBuffer *sb, bool cursor_shown, int 
                 case CURSOR_UNDERLINE: { D2D1_RECT_F u={cx,cy+r->cell_h-2.0f,cx+r->cell_w,cy+r->cell_h}; r->render_target->FillRectangle(u,r->cursor_brush); break; }
             }
         }
+    }
+
+    if (r->cfg && r->cfg->scrollbar.enabled && !sb->alt_screen_active && sb->scrollback_count > 0) {
+        int total_lines = sb->scrollback_count + sb->rows;
+        int max_offset = screen_max_viewport_offset(sb);
+        int view_start = total_lines - sb->rows - sb->viewport_offset;
+        if (view_start < 0) view_start = 0;
+
+        float track_w = (float)(r->cfg->scrollbar.width_px > 0 ? r->cfg->scrollbar.width_px : 8);
+        float grid_h = rows * r->cell_h;
+        float track_x0 = ox + cols * r->cell_w + 2.0f;
+        float track_x1 = track_x0 + track_w;
+        float track_y0 = oy;
+        float track_y1 = oy + grid_h;
+
+        D2D1_COLOR_F track = to_d2d(r->bg_color);
+        track.a = 0.35f;
+        r->bg_brush->SetColor(track);
+        D2D1_RECT_F tr = {track_x0, track_y0, track_x1, track_y1};
+        r->render_target->FillRectangle(tr, r->bg_brush);
+
+        float thumb_h = grid_h * ((float)sb->rows / (float)total_lines);
+        if (thumb_h < r->cell_h) thumb_h = r->cell_h;
+        if (thumb_h > grid_h) thumb_h = grid_h;
+
+        float travel = grid_h - thumb_h;
+        float denom = (float)(max_offset > 0 ? max_offset : 1);
+        float live_to_top = denom > 0 ? ((float)sb->viewport_offset / denom) : 0.0f;
+        float thumb_y = track_y1 - thumb_h - travel * live_to_top;
+        if (thumb_y < track_y0) thumb_y = track_y0;
+        if (thumb_y + thumb_h > track_y1) thumb_y = track_y1 - thumb_h;
+
+        D2D1_COLOR_F thumb = to_d2d(r->fg_color);
+        thumb.a = 0.45f;
+        r->fg_brush->SetColor(thumb);
+        D2D1_RECT_F th = {track_x0, thumb_y, track_x1, thumb_y + thumb_h};
+        r->render_target->FillRectangle(th, r->fg_brush);
     }
 
     HRESULT hr=r->render_target->EndDraw();

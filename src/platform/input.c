@@ -91,14 +91,21 @@ InputEvent input_translate(WPARAM vk, WCHAR ch, LPARAM lParam, bool app_cursor_k
             case VK_TAB: ev.action = INPUT_PREV_TAB; return ev;
             case VK_OEM_PLUS:  ev.action = INPUT_ZOOM_IN;  return ev;
             case VK_OEM_MINUS: ev.action = INPUT_ZOOM_OUT; return ev;
-            case VK_UP:   ev.action = INPUT_SCROLL_UP;   return ev;
-            case VK_DOWN: ev.action = INPUT_SCROLL_DOWN; return ev;
+            case VK_UP:    ev.action = INPUT_SCROLL_UP;        return ev;
+            case VK_DOWN:  ev.action = INPUT_SCROLL_DOWN;      return ev;
+            case VK_PRIOR: ev.action = INPUT_SCROLL_PAGE_UP;   return ev;
+            case VK_NEXT:  ev.action = INPUT_SCROLL_PAGE_DOWN; return ev;
             default: break;
         }
     }
 
     if (ctrl && !shift && vk == VK_TAB) {
         ev.action = INPUT_NEXT_TAB; return ev;
+    }
+
+    if (shift && !ctrl && (vk == VK_PRIOR || vk == VK_NEXT)) {
+        ev.action = (vk == VK_PRIOR) ? INPUT_SCROLL_PAGE_UP : INPUT_SCROLL_PAGE_DOWN;
+        return ev;
     }
 
     /* ── Navigation keys → VT sequences ──────────────────────────────────── */

@@ -10,7 +10,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <stdbool.h>
+#include "wsh_bool.h"
 
 #ifdef __cplusplus
 extern "C" {

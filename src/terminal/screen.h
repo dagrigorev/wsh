@@ -85,6 +85,7 @@ typedef struct {
     int         scrollback_head;     /* next write index (ring) */
     int         scrollback_count;    /* number of valid lines stored */
     int         viewport_offset;     /* 0 = live bottom; positive = scrolled up */
+    bool        scroll_on_output;     /* zsh/terminal-like: output returns viewport to bottom */
 
     /* Window title (set via OSC 0) */
     char        title[256];
@@ -116,6 +117,10 @@ void screen_erase_chars(ScreenBuffer *sb, int n);       /* ECH */
 void screen_scroll_up(ScreenBuffer *sb, int top, int bot, int n);
 void screen_scroll_down(ScreenBuffer *sb, int top, int bot, int n);
 void screen_scroll_viewport(ScreenBuffer *sb, int delta); /* positive = scroll up */
+void screen_page_viewport(ScreenBuffer *sb, int pages);   /* positive = page up */
+void screen_set_viewport_offset(ScreenBuffer *sb, int offset);
+void screen_reset_viewport(ScreenBuffer *sb);
+int  screen_max_viewport_offset(const ScreenBuffer *sb);
 
 /* Line insertion/deletion */
 void screen_insert_lines(ScreenBuffer *sb, int n);
@@ -135,6 +140,8 @@ ScreenCell *screen_cell_at(ScreenBuffer *sb, int col, int row);
 
 /* Get a cell from scrollback (0 = oldest visible, negative = further back) */
 ScreenCell *screen_scrollback_line(ScreenBuffer *sb, int line_offset, int col);
+ScreenCell *screen_scrollback_line_from_oldest(ScreenBuffer *sb, int chronological_index, int col);
+const ScreenCell *screen_visible_cell(const ScreenBuffer *sb, int viewport_row, int col);
 
 
 #ifdef __cplusplus

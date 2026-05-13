@@ -44,6 +44,8 @@
 #include "window.h"
 #include "repl.h"
 
+static void update_native_scrollbar(HWND hwnd);
+
 /* ══════════════════════════════════════════════════════════════════════════
    CONCRETE IShellIO IMPLEMENTATION (Terminal → VT parser → Screen)
    ══════════════════════════════════════════════════════════════════════════ */
@@ -67,6 +69,7 @@ static void terminal_write(IShellIO *self, const char *buf, int len) {
     EnterCriticalSection(t->lock);
     vt_parser_feed(t->vt, buf, len);
     LeaveCriticalSection(t->lock);
+    update_native_scrollbar(t->hwnd);
     InvalidateRect(t->hwnd, NULL, FALSE);
 }
 
@@ -98,6 +101,44 @@ static TerminalIO        g_io       = {0};
 static CRITICAL_SECTION  g_lock;
 static bool              g_use_pty  = false;
 static bool              g_suppress_char = false;
+static int               g_wheel_accum = 0;
+
+static void update_native_scrollbar(HWND hwnd) {
+    if (!hwnd) return;
+
+    SCROLLINFO si;
+    memset(&si, 0, sizeof(si));
+    si.cbSize = sizeof(si);
+    si.fMask  = SIF_RANGE | SIF_PAGE | SIF_POS;
+
+    EnterCriticalSection(&g_lock);
+    int max_offset = screen_max_viewport_offset(&g_screen);
+    int offset     = g_screen.viewport_offset;
+    if (offset < 0) offset = 0;
+    if (offset > max_offset) offset = max_offset;
+    bool alt = g_screen.alt_screen_active;
+    LeaveCriticalSection(&g_lock);
+
+    if (alt || max_offset <= 0) {
+        si.nMin  = 0;
+        si.nMax  = 0;
+        si.nPage = 1;
+        si.nPos  = 0;
+        SetScrollInfo(hwnd, SB_VERT, &si, TRUE);
+        ShowScrollBar(hwnd, SB_VERT, FALSE);
+        return;
+    }
+
+    /* Native scrollbar uses top=0, bottom=max.  Our viewport uses
+       0=live bottom, positive=scrolled up, so invert the position. */
+    si.nMin  = 0;
+    si.nMax  = max_offset;
+    si.nPage = 1;
+    si.nPos  = max_offset - offset;
+    ShowScrollBar(hwnd, SB_VERT, TRUE);
+    SetScrollInfo(hwnd, SB_VERT, &si, TRUE);
+}
+
 
 static void get_exe_dir(char *out, int out_size) {
     if (!out || out_size <= 0) return;
@@ -170,6 +211,7 @@ static void on_pty_data(const char *buf, int len, void *ud) {
     EnterCriticalSection(&g_lock);
     vt_parser_feed(&g_vt, buf, len);
     LeaveCriticalSection(&g_lock);
+    update_native_scrollbar(g_hwnd);
     InvalidateRect(g_hwnd, NULL, FALSE);
     PostMessage(g_hwnd, WM_USER, 0, 0);
 }
@@ -194,8 +236,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         /* ── Paint ──────────────────────────────────────────────────────── */
         case WM_PAINT: {
             PAINTSTRUCT ps; BeginPaint(hwnd, &ps);
+            update_native_scrollbar(hwnd);
             EnterCriticalSection(&g_lock);
-            renderer_paint(&g_renderer, &g_screen, true,
+            bool cursor_visible_in_view = (g_screen.viewport_offset == 0);
+            renderer_paint(&g_renderer, &g_screen, cursor_visible_in_view,
                            g_screen.cursor_x, g_screen.cursor_y);
             LeaveCriticalSection(&g_lock);
             EndPaint(hwnd, &ps);
@@ -212,6 +256,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 screen_resize(&g_screen, cols, rows);
                 LeaveCriticalSection(&g_lock);
                 if (g_use_pty) pty_resize(&g_pty, cols, rows);
+                update_native_scrollbar(hwnd);
             }
             return 0;
         }
@@ -298,6 +343,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     EnterCriticalSection(&g_lock);
                     screen_scroll_viewport(&g_screen, 3);
                     LeaveCriticalSection(&g_lock);
+                    update_native_scrollbar(hwnd);
                     InvalidateRect(hwnd, NULL, FALSE);
                     break;
 
@@ -305,6 +351,23 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     EnterCriticalSection(&g_lock);
                     screen_scroll_viewport(&g_screen, -3);
                     LeaveCriticalSection(&g_lock);
+                    update_native_scrollbar(hwnd);
+                    InvalidateRect(hwnd, NULL, FALSE);
+                    break;
+
+                case INPUT_SCROLL_PAGE_UP:
+                    EnterCriticalSection(&g_lock);
+                    screen_page_viewport(&g_screen, 1);
+                    LeaveCriticalSection(&g_lock);
+                    update_native_scrollbar(hwnd);
+                    InvalidateRect(hwnd, NULL, FALSE);
+                    break;
+
+                case INPUT_SCROLL_PAGE_DOWN:
+                    EnterCriticalSection(&g_lock);
+                    screen_page_viewport(&g_screen, -1);
+                    LeaveCriticalSection(&g_lock);
+                    update_native_scrollbar(hwnd);
                     InvalidateRect(hwnd, NULL, FALSE);
                     break;
 
@@ -329,6 +392,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                             g_screen.viewport_offset = 0;
                             screen_mark_dirty_all(&g_screen);
                             LeaveCriticalSection(&g_lock);
+                            update_native_scrollbar(hwnd);
                         }
                         if (g_use_pty) pty_write(&g_pty, ev.bytes, ev.len);
                         else {
@@ -354,6 +418,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     g_screen.viewport_offset = 0;
                     screen_mark_dirty_all(&g_screen);
                     LeaveCriticalSection(&g_lock);
+                    update_native_scrollbar(hwnd);
                 }
                 if (g_use_pty) pty_write(&g_pty, ev.bytes, ev.len);
                 else if (!repl_handle_input(&g_repl, ev.bytes, ev.len))
@@ -405,13 +470,13 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     int last_ns = c0 - 1;
                     for (int c = c0; c <= c1; c++) {
                         if (r < g_screen.rows && c < g_screen.cols) {
-                            ScreenCell *cell = &g_screen.cells[r * g_screen.cols + c];
-                            if (!cell->wide_cont && cell->ch > ' ') last_ns = c;
+                            const ScreenCell *cell = screen_visible_cell(&g_screen, r, c);
+                            if (cell && !cell->wide_cont && cell->ch > ' ') last_ns = c;
                         }
                     }
                     for (int c = c0; c <= last_ns && ti < 65512; c++) {
-                        ScreenCell *cell = (r < g_screen.rows && c < g_screen.cols)
-                            ? &g_screen.cells[r * g_screen.cols + c] : NULL;
+                        const ScreenCell *cell = (r < g_screen.rows && c < g_screen.cols)
+                            ? screen_visible_cell(&g_screen, r, c) : NULL;
                         if (cell && cell->wide_cont) continue;
                         uint32_t ch = cell ? cell->ch : ' ';
                         if (!ch) ch = ' ';
@@ -466,16 +531,58 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
         /* ── Mouse wheel ────────────────────────────────────────────────── */
         case WM_MOUSEWHEEL: {
-            int delta = GET_WHEEL_DELTA_WPARAM(wParam) / WHEEL_DELTA;
+            /* Precision touchpads often send deltas smaller than WHEEL_DELTA.
+               Accumulate them; otherwise delta/WHEEL_DELTA becomes 0 and
+               scrolling appears completely broken. */
+            g_wheel_accum += GET_WHEEL_DELTA_WPARAM(wParam);
+            int steps = g_wheel_accum / WHEEL_DELTA;
+            g_wheel_accum %= WHEEL_DELTA;
+            if (steps != 0) {
+                EnterCriticalSection(&g_lock);
+                screen_scroll_viewport(&g_screen, steps * 3);
+                LeaveCriticalSection(&g_lock);
+                update_native_scrollbar(hwnd);
+                InvalidateRect(hwnd, NULL, FALSE);
+            }
+            return 0;
+        }
+
+        case WM_VSCROLL: {
             EnterCriticalSection(&g_lock);
-            screen_scroll_viewport(&g_screen, -delta * 3);
+            int max_offset = screen_max_viewport_offset(&g_screen);
+            int pos = max_offset - g_screen.viewport_offset;
+
+            switch (LOWORD(wParam)) {
+                case SB_LINEUP:      pos -= 1; break;
+                case SB_LINEDOWN:    pos += 1; break;
+                case SB_PAGEUP:      pos -= (g_screen.rows > 1 ? g_screen.rows - 1 : 1); break;
+                case SB_PAGEDOWN:    pos += (g_screen.rows > 1 ? g_screen.rows - 1 : 1); break;
+                case SB_THUMBTRACK:
+                case SB_THUMBPOSITION: {
+                    SCROLLINFO si;
+                    memset(&si, 0, sizeof(si));
+                    si.cbSize = sizeof(si);
+                    si.fMask = SIF_TRACKPOS;
+                    if (GetScrollInfo(hwnd, SB_VERT, &si)) pos = si.nTrackPos;
+                    break;
+                }
+                case SB_TOP:         pos = 0; break;
+                case SB_BOTTOM:      pos = max_offset; break;
+                default: break;
+            }
+
+            if (pos < 0) pos = 0;
+            if (pos > max_offset) pos = max_offset;
+            screen_set_viewport_offset(&g_screen, max_offset - pos);
             LeaveCriticalSection(&g_lock);
+            update_native_scrollbar(hwnd);
             InvalidateRect(hwnd, NULL, FALSE);
             return 0;
         }
 
         /* ── PTY/shell data arrived ─────────────────────────────────────── */
         case WM_USER:
+            update_native_scrollbar(hwnd);
             InvalidateRect(hwnd, NULL, FALSE);
             return 0;
 
@@ -621,6 +728,7 @@ static int wsh_run(HINSTANCE hInst, HINSTANCE hPrev, LPSTR lpCmd, int nShow) {
         screen_resize(&g_screen, g_renderer.cols, g_renderer.rows);
         LeaveCriticalSection(&g_lock);
         if (g_use_pty) pty_resize(&g_pty, g_renderer.cols, g_renderer.rows);
+        update_native_scrollbar(g_hwnd);
     }
 
     /* ── 13. Message pump ─────────────────────────────────────────────────── */
