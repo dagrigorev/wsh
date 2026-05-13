@@ -16,6 +16,7 @@
 #include "expand.h"
 #include "env.h"
 #include "jobs.h"
+#include "history.h"
 #include "../core/str_util.h"
 #include "../core/path_util.h"
 #include "../core/log.h"
@@ -65,6 +66,7 @@ int builtin_env_cmd(int,char**,ShellContext*);
 int builtin_sudo(int,char**,ShellContext*);
 int builtin_man(int,char**,ShellContext*);
 int builtin_help(int,char**,ShellContext*);
+int builtin_history(int,char**,ShellContext*);
 int builtin_noop(int,char**,ShellContext*);
 
 static const BuiltinEntry BUILTIN_TABLE[] = {
@@ -113,6 +115,7 @@ static const BuiltinEntry BUILTIN_TABLE[] = {
     { "sudo",     builtin_sudo        },
     { "man",      builtin_man         },
     { "help",     builtin_help        },
+    { "history",  builtin_history     },
     { "umask",    builtin_noop        },
     { "ulimit",   builtin_noop        },
     { "autoload", builtin_noop        },
@@ -732,3 +735,29 @@ int builtin_help(int argc, char **argv, ShellContext *ctx) {
 /* ── noop ────────────────────────────────────────────────────────────────────── */
 
 int builtin_noop(int argc, char **argv, ShellContext *ctx) { (void)argc;(void)argv;(void)ctx; return 0; }
+
+/* -- history -------------------------------------------------------------------- */
+int builtin_history(int argc, char **argv, ShellContext *ctx) {
+    (void)argv;
+
+    int count = history_count(&ctx->history);
+    int start = 0;
+
+    if (argc >= 2) {
+        int n = atoi(argv[1]);
+        if (n > 0 && n < count) {
+            start = count - n;
+        }
+    }
+
+    for (int i = start; i < count; ++i) {
+        const char *item = history_at(&ctx->history, i);
+        if (!item) continue;
+
+        char line[4096];
+        _snprintf(line, sizeof(line), "%5d  %s", i + 1, item);
+        outln(ctx, line);
+    }
+
+    return 0;
+}
