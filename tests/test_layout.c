@@ -26,3 +26,21 @@ TEST(Layout, PixelToCellClampsInsideViewport) {
     ASSERT_EQ(col, layout.cols - 1);
     ASSERT_EQ(row, layout.rows - 1);
 }
+
+TEST(Layout, ReservedChromeReducesGridAndMovesOrigin) {
+    TerminalGridLayout plain = terminal_compute_grid_layout_ex(1000, 700, 10.0f, 20.0f, 8, 8, 0, 0, 0, 0);
+    TerminalGridLayout chrome = terminal_compute_grid_layout_ex(1000, 700, 10.0f, 20.0f, 8, 8, 196, 112, 0, 24);
+    ASSERT_TRUE(chrome.cols < plain.cols);
+    ASSERT_TRUE(chrome.rows < plain.rows);
+    ASSERT_EQ(chrome.origin_x_px, 204);
+    ASSERT_EQ(chrome.origin_y_px, 120);
+}
+
+TEST(Layout, PixelToCellHonorsReservedChromeOrigin) {
+    TerminalGridLayout layout = terminal_compute_grid_layout_ex(1000, 700, 10.0f, 20.0f, 8, 8, 196, 112, 0, 24);
+    int col = -1, row = -1;
+    terminal_pixel_to_cell_ex(&layout, layout.origin_x_px + 21, layout.origin_y_px + 41,
+                              10.0f, 20.0f, 8, 8, &col, &row);
+    ASSERT_EQ(col, 2);
+    ASSERT_EQ(row, 2);
+}

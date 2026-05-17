@@ -55,8 +55,9 @@ HWND window_create(HINSTANCE hInst, const Config *cfg, int nShow) {
         return NULL;
     }
 
-    ShowWindow(hwnd, nShow);
-    UpdateWindow(hwnd);
+    /* The app shows the window after Direct2D and the first terminal pane are
+       initialized. Showing here can dispatch WM_PAINT while renderer globals
+       are still empty. */
     return hwnd;
 }
 
