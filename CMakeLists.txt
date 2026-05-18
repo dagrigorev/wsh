@@ -96,7 +96,7 @@ if(WSH_BUILD_TESTS)
 endif()
 
 # ── Install rules ────────────────────────────────────────────────────────────
-install(TARGETS Wsh ls md tree wshinit cat pwd cp mv rm mkdir rmdir touch head tail wc grep sort uniq basename dirname whoami hostname uname date clear which sleep yes true false echo env printenv more less find tee cut RUNTIME DESTINATION bin)
+install(TARGETS Wsh ls md tree ping wshinit cat pwd cp mv rm mkdir rmdir touch head tail wc grep sort uniq basename dirname whoami hostname uname date clear which sleep yes true false echo env printenv more less find tee cut RUNTIME DESTINATION bin)
 install(DIRECTORY config themes man DESTINATION share/Wsh)
 
 # ── CPack (ZIP distribution) ─────────────────────────────────────────────────

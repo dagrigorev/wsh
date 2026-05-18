@@ -65,3 +65,25 @@ TEST(Repl, CyrillicCursorRedrawUsesCharacterColumnsNotBytes) {
     repl_free(&repl);
     shell_ctx_free(&ctx);
 }
+
+TEST(Repl, RepeatedTabCompletionDoesNotCrashOrMutateInput) {
+    BufIO io; memset(&io, 0, sizeof(io));
+    io.base.write = buf_write;
+    io.base.read_line = buf_read;
+
+    ShellContext ctx;
+    shell_ctx_init(&ctx, (IShellIO *)&io);
+    shell_setenv(&ctx, "PROMPT", "wsh> ", false);
+
+    Repl repl;
+    repl_init(&repl, &ctx);
+    repl_show_prompt(&repl);
+
+    ASSERT_TRUE(repl_handle_input(&repl, "\t", 1));
+    ASSERT_TRUE(repl_handle_input(&repl, "\t", 1));
+    ASSERT_EQ(repl.len, 0);
+    ASSERT_EQ(repl.cursor, 0);
+
+    repl_free(&repl);
+    shell_ctx_free(&ctx);
+}

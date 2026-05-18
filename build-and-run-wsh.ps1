@@ -69,6 +69,9 @@ function Import-VsDevEnvironment {
         if ($idx -gt 0) {
             $name = $line.Substring(0, $idx)
             $value = $line.Substring($idx + 1)
+            if ($name -ieq "Path" -and $env:Path -match "Microsoft Visual Studio" -and $value -notmatch "Microsoft Visual Studio") {
+                continue
+            }
             Set-Item -Path "Env:$name" -Value $value
         }
     }
@@ -109,13 +112,22 @@ if (-not (Test-Path -LiteralPath $BuildDir)) {
 
 Write-Host "Configuring Wsh ($Configuration, $generator)..."
 cmake.exe -S . -B $BuildDir -G $generator -DCMAKE_BUILD_TYPE=$Configuration
+if ($LASTEXITCODE -ne 0) {
+    throw "CMake configure failed with exit code $LASTEXITCODE."
+}
 
 Write-Host "Building Wsh..."
 cmake.exe --build $BuildDir
+if ($LASTEXITCODE -ne 0) {
+    throw "Build failed with exit code $LASTEXITCODE."
+}
 
 if ($RunTests) {
     Write-Host "Running tests..."
     ctest.exe --test-dir $BuildDir --output-on-failure
+    if ($LASTEXITCODE -ne 0) {
+        throw "Tests failed with exit code $LASTEXITCODE."
+    }
 }
 
 $exe = Join-Path $BuildDir "dist\Wsh.exe"

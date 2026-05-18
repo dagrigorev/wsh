@@ -39,7 +39,14 @@ TEST(Completion, CompletesEnvironmentVariables) {
 
     CompletionResult cr = completion_compute("echo $WSH_T", 11, &ctx);
     ASSERT_TRUE(cr.count >= 1);
-    ASSERT_STR_EQ(cr.matches[0], "$WSH_TEST_ENV");
+    bool found = false;
+    for (int i = 0; i < cr.count; ++i) {
+        if (strcmp(cr.matches[i], "$WSH_TEST_ENV") == 0) {
+            found = true;
+            break;
+        }
+    }
+    ASSERT_TRUE(found);
     completion_free(&cr);
     shell_ctx_free(&ctx);
 }

@@ -220,6 +220,9 @@ bool input_suppress_char(WPARAM vk, LPARAM lParam) {
         case VK_F5: case VK_F6: case VK_F7: case VK_F8:
         case VK_F9: case VK_F10: case VK_F11: case VK_F12:
         case VK_ESCAPE:
+        case VK_BACK:
+        case VK_RETURN:
+        case VK_TAB:
             return true;
         default:
             /* Suppress Ctrl+letter when it's a control character we handle */
