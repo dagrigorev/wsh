@@ -3,6 +3,8 @@
 add_executable(ls ls.cpp)
 add_executable(md md.cpp)
 add_executable(tree tree.cpp)
+add_executable(ping ping.cpp)
+add_executable(htop htop.cpp)
 add_executable(wshinit wshinit.cpp)
 add_executable(cat coreutils.cpp)
 add_executable(pwd coreutils.cpp)
@@ -39,7 +41,7 @@ add_executable(find coreutils.cpp)
 add_executable(tee coreutils.cpp)
 add_executable(cut coreutils.cpp)
 
-foreach(tool ls md tree wshinit cat pwd cp mv rm mkdir rmdir touch head tail wc grep sort uniq basename dirname whoami hostname uname date clear which sleep yes true false echo env printenv more less find tee cut)
+foreach(tool ls md tree ping htop wshinit cat pwd cp mv rm mkdir rmdir touch head tail wc grep sort uniq basename dirname whoami hostname uname date clear which sleep yes true false echo env printenv more less find tee cut)
     target_compile_definitions(${tool} PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
     target_include_directories(${tool} PRIVATE ${CMAKE_SOURCE_DIR}/src/core)
     target_link_libraries(${tool} PRIVATE wsh_core shell32)
@@ -49,3 +51,6 @@ foreach(tool ls md tree wshinit cat pwd cp mv rm mkdir rmdir touch head tail wc 
         RUNTIME_OUTPUT_DIRECTORY_RELEASE "${CMAKE_BINARY_DIR}/dist"
     )
 endforeach()
+
+target_link_libraries(ping PRIVATE iphlpapi ws2_32)
+target_link_libraries(htop PRIVATE psapi)

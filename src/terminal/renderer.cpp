@@ -77,7 +77,7 @@ static bool create_rt(Renderer *r) {
 }
 
 bool renderer_init(Renderer *r, HWND hwnd, const Config *cfg) {
-    memset(r,0,sizeof(*r)); r->hwnd=hwnd; r->cfg=cfg; r->padding_x=4; r->padding_y=4;
+    memset(r,0,sizeof(*r)); r->hwnd=hwnd; r->cfg=cfg; r->padding_x=8; r->padding_y=8;
     HDC hdc=GetDC(hwnd); r->dpi=hdc?(float)GetDeviceCaps(hdc,LOGPIXELSX):96.0f; if(hdc)ReleaseDC(hwnd,hdc);
     build_palette(r, cfg);
     D2D1_FACTORY_OPTIONS opts={D2D1_DEBUG_LEVEL_NONE};
@@ -87,7 +87,7 @@ bool renderer_init(Renderer *r, HWND hwnd, const Config *cfg) {
     if (!font_init(&r->font,cfg->font.family,cfg->font.size,r->dpi)) { WSH_LOG_ERROR("font_init failed"); return false; }
     r->cell_w=r->font.cell_width; r->cell_h=r->font.cell_height;
     r->cursor_style=cfg->cursor.style; r->cursor_visible=true; r->cursor_blink_state=true;
-    r->tab_bar_height=cfg->tabs.enabled?32:0;
+    r->tab_bar_height=0;
     if (cfg->cursor.blink) r->blink_timer_id=SetTimer(hwnd,1,cfg->cursor.blink_rate_ms,NULL);
     RECT rc; GetClientRect(hwnd,&rc); renderer_resize(r,rc.right-rc.left,rc.bottom-rc.top);
     return true;
@@ -96,9 +96,12 @@ bool renderer_init(Renderer *r, HWND hwnd, const Config *cfg) {
 void renderer_resize(Renderer *r, int w, int h) {
     if (w<1)w=1; if(h <1)h=1;
     if (r->render_target) { D2D1_SIZE_U sz={(UINT32)w,(UINT32)h}; r->render_target->Resize(sz); }
-    TerminalGridLayout layout = terminal_compute_grid_layout(w, h, r->cell_w, r->cell_h,
-                                                               r->padding_x, r->padding_y,
-                                                               r->tab_bar_height);
+    TerminalGridLayout layout = terminal_compute_grid_layout_ex(w, h, r->cell_w, r->cell_h,
+                                                                r->padding_x, r->padding_y,
+                                                                r->reserved_left_px,
+                                                                r->reserved_top_px,
+                                                                r->reserved_right_px,
+                                                                r->reserved_bottom_px);
     r->cols = layout.cols;
     r->rows = layout.rows;
 }
@@ -109,9 +112,10 @@ void renderer_pixel_to_cell(const Renderer *r, int px, int py, int *col, int *ro
     TerminalGridLayout layout = {0};
     layout.cols = r->cols;
     layout.rows = r->rows;
-    terminal_pixel_to_cell(&layout, px, py, r->cell_w, r->cell_h,
-                           r->padding_x, r->padding_y, r->tab_bar_height,
-                           col, row);
+    layout.origin_x_px = r->reserved_left_px + r->padding_x;
+    layout.origin_y_px = r->reserved_top_px + r->padding_y;
+    terminal_pixel_to_cell_ex(&layout, px, py, r->cell_w, r->cell_h,
+                              r->padding_x, r->padding_y, col, row);
 }
 
 
@@ -164,7 +168,31 @@ void renderer_paint_region(Renderer *r, const ScreenBuffer *sb, const RECT *rect
     float oy = (float)rect->top  + (float)r->padding_y;
     wchar_t wch[4];
 
+    bool *search_mask = NULL;
+    if (active && r->search_active && r->search_query[0] && cols > 0) {
+        search_mask = (bool *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, (size_t)cols * sizeof(bool));
+    }
+
     for (int row = 0; row < rows; row++) {
+        if (search_mask) {
+            memset(search_mask, 0, (size_t)cols * sizeof(bool));
+            char line[4096];
+            int li = 0;
+            for (int c = 0; c < cols && li < (int)sizeof(line) - 1; ++c) {
+                const ScreenCell *cell = screen_visible_cell(sb, row, c);
+                if (!cell) cell = &sb->cells[row * sb->cols + c];
+                uint32_t ch = cell && cell->ch ? cell->ch : ' ';
+                line[li++] = (ch >= 32 && ch < 127) ? (char)ch : ' ';
+            }
+            line[li] = '\0';
+            const char *pos = line;
+            size_t qlen = strlen(r->search_query);
+            while (qlen > 0 && (pos = strstr(pos, r->search_query)) != NULL) {
+                int start = (int)(pos - line);
+                for (int k = 0; k < (int)qlen && start + k < cols; ++k) search_mask[start + k] = true;
+                pos += qlen;
+            }
+        }
         for (int col = 0; col < cols; col++) {
             const ScreenCell *cell = screen_visible_cell(sb, row, col);
             if (!cell) cell = &sb->cells[row * sb->cols + col];
@@ -178,6 +206,19 @@ void renderer_paint_region(Renderer *r, const ScreenBuffer *sb, const RECT *rect
             if (bgcc.r != r->bg_color.r || bgcc.g != r->bg_color.g || bgcc.b != r->bg_color.b) {
                 D2D1_COLOR_F d = to_d2d(bgcc); r->bg_brush->SetColor(d);
                 r->render_target->FillRectangle(cr, r->bg_brush);
+            }
+            if (search_mask && search_mask[col]) {
+                D2D1_COLOR_F hc = to_d2d(r->cursor_color);
+                hc.a = 0.32f;
+                r->bg_brush->SetColor(hc);
+                r->render_target->FillRectangle(cr, r->bg_brush);
+            }
+            bool cursor_here = cursor_shown && active && r->cursor_blink_state &&
+                               col == cursor_x && row == cursor_y && sb->cursor_visible;
+            if (cursor_here && r->cursor_style == CURSOR_BLOCK) {
+                D2D1_COLOR_F cc = to_d2d(r->cursor_color);
+                r->cursor_brush->SetColor(cc);
+                r->render_target->FillRectangle(cr, r->cursor_brush);
             }
 
             if (!cell->wide_cont && cell->ch && cell->ch != ' ') {
@@ -203,14 +244,51 @@ void renderer_paint_region(Renderer *r, const ScreenBuffer *sb, const RECT *rect
                 }
             }
 
-            if (cursor_shown && active && r->cursor_blink_state && col == cursor_x && row == cursor_y && sb->cursor_visible) {
+            if (cursor_here && r->cursor_style != CURSOR_BLOCK) {
                 D2D1_COLOR_F cc = to_d2d(r->cursor_color); r->cursor_brush->SetColor(cc);
                 switch (r->cursor_style) {
-                    case CURSOR_BLOCK: r->render_target->FillRectangle(cr, r->cursor_brush); break;
+                    case CURSOR_BLOCK: break;
                     case CURSOR_BAR: { D2D1_RECT_F b = {cx, cy, cx + 2.0f, cy + r->cell_h}; r->render_target->FillRectangle(b, r->cursor_brush); break; }
                     case CURSOR_UNDERLINE: { D2D1_RECT_F u = {cx, cy + r->cell_h - 2.0f, cx + r->cell_w, cy + r->cell_h}; r->render_target->FillRectangle(u, r->cursor_brush); break; }
                 }
             }
+        }
+    }
+
+    if (search_mask) HeapFree(GetProcessHeap(), 0, search_mask);
+
+    if (r->cfg && r->cfg->scrollbar.enabled && !sb->alt_screen_active && sb->scrollback_count > 0) {
+        int total_lines = sb->scrollback_count + sb->rows;
+        int max_offset = screen_max_viewport_offset(sb);
+        float track_w = (float)(r->cfg->scrollbar.width_px > 0 ? r->cfg->scrollbar.width_px : 8);
+        float grid_h = rows * r->cell_h;
+        float track_x0 = (float)rect->right - (float)r->padding_x - track_w;
+        float track_x1 = track_x0 + track_w;
+        float track_y0 = oy;
+        float track_y1 = oy + grid_h;
+        if (track_x0 > ox && track_y1 > track_y0) {
+            D2D1_COLOR_F track = to_d2d(r->bg_color);
+            track.a = 0.35f;
+            r->bg_brush->SetColor(track);
+            D2D1_ROUNDED_RECT tr = {{track_x0, track_y0, track_x1, track_y1}, track_w * 0.5f, track_w * 0.5f};
+            r->render_target->FillRoundedRectangle(tr, r->bg_brush);
+
+            float thumb_h = grid_h * ((float)sb->rows / (float)total_lines);
+            if (thumb_h < r->cell_h) thumb_h = r->cell_h;
+            if (thumb_h > grid_h) thumb_h = grid_h;
+
+            float travel = grid_h - thumb_h;
+            float denom = (float)(max_offset > 0 ? max_offset : 1);
+            float live_to_top = denom > 0 ? ((float)sb->viewport_offset / denom) : 0.0f;
+            float thumb_y = track_y1 - thumb_h - travel * live_to_top;
+            if (thumb_y < track_y0) thumb_y = track_y0;
+            if (thumb_y + thumb_h > track_y1) thumb_y = track_y1 - thumb_h;
+
+            D2D1_COLOR_F thumb = to_d2d(r->cursor_color);
+            thumb.a = active ? 0.60f : 0.35f;
+            r->fg_brush->SetColor(thumb);
+            D2D1_ROUNDED_RECT th = {{track_x0, thumb_y, track_x1, thumb_y + thumb_h}, track_w * 0.5f, track_w * 0.5f};
+            r->render_target->FillRoundedRectangle(th, r->fg_brush);
         }
     }
 
@@ -224,7 +302,8 @@ void renderer_paint(Renderer *r, const ScreenBuffer *sb, bool cursor_shown, int 
     D2D1_COLOR_F bgc=to_d2d(r->bg_color); r->render_target->Clear(&bgc);
 
     int rows=sb->rows<r->rows?sb->rows:r->rows, cols=sb->cols<r->cols?sb->cols:r->cols;
-    float ox=(float)r->padding_x, oy=(float)(r->padding_y+r->tab_bar_height);
+    float ox=(float)(r->reserved_left_px + r->padding_x);
+    float oy=(float)(r->reserved_top_px + r->padding_y);
     wchar_t wch[4];
 
     for (int row=0;row<rows;row++) for (int col=0;col<cols;col++) {
@@ -260,6 +339,13 @@ void renderer_paint(Renderer *r, const ScreenBuffer *sb, bool cursor_shown, int 
             r->bg_brush->SetColor(selc);
             r->render_target->FillRectangle(cr, r->bg_brush);
         }
+        bool cursor_here = cursor_shown && r->cursor_blink_state &&
+                           col == cursor_x && row == cursor_y && sb->cursor_visible;
+        if (cursor_here && r->cursor_style == CURSOR_BLOCK) {
+            D2D1_COLOR_F cc = to_d2d(r->cursor_color);
+            r->cursor_brush->SetColor(cc);
+            r->render_target->FillRectangle(cr, r->cursor_brush);
+        }
 
         if (!cell->wide_cont&&cell->ch&&cell->ch!=' ') {
             if (cell->ch<0x10000) { wch[0]=(wchar_t)cell->ch; wch[1]=0; }
@@ -284,10 +370,10 @@ void renderer_paint(Renderer *r, const ScreenBuffer *sb, bool cursor_shown, int 
             }
         }
 
-        if (cursor_shown&&r->cursor_blink_state&&col==cursor_x&&row==cursor_y&&sb->cursor_visible) {
+        if (cursor_here && r->cursor_style != CURSOR_BLOCK) {
             D2D1_COLOR_F cc=to_d2d(r->cursor_color); r->cursor_brush->SetColor(cc);
             switch(r->cursor_style) {
-                case CURSOR_BLOCK: r->render_target->FillRectangle(cr,r->cursor_brush); break;
+                case CURSOR_BLOCK: break;
                 case CURSOR_BAR: { D2D1_RECT_F b={cx,cy,cx+2.0f,cy+r->cell_h}; r->render_target->FillRectangle(b,r->cursor_brush); break; }
                 case CURSOR_UNDERLINE: { D2D1_RECT_F u={cx,cy+r->cell_h-2.0f,cx+r->cell_w,cy+r->cell_h}; r->render_target->FillRectangle(u,r->cursor_brush); break; }
             }

@@ -66,6 +66,12 @@ void screen_free(ScreenBuffer *sb) {
 void screen_resize(ScreenBuffer *sb, int new_cols, int new_rows) {
     if (new_cols == sb->cols && new_rows == sb->rows) return;
 
+    int old_cols = sb->cols;
+    int old_scrollback_capacity = sb->scrollback_capacity;
+    int old_scrollback_count = sb->scrollback_count;
+    int old_scrollback_head = sb->scrollback_head;
+    ScreenCell *old_scrollback = sb->scrollback;
+
     int total = new_cols * new_rows;
     ScreenCell *nc  = (ScreenCell *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY,
                                               (size_t)total * sizeof(ScreenCell));
@@ -101,16 +107,29 @@ void screen_resize(ScreenBuffer *sb, int new_cols, int new_rows) {
     sb->scroll_top = 0;
     sb->scroll_bot = new_rows - 1;
 
-    /* Resize scrollback row width */
+    /* Resize scrollback row width without dropping history. */
     ScreenCell *nsb = (ScreenCell *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY,
                       (size_t)(sb->scrollback_capacity * new_cols) * sizeof(ScreenCell));
     if (nsb) {
         fill_cells(nsb, sb->scrollback_capacity * new_cols, NULL);
-        HeapFree(GetProcessHeap(), 0, sb->scrollback);
+        int keep = old_scrollback_count < sb->scrollback_capacity ? old_scrollback_count : sb->scrollback_capacity;
+        int copy_sb_cols = old_cols < new_cols ? old_cols : new_cols;
+        if (old_scrollback && old_scrollback_capacity > 0 && keep > 0) {
+            int oldest = (old_scrollback_head - old_scrollback_count + old_scrollback_capacity)
+                         % old_scrollback_capacity;
+            int drop = old_scrollback_count - keep;
+            if (drop < 0) drop = 0;
+            for (int i = 0; i < keep; ++i) {
+                int old_idx = (oldest + drop + i) % old_scrollback_capacity;
+                ScreenCell *src = old_scrollback + old_idx * old_cols;
+                ScreenCell *dst = nsb + i * new_cols;
+                memcpy(dst, src, (size_t)copy_sb_cols * sizeof(ScreenCell));
+            }
+        }
+        HeapFree(GetProcessHeap(), 0, old_scrollback);
         sb->scrollback       = nsb;
-        sb->scrollback_head  = 0;
-        sb->scrollback_count = 0;
-        sb->viewport_offset  = 0;
+        sb->scrollback_count = keep;
+        sb->scrollback_head  = keep % sb->scrollback_capacity;
     }
     int max_view = screen_max_viewport_offset(sb);
     if (sb->viewport_offset > max_view) sb->viewport_offset = max_view;
@@ -159,7 +178,14 @@ static void push_line_to_scrollback(ScreenBuffer *sb, ScreenCell *line) {
     ScreenCell *dest = sb->scrollback + sb->scrollback_head * sb->cols;
     memcpy(dest, line, (size_t)sb->cols * sizeof(ScreenCell));
     sb->scrollback_head = (sb->scrollback_head + 1) % sb->scrollback_capacity;
-    if (sb->scrollback_count < sb->scrollback_capacity) sb->scrollback_count++;
+    bool grew = false;
+    if (sb->scrollback_count < sb->scrollback_capacity) {
+        sb->scrollback_count++;
+        grew = true;
+    }
+    if (sb->viewport_offset > 0 && grew && sb->viewport_offset < sb->scrollback_count) {
+        sb->viewport_offset++;
+    }
 }
 
 int screen_max_viewport_offset(const ScreenBuffer *sb) {
@@ -177,7 +203,7 @@ void screen_reset_viewport(ScreenBuffer *sb) {
 
 static void screen_note_output(ScreenBuffer *sb) {
     if (!sb || sb->alt_screen_active) return;
-    if (sb->scroll_on_output) screen_reset_viewport(sb);
+    (void)sb;
 }
 
 /* ─── Scroll Region Scroll ───────────────────────────────────────────────── */

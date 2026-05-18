@@ -30,7 +30,7 @@ HWND window_create(HINSTANCE hInst, const Config *cfg, int nShow) {
     /* Initial size: 80x24 cells approx — will be resized by renderer */
     int w = 800, h = 600;
 
-    DWORD style    = WS_OVERLAPPEDWINDOW | WS_VSCROLL;
+    DWORD style    = WS_OVERLAPPEDWINDOW;
     DWORD ex_style = WS_EX_APPWINDOW;
 
     /* Adjust for client area */
@@ -55,8 +55,9 @@ HWND window_create(HINSTANCE hInst, const Config *cfg, int nShow) {
         return NULL;
     }
 
-    ShowWindow(hwnd, nShow);
-    UpdateWindow(hwnd);
+    /* The app shows the window after Direct2D and the first terminal pane are
+       initialized. Showing here can dispatch WM_PAINT while renderer globals
+       are still empty. */
     return hwnd;
 }
 

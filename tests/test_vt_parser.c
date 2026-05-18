@@ -25,6 +25,23 @@ TEST(VtParser, ParsesTextAndSgrAttributes) {
     screen_free(&sb);
 }
 
+TEST(VtParser, SgrDoesNotAdvanceCursorInColoredPrompt) {
+    ScreenBuffer sb; VtParser vt;
+    screen_init(&sb, 40, 4, 8);
+    vt_parser_init(&vt, &sb);
+
+    const char *prompt = "\x1b[1;32muser\x1b[0m\x1b[2m@\x1b[0m\x1b[1;34mhost\x1b[0m ";
+    vt_parser_feed(&vt, prompt, (int)strlen(prompt));
+
+    ASSERT_EQ(sb.cursor_x, 10);
+    ASSERT_EQ(screen_cell_at(&sb, 0, 0)->ch, 'u');
+    ASSERT_EQ(screen_cell_at(&sb, 3, 0)->ch, 'r');
+    ASSERT_EQ(screen_cell_at(&sb, 4, 0)->ch, '@');
+    ASSERT_EQ(screen_cell_at(&sb, 5, 0)->ch, 'h');
+    ASSERT_EQ(screen_cell_at(&sb, 9, 0)->ch, ' ');
+    screen_free(&sb);
+}
+
 TEST(VtParser, SupportsAlternateScreenAndTitle) {
     ScreenBuffer sb; VtParser vt;
     memset(g_title, 0, sizeof(g_title));

@@ -109,3 +109,6 @@ LastTestsFailed.log
 # ── CI / toolchain caches ─────────────────────────────────────────────────────
 .ccache/
 vcpkg_installed/
+
+.tmp-tools-smoke
+.tmp-tools-unicode

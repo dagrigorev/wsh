@@ -18,7 +18,7 @@
 /* native C++ bool */
 #else
 #  if defined(_MSC_VER) && !defined(__clang__)
-     typedef int bool;
+     typedef unsigned char bool;
 #    ifndef true
 #      define true 1
 #    endif
