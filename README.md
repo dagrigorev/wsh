@@ -8,6 +8,8 @@ The project combines a real terminal host, a built-in shell runtime, split panes
 
 The screenshots below are generated from real Wsh bundle utilities and repository state. They do not use demo sessions or hardcoded output.
 
+![main window](docs/screenshots/main.png)
+
 ![tree with Git markers](docs/screenshots/tree-git-marks.png)
 
 ![htop process snapshot](docs/screenshots/htop-processes.png)
