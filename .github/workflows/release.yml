@@ -23,13 +23,13 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Verify tag belongs to main
+      - name: Verify tag belongs to master
         id: verify
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
 
-          git fetch origin main:refs/remotes/origin/main --prune
+          git fetch origin master:refs/remotes/origin/master --prune
 
           $tagName = "${{ github.ref_name }}"
           $tagCommit = (git rev-list -n 1 $tagName).Trim()
@@ -37,9 +37,9 @@ jobs:
             throw "Could not resolve tag '$tagName' to a commit."
           }
 
-          git merge-base --is-ancestor $tagCommit origin/main
+          git merge-base --is-ancestor $tagCommit origin/master
           if ($LASTEXITCODE -ne 0) {
-            throw "Tag '$tagName' points to $tagCommit, which is not reachable from origin/main."
+            throw "Tag '$tagName' points to $tagCommit, which is not reachable from origin/master."
           }
 
           "tag_commit=$tagCommit" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
