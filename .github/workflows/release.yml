@@ -1,0 +1,103 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  build-and-release:
+    name: Build and publish Windows release
+    runs-on: windows-2022
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Verify tag belongs to main
+        id: verify
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          git fetch origin main:refs/remotes/origin/main --prune
+
+          $tagName = "${{ github.ref_name }}"
+          $tagCommit = (git rev-list -n 1 $tagName).Trim()
+          if (-not $tagCommit) {
+            throw "Could not resolve tag '$tagName' to a commit."
+          }
+
+          git merge-base --is-ancestor $tagCommit origin/main
+          if ($LASTEXITCODE -ne 0) {
+            throw "Tag '$tagName' points to $tagCommit, which is not reachable from origin/main."
+          }
+
+          "tag_commit=$tagCommit" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Build and test
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          ./build-and-run-wsh.ps1 -Configuration Release -BuildDir build-release -NoRun -RunTests
+
+      - name: Package dist
+        id: package
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          $tagName = "${{ github.ref_name }}"
+          $safeTagName = $tagName -replace '[^A-Za-z0-9._-]', '-'
+          $dist = Join-Path $PWD "build-release\dist"
+          if (-not (Test-Path -LiteralPath (Join-Path $dist "Wsh.exe"))) {
+            throw "Expected Wsh.exe in $dist."
+          }
+
+          $artifactDir = Join-Path $PWD "artifacts"
+          New-Item -ItemType Directory -Force -Path $artifactDir | Out-Null
+
+          $zipName = "Wsh-$safeTagName-windows-x64.zip"
+          $zipPath = Join-Path $artifactDir $zipName
+          if (Test-Path -LiteralPath $zipPath) {
+            Remove-Item -LiteralPath $zipPath -Force
+          }
+
+          Compress-Archive -Path (Join-Path $dist "*") -DestinationPath $zipPath -CompressionLevel Optimal
+
+          $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $zipPath).Hash.ToLowerInvariant()
+          $hashPath = "$zipPath.sha256"
+          "$hash  $zipName" | Set-Content -LiteralPath $hashPath -Encoding ascii
+
+          "zip_path=$zipPath" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "hash_path=$hashPath" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "zip_name=$zipName" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.package.outputs.zip_name }}
+          path: |
+            ${{ steps.package.outputs.zip_path }}
+            ${{ steps.package.outputs.hash_path }}
+          if-no-files-found: error
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: Wsh ${{ github.ref_name }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: |
+            ${{ steps.package.outputs.zip_path }}
+            ${{ steps.package.outputs.hash_path }}
