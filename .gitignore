@@ -122,3 +122,4 @@ vcpkg_installed/
 .ollama/
 .open-code/
 .opencodetmp/
+.tmp-tools-unicode
