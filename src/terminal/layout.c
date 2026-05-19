@@ -1,15 +1,33 @@
 #include "layout.h"
+#include <stddef.h>
 
 TerminalGridLayout terminal_compute_grid_layout(int width_px, int height_px,
                                                 float cell_w, float cell_h,
                                                 int padding_x, int padding_y,
                                                 int tab_bar_height) {
+    return terminal_compute_grid_layout_ex(width_px, height_px, cell_w, cell_h,
+                                           padding_x, padding_y, 0, tab_bar_height, 0, 0);
+}
+
+TerminalGridLayout terminal_compute_grid_layout_ex(int width_px, int height_px,
+                                                   float cell_w, float cell_h,
+                                                   int padding_x, int padding_y,
+                                                   int left_reserved_px,
+                                                   int top_reserved_px,
+                                                   int right_reserved_px,
+                                                   int bottom_reserved_px) {
     TerminalGridLayout out = {0};
     if (width_px < 1) width_px = 1;
     if (height_px < 1) height_px = 1;
+    if (left_reserved_px < 0) left_reserved_px = 0;
+    if (top_reserved_px < 0) top_reserved_px = 0;
+    if (right_reserved_px < 0) right_reserved_px = 0;
+    if (bottom_reserved_px < 0) bottom_reserved_px = 0;
 
-    out.usable_width_px = width_px - 2 * padding_x;
-    out.usable_height_px = height_px - 2 * padding_y - tab_bar_height;
+    out.origin_x_px = left_reserved_px + padding_x;
+    out.origin_y_px = top_reserved_px + padding_y;
+    out.usable_width_px = width_px - left_reserved_px - right_reserved_px - 2 * padding_x;
+    out.usable_height_px = height_px - top_reserved_px - bottom_reserved_px - 2 * padding_y;
     if (out.usable_width_px < 0) out.usable_width_px = 0;
     if (out.usable_height_px < 0) out.usable_height_px = 0;
 
@@ -26,8 +44,23 @@ void terminal_pixel_to_cell(const TerminalGridLayout *layout,
                             int padding_x, int padding_y,
                             int tab_bar_height,
                             int *col, int *row) {
-    int ox = padding_x;
-    int oy = padding_y + tab_bar_height;
+    TerminalGridLayout local = {0};
+    if (layout) local = *layout;
+    local.origin_x_px = padding_x;
+    local.origin_y_px = padding_y + tab_bar_height;
+    terminal_pixel_to_cell_ex(layout ? &local : NULL, px, py, cell_w, cell_h,
+                              padding_x, padding_y, col, row);
+}
+
+void terminal_pixel_to_cell_ex(const TerminalGridLayout *layout,
+                               int px, int py,
+                               float cell_w, float cell_h,
+                               int padding_x, int padding_y,
+                               int *col, int *row) {
+    (void)padding_x;
+    (void)padding_y;
+    int ox = layout ? layout->origin_x_px : 0;
+    int oy = layout ? layout->origin_y_px : 0;
     int c = (cell_w > 0) ? (int)((px - ox) / cell_w) : -1;
     int r = (cell_h > 0) ? (int)((py - oy) / cell_h) : -1;
 

@@ -82,7 +82,7 @@ TEST(Screen, ViewportShowsMixedScrollbackAndLiveRows) {
     screen_free(&sb);
 }
 
-TEST(Screen, OutputResetsViewportToLiveBottom) {
+TEST(Screen, OutputKeepsScrolledViewportAnchored) {
     ScreenBuffer sb;
     screen_init(&sb, 4, 2, 8);
 
@@ -94,8 +94,40 @@ TEST(Screen, OutputResetsViewportToLiveBottom) {
 
     screen_scroll_viewport(&sb, 1);
     ASSERT_EQ(sb.viewport_offset, 1);
-    screen_put_char(&sb, 'D', NULL);
-    ASSERT_EQ(sb.viewport_offset, 0);
+    ASSERT_EQ(screen_visible_cell(&sb, 0, 0)->ch, 'A');
+    ASSERT_EQ(screen_visible_cell(&sb, 1, 0)->ch, 'B');
+
+    screen_newline(&sb);
+    screen_carriage_return(&sb);
+    for (int i = 0; i < 4; ++i) screen_put_char(&sb, 'D', NULL);
+
+    ASSERT_EQ(sb.viewport_offset, 2);
+    ASSERT_EQ(screen_visible_cell(&sb, 0, 0)->ch, 'A');
+    ASSERT_EQ(screen_visible_cell(&sb, 1, 0)->ch, 'B');
+
+    screen_free(&sb);
+}
+
+TEST(Screen, ResizePreservesScrollback) {
+    ScreenBuffer sb;
+    screen_init(&sb, 4, 2, 8);
+
+    const char *lines[] = {"AAAA", "BBBB", "CCCC"};
+    for (int l = 0; l < 3; ++l) {
+        for (int i = 0; i < 4; ++i) screen_put_char(&sb, (unsigned char)lines[l][i], NULL);
+        if (l != 2) { screen_newline(&sb); screen_carriage_return(&sb); }
+    }
+
+    ASSERT_EQ(screen_visible_cell(&sb, 0, 0)->ch, 'B');
+    screen_scroll_viewport(&sb, 1);
+    ASSERT_EQ(screen_visible_cell(&sb, 0, 0)->ch, 'A');
+
+    screen_resize(&sb, 6, 2);
+
+    ASSERT_TRUE(sb.scrollback_count >= 1);
+    ASSERT_EQ(sb.viewport_offset, 1);
+    ASSERT_EQ(screen_visible_cell(&sb, 0, 0)->ch, 'A');
+    ASSERT_EQ(screen_visible_cell(&sb, 1, 0)->ch, 'B');
 
     screen_free(&sb);
 }

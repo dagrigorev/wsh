@@ -83,6 +83,9 @@ void shell_ctx_init(ShellContext *ctx, IShellIO *io) {
     if (cwd) { strncpy(ctx->cwd, cwd, MAX_PATH-1); str_free(cwd); }
     env_set(ctx->env, "PWD",   ctx->cwd, true);
     env_set(ctx->env, "SHELL", "wsh",    true);
+    env_set(ctx->env, "TERM",  "xterm-256color", true);
+    env_set(ctx->env, "COLORTERM", "truecolor", true);
+    env_set(ctx->env, "WSH_TERM", "1", true);
     env_set(ctx->env, "IFS",   " \t\n",  false);
 
     /* Shell options: interactive mode on by default */

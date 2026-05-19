@@ -1,13 +1,14 @@
 #include "common.hpp"
 
 static void help() {
-    std::wcout << L"ls - list directory contents\n\n"
-               << L"Usage: ls [options] [path]\n\n"
-               << L"Options:\n"
-               << L"  -a, --all       include hidden files\n"
-               << L"  -l, --long      print attributes, size and name\n"
-               << L"  -h, --help      show this help\n\n"
-               << L"Manual: man ls\n";
+    std::cout << "ls - list directory contents\n\n"
+              << "Usage: ls [options] [path]\n\n"
+              << "Options:\n"
+              << "  -a, --all       include hidden files\n"
+              << "  -l, --long      print attributes, size and name\n"
+              << "  --color=WHEN    color output: auto, always, never\n"
+              << "  -h, --help      show this help\n\n"
+              << "Manual: man ls\n";
 }
 
 static std::wstring attr_string(DWORD a) {
@@ -22,14 +23,18 @@ static std::wstring attr_string(DWORD a) {
 
 static int tool_main(int argc, wchar_t **argv) {
     if (is_help(argc, argv)) { help(); return 0; }
-    bool all = false, lng = false;
+    bool all = false, lng = false, color = ansi_enabled(true), force_color = false;
     std::wstring path = L".";
     for (int i = 1; i < argc; ++i) {
         std::wstring a = argv[i];
         if (a == L"-a" || a == L"--all") all = true;
         else if (a == L"-l" || a == L"--long") lng = true;
+        else if (a == L"--color=always") { color = true; force_color = true; }
+        else if (a == L"--color=never") { color = false; force_color = false; }
+        else if (a == L"--color=auto") { color = ansi_enabled(true); force_color = false; }
         else path = a;
     }
+    if (color && !force_color) color = ansi_enabled(true);
     std::wstring mask = join_path(path, L"*");
     WIN32_FIND_DATAW fd{};
     HANDLE h = FindFirstFileW(mask.c_str(), &fd);
@@ -41,13 +46,21 @@ static int tool_main(int argc, wchar_t **argv) {
     }
     do {
         if (!all && (is_dots(fd.cFileName) || (fd.dwFileAttributes & FILE_ATTRIBUTE_HIDDEN))) continue;
+        bool is_dir = (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+        bool hidden = (fd.dwFileAttributes & FILE_ATTRIBUTE_HIDDEN) != 0;
+        std::wstring namew = fd.cFileName;
+        const wchar_t *dot = wcsrchr(fd.cFileName, L'.');
+        bool executable = dot && (!_wcsicmp(dot, L".exe") || !_wcsicmp(dot, L".bat") || !_wcsicmp(dot, L".cmd") || !_wcsicmp(dot, L".ps1"));
+        const char *name_color = is_dir ? ansi_blue(color) : (executable ? ansi_green(color) : (hidden ? ansi_dim(color) : ansi_reset(color)));
         if (lng) {
             ULONGLONG size = (static_cast<ULONGLONG>(fd.nFileSizeHigh) << 32) | fd.nFileSizeLow;
-            std::wcout << attr_string(fd.dwFileAttributes) << L"\t" << size << L"\t" << fd.cFileName << L"\n";
+            std::cout << ansi_dim(color) << wide_to_utf8(attr_string(fd.dwFileAttributes)) << ansi_reset(color)
+                      << "\t" << ansi_cyan(color) << size << ansi_reset(color) << "\t"
+                      << name_color << wide_to_utf8(namew) << (is_dir ? "/" : "") << ansi_reset(color) << "\n";
         } else {
-            std::wcout << fd.cFileName;
-            if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) std::wcout << L"/";
-            std::wcout << L"\n";
+            std::cout << name_color << wide_to_utf8(namew);
+            if (is_dir) std::cout << "/";
+            std::cout << ansi_reset(color) << "\n";
         }
     } while (FindNextFileW(h, &fd));
     FindClose(h);

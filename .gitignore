@@ -109,3 +109,16 @@ LastTestsFailed.log
 # ── CI / toolchain caches ─────────────────────────────────────────────────────
 .ccache/
 vcpkg_installed/
+
+.tmp-tools-smoke
+.tmp-tools-unicode
+
+# Agent local/runtime artifacts
+.agent/tmp/
+.agent/runs/
+.agent/cache/
+
+# Local model / tool noise
+.ollama/
+.open-code/
+.opencodetmp/

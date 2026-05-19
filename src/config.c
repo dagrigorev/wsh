@@ -37,7 +37,7 @@ void config_defaults(Config *cfg) {
     cfg->general.confirm_exit  = true;
     strcpy(cfg->general.bell, "visual");
     strcpy(cfg->general.default_cwd, "~");
-    strcpy(cfg->general.theme, "catppuccin-mocha");
+    strcpy(cfg->general.theme, "material-cyber-dark");
     strcpy(cfg->general.title, "Wsh - ${cwd}");
 
     /* Font */
@@ -294,7 +294,7 @@ bool config_save_defaults(const char *toml_path) {
         "confirm_exit = true\n"
         "bell = \"visual\"\n"
         "default_cwd = \"~\"\n"
-        "theme = \"catppuccin-mocha\"\n"
+        "theme = \"material-cyber-dark\"\n"
         "title = \"Wsh - ${cwd}\"\n\n"
         "[font]\n"
         "family = \"Cascadia Code\"\n"

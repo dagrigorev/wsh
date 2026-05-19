@@ -124,16 +124,15 @@ void repl_redraw_line(Repl *r) {
     /*
      * Sequence:
      *   \r          — carriage return (go to column 0)
-     *   ESC[K       — erase to end of line
      *   <prompt>    — the current prompt
      *   <line_buf>  — current line content
+     *   ESC[K       — erase stale content after the new logical line
      *   ESC[<n>D    — move cursor left by (len - cursor) columns
      */
     char seq[REPL_LINE_MAX + 64];
     int  n = 0;
 
     seq[n++] = '\r';
-    seq[n++] = '\x1B'; seq[n++] = '['; seq[n++] = 'K'; /* erase EOL */
 
     if (r->prompt_len > 0) {
         int p_len = r->prompt_len;
@@ -141,6 +140,7 @@ void repl_redraw_line(Repl *r) {
         memcpy(seq + n, r->prompt, (size_t)p_len); n += p_len;
     }
     memcpy(seq + n, r->line, (size_t)r->len); n += r->len;
+    seq[n++] = '\x1B'; seq[n++] = '['; seq[n++] = 'K'; /* erase EOL */
 
     int move_left = wsh_utf8_display_width_n(r->line + r->cursor, r->len - r->cursor);
     if (move_left > 0) {

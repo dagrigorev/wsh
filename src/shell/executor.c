@@ -124,10 +124,14 @@ bool exec_apply_redirs(ShellContext *ctx, Redir *redirs,
 
     for (Redir *r = redirs; r; r = r->next) {
         char *target = r->target ? expand_string(ctx, r->target) : NULL;
+        const char *win_target = target;
+        if (target && (!strcmp(target, "/dev/null") || !strcmp(target, "\\dev\\null"))) {
+            win_target = "NUL";
+        }
         switch (r->kind) {
             case REDIR_IN: {
                 if (!target) goto err;
-                wchar_t *wt = u8_to_u16(target, NULL);
+                wchar_t *wt = u8_to_u16(win_target, NULL);
                 HANDLE h = CreateFileW(wt, GENERIC_READ, FILE_SHARE_READ,
                                        &sa, OPEN_EXISTING, 0, NULL);
                 str_free(wt);
@@ -142,7 +146,7 @@ bool exec_apply_redirs(ShellContext *ctx, Redir *redirs,
             case REDIR_OUT:
             case REDIR_APPEND: {
                 if (!target) goto err;
-                wchar_t *wt = u8_to_u16(target, NULL);
+                wchar_t *wt = u8_to_u16(win_target, NULL);
                 DWORD how = (r->kind == REDIR_APPEND) ? OPEN_ALWAYS : CREATE_ALWAYS;
                 HANDLE h = CreateFileW(wt, GENERIC_WRITE, FILE_SHARE_READ,
                                        &sa, how, 0, NULL);

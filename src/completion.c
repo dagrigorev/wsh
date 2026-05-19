@@ -20,9 +20,21 @@ static void ml_init(MatchList *m) { memset(m, 0, sizeof(*m)); }
 static void ml_push(MatchList *m, char *s) {
     if (!s) return;
     if (m->count >= m->cap) {
-        m->cap  = m->cap ? m->cap * 2 : 32;
-        m->items = (char **)HeapReAlloc(GetProcessHeap(), 0, m->items,
-                                         (size_t)m->cap * sizeof(char *));
+        int new_cap = m->cap ? m->cap * 2 : 32;
+        char **new_items = NULL;
+        if (m->items) {
+            new_items = (char **)HeapReAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, m->items,
+                                             (size_t)new_cap * sizeof(char *));
+        } else {
+            new_items = (char **)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY,
+                                           (size_t)new_cap * sizeof(char *));
+        }
+        if (!new_items) {
+            HeapFree(GetProcessHeap(), 0, s);
+            return;
+        }
+        m->items = new_items;
+        m->cap = new_cap;
     }
     m->items[m->count++] = s;
 }
@@ -176,7 +188,11 @@ CompletionResult completion_compute(const char *line, int cursor_pos,
 
     int ws = word_start(line, cursor_pos);
     char prefix[MAX_PATH] = {0};
-    strncpy(prefix, line + ws, (size_t)(cursor_pos - ws));
+    int prefix_len = cursor_pos - ws;
+    if (prefix_len < 0) prefix_len = 0;
+    if (prefix_len >= MAX_PATH) prefix_len = MAX_PATH - 1;
+    memcpy(prefix, line + ws, (size_t)prefix_len);
+    prefix[prefix_len] = '\0';
 
     MatchList m; ml_init(&m);
 
@@ -185,6 +201,10 @@ CompletionResult completion_compute(const char *line, int cursor_pos,
     for (int i = 0; i < ws; i++) {
         char c = line[i];
         if (c != ' ' && c != '\t') { first_word = false; break; }
+    }
+
+    if (first_word && prefix[0] == '\0') {
+        return cr;
     }
 
     /* Variable completion: $V<TAB> */

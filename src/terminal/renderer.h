@@ -38,6 +38,10 @@ typedef struct {
     int    cols, rows;
     float  cell_w, cell_h;
     int    padding_x, padding_y;  /* pixels of padding around the grid */
+    int    reserved_left_px;
+    int    reserved_top_px;
+    int    reserved_right_px;
+    int    reserved_bottom_px;
 
     /* Color palette: 0-15 ANSI, 16-231 color cube, 232-255 grayscale */
     Color4F palette[256];
@@ -57,6 +61,9 @@ typedef struct {
     bool   cursor_blink_state; /* true = drawn */
     int    cursor_style;       /* 0=block 1=bar 2=underline */
     UINT_PTR blink_timer_id;
+
+    char   search_query[128];
+    bool   search_active;
 
     /* DPI */
     float  dpi;
