@@ -43,6 +43,7 @@ void shell_ctx_init(ShellContext *ctx, IShellIO *io) {
     ctx->env       = env_scope_push(NULL);
     ctx->arena     = arena_create(65536);
     ctx->shell_pid = GetCurrentProcessId();
+    ctx->cancel_requested = 0;
 
     /* Default I/O handles — replaced if PTY is active */
     ctx->h_stdin  = GetStdHandle(STD_INPUT_HANDLE);

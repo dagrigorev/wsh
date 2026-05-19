@@ -5,6 +5,13 @@
  * The REPL owns the line-editing state (cursor, buffer, completion, history
  * navigation) and routes keyboard InputEvents from the window to the shell.
  *
+ * Execution model:
+ *   Commands are executed on a worker thread so the UI message loop is never
+ *   blocked.  The completion callback (on_exec_done) is invoked from the worker
+ *   thread after the command finishes.  The UI layer should forward this
+ *   callback to the main thread (e.g. via PostMessage) before showing the
+ *   prompt or updating state.
+ *
  * Design patterns:
  *   Strategy   — IShellIO is injected; the REPL itself is the concrete impl.
  *   Observer   — precmd / preexec hooks fire before/after each command.
@@ -30,7 +37,14 @@ extern "C" {
 
 /* ── REPL state ────────────────────────────────────────────────────────────── */
 
-typedef struct {
+typedef struct Repl Repl;
+
+/* Callback invoked from the worker thread when a command finishes execution.
+ * The UI layer should forward this to the main thread (PostMessage) before
+ * showing the prompt.  exec_result is the command's exit status. */
+typedef void (*ReplExecDoneFn)(Repl *r, int exec_result);
+
+struct Repl {
     ShellContext   *ctx;          /* Shell context (not owned) */
     char            prompt[1024]; /* last rendered prompt, needed for redraw */
     int             prompt_len;   /* byte length of prompt */
@@ -42,10 +56,12 @@ typedef struct {
     bool            completing;   /* true = second Tab press pending */
     bool            hist_search;  /* Ctrl+R incremental search active */
     char            hist_pat[256];
-    bool            executing;
-    HANDLE          execute_thread;
-    char           *execute_line;
-} Repl;
+    volatile LONG   executing;    /* non-zero while command thread is running */
+    HANDLE          exec_thread;  /* handle to the executing thread */
+    char           *execute_line; /* owned copy of the line being executed */
+    int             exec_result;  /* exit status of last command */
+    ReplExecDoneFn  on_exec_done; /* completion callback (may be NULL) */
+};
 
 /* ── API ───────────────────────────────────────────────────────────────────── */
 
@@ -65,6 +81,17 @@ bool repl_handle_input(Repl *r, const char *bytes, int len);
 
 /* Re-draw the current line (CR, erase-to-EOL, reprint, reposition cursor). */
 void repl_redraw_line(Repl *r);
+
+/* Request cancellation of the currently executing command.
+ * Sets the cancel flag on the shell context and waits briefly for the
+ * worker thread to exit.  If the thread does not exit within the timeout,
+ * it is terminated.  Safe to call from any thread. */
+void repl_cancel_exec(Repl *r);
+
+/* Set the completion callback invoked (from the worker thread) when a
+ * command finishes.  The UI layer should forward this to the main thread
+ * before showing the prompt or mutating REPL state. */
+void repl_set_on_exec_done(Repl *r, ReplExecDoneFn cb);
 
 
 #ifdef __cplusplus

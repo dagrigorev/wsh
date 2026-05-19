@@ -146,6 +146,11 @@ typedef struct ShellContext {
     int           alias_depth;
     bool          suppress_alias;
     bool          preserve_ast_arena; /* function bodies currently reference arena AST nodes */
+
+    /* Cancellation flag: set non-zero by the REPL/UI thread to request the
+     * currently executing command to stop. Checked periodically by long-running
+     * operations (WaitForSingleObject loops, etc.). */
+    volatile LONG cancel_requested;
 } ShellContext;
 
 /* ── Lifecycle ─────────────────────────────────────────────────────────────── */
