@@ -2,47 +2,50 @@
 
 ## Purpose
 
-Suggest a minimal design that fits existing architecture.
+Design a small Wsh change that fits existing boundaries.
 
 ## When to use
 
-Use when a feature or change needs design before implementation.
+Use before implementing non-trivial features or changes touching multiple modules.
 
 ## Inputs
 
-Task; relevant files; constraints
+- Feature/change goal
+- Current architecture summary
+- Compatibility constraints
 
 ## Read first
 
-- [Context_Policy](../../CONTEXT_POLICY.md)
-- [Project Summary](../../memory/project-summary.md)
-- [Commands](../../memory/commands.md)
+- [Analyze Architecture](analyze-architecture.md)
+- [Conventions](../../memory/conventions.md)
+- [Known Decisions](../../memory/known-decisions.md)
 
 ## Steps
 
-1. Read minimal context.
-2. inspect relevant files.
-3. make a small plan.
-4. apply focused work.
-5. verify.
-6. document result.
+1. Define behavior and non-goals.
+2. Choose module ownership.
+3. Define interfaces/data flow.
+4. Identify tests/manual QA.
+5. Document tradeoffs if durable.
 
 ## Output
 
-Propose Design result with short explanation and links.
+- Small design proposal
+- File/module plan
+- Verification plan
 
 ## Verification
 
-Run the nearest relevant build, test, or manual check.
+Design can be implemented by a small sequence of changes.
 
 ## Next skills
 
 - [Check Boundaries](check-boundaries.md)
-- [Preserve Compatibility](preserve-compatibility.md)
+- [Implement Feature](../coding/implement-feature.md)
 - [Document Decision](document-decision.md)
 
 ## Anti-patterns
 
-- Do not make unrelated changes
-- Do not invent project facts
-- Do not skip verification.
+- Do not design large frameworks without need.
+- Do not move shell semantics into renderer/platform.
+- Do not introduce fake UI state.

@@ -1,15 +1,25 @@
-# Decisions
+# Decisions Index
 
-Use this file for short links to decisions that matter across multiple tasks.
+Use this index for durable Wsh architecture and workflow decisions.
 
-For detailed project decisions, use [Known Decisions](memory/known-decisions.md).
+## Current sources
 
-## Current decision index
-
-- TODO: Add links after decisions are documented.
-
-## Related
-
-- [Document Decision](skills/architecture/document-decision.md)
+- [Known Decisions](memory/known-decisions.md)
 - [Architecture Map](maps/architecture.md)
-- [Handoff Template](HANDOFF_TEMPLATE.md)
+- [Document Decision Skill](skills/architecture/document-decision.md)
+
+## When to add a decision
+
+Add a decision when a change affects:
+
+- module boundaries;
+- command compatibility;
+- terminal/VT behavior;
+- configuration format;
+- build system or runtime layout;
+- public utility behavior;
+- testing strategy.
+
+## Format
+
+Use the format from [Known Decisions](memory/known-decisions.md).

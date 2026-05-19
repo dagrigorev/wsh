@@ -2,45 +2,47 @@
 
 ## Purpose
 
-Record user-visible changes and verification.
+Summarize release-visible changes.
 
 ## When to use
 
-Use for release, feature, or notable fix.
+Use for release prep or after user-facing behavior changes.
 
 ## Inputs
 
-Task; relevant files; constraints
+- Changed behavior
+- Verification result
+- Affected area
 
 ## Read first
 
-- [Context_Policy](../../CONTEXT_POLICY.md)
-- [Project Summary](../../memory/project-summary.md)
+- [Release Map](../../maps/release.md)
+- [Update README](update-readme.md)
 - [Commands](../../memory/commands.md)
 
 ## Steps
 
-1. Read minimal context.
-2. inspect relevant files.
-3. make a small plan.
-4. apply focused work.
-5. verify.
-6. document result.
+1. Group changes by subsystem.
+2. Mention fixes/features/refactors separately.
+3. Include verification summary.
+4. Avoid internal noise unless relevant.
 
 ## Output
 
-Write Changelog result with short explanation and links.
+- Changelog entry
+- Release notes snippet
 
 ## Verification
 
-Run the nearest relevant build, test, or manual check.
+Entry accurately reflects verified changes.
 
 ## Next skills
 
+- [Package Artifacts](../build/package-artifacts.md)
 - [Write Handoff](../core/write-handoff.md)
 
 ## Anti-patterns
 
-- Do not make unrelated changes
-- Do not invent project facts
-- Do not skip verification.
+- Do not include unverified claims.
+- Do not expose private local paths unnecessarily.
+- Do not mix future plans with released changes.

@@ -2,38 +2,40 @@
 
 ## Purpose
 
-Document implementation details for future agents or developers.
+Capture technical notes for future Wsh agents/developers.
 
 ## When to use
 
-Use when knowledge should be retained but not in README.
+Use for bugfix notes, architecture notes, porting notes, or complex QA findings.
 
 ## Inputs
 
-Task; relevant files; constraints
+- Topic
+- Evidence
+- Related files
 
 ## Read first
 
-- [Context_Policy](../../CONTEXT_POLICY.md)
-- [Project Summary](../../memory/project-summary.md)
-- [Commands](../../memory/commands.md)
+- [Documentation Map](../../maps/documentation.md)
+- [Known Decisions](../../memory/known-decisions.md)
+- [Known Issues](../../memory/known-issues.md)
 
 ## Steps
 
-1. Read minimal context.
-2. inspect relevant files.
-3. make a small plan.
-4. apply focused work.
-5. verify.
-6. document result.
+1. Choose a small docs file or memory file.
+2. Write factual context, root cause, fix, and QA.
+3. Link source files or skills.
+4. Keep it short.
 
 ## Output
 
-Write Dev Notes result with short explanation and links.
+- Developer note
+- Links
+- Follow-up items
 
 ## Verification
 
-Run the nearest relevant build, test, or manual check.
+A future agent can use the note without rereading the whole change.
 
 ## Next skills
 
@@ -42,6 +44,6 @@ Run the nearest relevant build, test, or manual check.
 
 ## Anti-patterns
 
-- Do not make unrelated changes
-- Do not invent project facts
-- Do not skip verification.
+- Do not duplicate huge logs.
+- Do not document guesses as facts.
+- Do not create large catch-all docs.

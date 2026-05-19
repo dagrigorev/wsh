@@ -2,13 +2,14 @@
 
 ## Use this map when
 
-Use this map when task is related to crash, wrong behavior, logs, regression, or unknown root cause.
+Use this map when the task is related to crash, wrong behavior, logs, regression, failing tests, bad terminal output, or unknown root cause.
 
 ## Start
 
 - [Context Policy](../CONTEXT_POLICY.md)
+- [Known Issues](../memory/known-issues.md)
+- [Commands](../memory/commands.md)
 - [Inspect Task](../skills/core/inspect-task.md)
-- [Make Plan](../skills/core/make-plan.md)
 
 ## Choose path
 
@@ -16,11 +17,11 @@ Use this map when task is related to crash, wrong behavior, logs, regression, or
 
 - [Reproduce Issue](../skills/debugging/reproduce-issue.md)
 
-### Logs exist
+### Logs exist or runtime crash is involved
 
 - [Analyze Logs](../skills/debugging/analyze-logs.md)
 
-### Need trace
+### Need source-level trace
 
 - [Trace Execution](../skills/debugging/trace-execution.md)
 
@@ -28,8 +29,22 @@ Use this map when task is related to crash, wrong behavior, logs, regression, or
 
 - [Isolate Root Cause](../skills/debugging/isolate-root-cause.md)
 
+### Root cause known
+
+- [Propose Minimal Fix](../skills/debugging/propose-minimal-fix.md)
+- [Fix Bug](../skills/coding/fix-bug.md)
+
+## Wsh starting points
+
+- Shell/runtime: `src/shell`, `src/repl.c`
+- Terminal rendering/screen: `src/terminal`
+- Keyboard/window/panes: `src/window.cpp`, `src/platform/input.*`
+- ConPTY/external shell: `src/platform/pty.*`
+- Logs: `%LOCALAPPDATA%\Wsh\logs\wsh.log`
+- Tests: `tests`, `ctest --test-dir build --output-on-failure`
+
 ## Finish
 
+- [Regression Check](../skills/testing/regression-check.md)
 - [Verify Result](../skills/core/verify-result.md)
-- [After Change Checklist](../checklists/after-change.md)
 - [Write Handoff](../skills/core/write-handoff.md)

@@ -2,27 +2,21 @@
 
 ## Mission
 
-Find test entrypoints, run checks, and add focused tests.
+Find and run the right automated or manual verification.
 
 ## Start here
 
-- [Testing](../../maps/testing.md)
+- [Testing Map](../../maps/testing.md)
 - [Find Test Entrypoints](../testing/find-test-entrypoints.md)
 - [Run Tests](../testing/run-tests.md)
 
 ## Rules
 
-- Prefer existing test style.
-- Do not invent test commands.
-- Record exact output.
+- Use CTest for automatable behavior.
+- Use manual QA for GUI/input/ConPTY.
+- Report exact commands and results.
 
 ## Finish with
 
 - [Regression Check](../testing/regression-check.md)
 - [Write Handoff](../core/write-handoff.md)
-
-## Related
-
-- [Agents](../../AGENTS.md)
-- [Router](../../ROUTER.md)
-- [Handoff Template](../../HANDOFF_TEMPLATE.md)

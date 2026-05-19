@@ -123,3 +123,5 @@ vcpkg_installed/
 .open-code/
 .opencodetmp/
 .tmp-tools-unicode
+.opencode/
+.opencode-tmp/

@@ -2,46 +2,50 @@
 
 ## Purpose
 
-Extract useful signal from logs without loading unrelated noise.
+Use Wsh logs and failing output to find the first meaningful failure.
 
 ## When to use
 
-Use when logs, crashes, or traces are available.
+Use when runtime logs, build logs, crash logs, or test output exists.
 
 ## Inputs
 
-Task; relevant files; constraints
+- Log path or output
+- Scenario
+- Timestamp if known
 
 ## Read first
 
-- [Context_Policy](../../CONTEXT_POLICY.md)
-- [Project Summary](../../memory/project-summary.md)
 - [Commands](../../memory/commands.md)
+- [Known Issues](../../memory/known-issues.md)
+- [Debugging Map](../../maps/debugging.md)
 
 ## Steps
 
-1. Read minimal context.
-2. inspect relevant files.
-3. make a small plan.
-4. apply focused work.
-5. verify.
-6. document result.
+1. Find the first relevant error.
+2. Ignore cascading messages until root error is understood.
+3. Map messages to subsystem/source files.
+4. Summarize evidence.
+5. Decide whether tracing or minimal fix is next.
 
 ## Output
 
-Analyze Logs result with short explanation and links.
+- Log summary
+- Suspected root area
+- Next action
 
 ## Verification
 
-Run the nearest relevant build, test, or manual check.
+Evidence points to a source area or a missing reproduction step.
 
 ## Next skills
 
 - [Trace Execution](trace-execution.md)
 - [Isolate Root Cause](isolate-root-cause.md)
+- [Add Logging](../coding/add-logging.md)
 
 ## Anti-patterns
 
-- Do not make unrelated changes
-- Do not invent project facts
-- Do not skip verification.
+- Do not paste huge logs into memory.
+- Do not fix the last cascading error first.
+- Do not assume logs are complete.

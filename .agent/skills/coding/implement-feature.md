@@ -2,46 +2,53 @@
 
 ## Purpose
 
-Add requested behavior with a minimal, testable change.
+Add a Wsh feature in a small, testable vertical slice.
 
 ## When to use
 
-Use when new behavior is explicitly requested.
+Use when behavior is intentionally being added or extended.
 
 ## Inputs
 
-Task; relevant files; constraints
+- Feature goal
+- User-visible behavior
+- Target subsystem
+- Compatibility constraints
 
 ## Read first
 
-- [Context_Policy](../../CONTEXT_POLICY.md)
-- [Project Summary](../../memory/project-summary.md)
+- [Architecture Map](../../maps/architecture.md)
+- [Known Decisions](../../memory/known-decisions.md)
+- [Conventions](../../memory/conventions.md)
 - [Commands](../../memory/commands.md)
 
 ## Steps
 
-1. Read minimal context.
-2. inspect relevant files.
-3. make a small plan.
-4. apply focused work.
-5. verify.
-6. document result.
+1. Define the observable behavior.
+2. Choose one subsystem and boundary.
+3. Add the minimal implementation.
+4. Update tests or manual QA.
+5. Update man/docs when user-facing commands change.
+6. Verify build and behavior.
 
 ## Output
 
-Implement Feature result with short explanation and links.
+- Implemented feature
+- Tests or QA notes
+- Docs/man updates if needed
 
 ## Verification
 
-Run the nearest relevant build, test, or manual check.
+Run targeted tests and, for UI/terminal behavior, manual QA. Confirm runtime bundle when resources are added.
 
 ## Next skills
 
 - [Add Unit Tests](../testing/add-unit-tests.md)
-- [Verify Result](../core/verify-result.md)
+- [Manual QA](../testing/manual-qa.md)
+- [Write Handoff](../core/write-handoff.md)
 
 ## Anti-patterns
 
-- Do not make unrelated changes
-- Do not invent project facts
-- Do not skip verification.
+- Do not add dummy UI data.
+- Do not over-design broad frameworks.
+- Do not silently change existing command behavior without compatibility notes.

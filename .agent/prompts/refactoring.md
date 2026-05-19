@@ -1,28 +1,27 @@
-# Refactoring Prompt
-
-You are working locally in this repository through Open Code.
+You are working locally in the Wsh repository through Open Code with local Ollama models.
 
 Use the local agent system:
 
 1. Read `.agent/CONTEXT_POLICY.md`.
 2. Read `.agent/ROUTER.md`.
-3. Select the smallest relevant map.
-4. Use the most relevant skill.
-5. Read only needed files.
-6. Verify the result.
-7. Write a short handoff.
+3. Read `.agent/memory/project-summary.md` and `.agent/memory/commands.md`.
+4. Select the smallest relevant map.
+5. Use one primary skill.
+6. Read only the needed source files.
+7. Verify the result.
+8. Write a short handoff.
 
 Do not load unnecessary files.
 Do not rewrite unrelated code.
+Do not edit legacy duplicate root-level `src/*.c|*.h|*.cpp` files unless the task is specifically about them.
 Do not invent missing project facts.
-Use `.agent/memory/commands.md` for known commands.
+
+# Refactoring Prompt
 
 ## Focus
 
-Preserve behavior. Use `.agent/maps/refactoring.md` and run regression checks.
+Use `.agent/maps/refactoring.md`.
 
-## Related
+Preserve behavior. Do not mix feature work with cleanup. Prefer one subsystem per task. Add characterization tests before risky moves.
 
-- [Router](../ROUTER.md)
-- [Workflow](../WORKFLOW.md)
-- [Skills Index](../skills/index.md)
+For legacy duplicate root-level `src` files, treat cleanup as a dedicated refactoring and run a full build/test pass.

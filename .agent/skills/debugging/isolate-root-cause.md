@@ -2,38 +2,41 @@
 
 ## Purpose
 
-Separate symptoms from the actual cause.
+Separate symptoms from the actual Wsh defect.
 
 ## When to use
 
-Use before patching non-trivial bugs.
+Use when multiple files or errors could explain the issue.
 
 ## Inputs
 
-Task; relevant files; constraints
+- Reproduction
+- Logs
+- Trace notes
 
 ## Read first
 
-- [Context_Policy](../../CONTEXT_POLICY.md)
-- [Project Summary](../../memory/project-summary.md)
-- [Commands](../../memory/commands.md)
+- [Trace Execution](trace-execution.md)
+- [Known Issues](../../memory/known-issues.md)
+- [Conventions](../../memory/conventions.md)
 
 ## Steps
 
-1. Read minimal context.
-2. inspect relevant files.
-3. make a small plan.
-4. apply focused work.
-5. verify.
-6. document result.
+1. List possible causes.
+2. Eliminate causes using tests, logs, or code evidence.
+3. Identify the smallest incorrect assumption/state.
+4. Choose the minimal fix location.
+5. Record why other causes were rejected.
 
 ## Output
 
-Isolate Root Cause result with short explanation and links.
+- Root-cause statement
+- Rejected alternatives
+- Fix target
 
 ## Verification
 
-Run the nearest relevant build, test, or manual check.
+Root cause explains the observed behavior and predicts the fix.
 
 ## Next skills
 
@@ -42,6 +45,6 @@ Run the nearest relevant build, test, or manual check.
 
 ## Anti-patterns
 
-- Do not make unrelated changes
-- Do not invent project facts
-- Do not skip verification.
+- Do not guess when a test/log can decide.
+- Do not confuse workaround with root cause.
+- Do not broaden the patch area.

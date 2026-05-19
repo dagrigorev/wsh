@@ -2,34 +2,35 @@
 
 ## Use this map when
 
-Use this map when writing README, notes, changelog, prompts, or developer documentation.
+Use this map when updating README, docs, man pages, prompts, changelog, architecture notes, or developer notes.
 
 ## Start
 
 - [Context Policy](../CONTEXT_POLICY.md)
-- [Inspect Task](../skills/core/inspect-task.md)
-- [Make Plan](../skills/core/make-plan.md)
+- [Project Summary](../memory/project-summary.md)
+- [Update README](../skills/docs/update-readme.md)
 
 ## Choose path
 
-### README update
-
-- [Update Readme](../skills/docs/update-readme.md)
-
-### Dev notes
+### User-facing command changed
 
 - [Write Dev Notes](../skills/docs/write-dev-notes.md)
+- Update matching `man/<topic>.txt` if applicable.
 
-### Changelog
+### Architecture or boundary changed
+
+- [Document Decision](../skills/architecture/document-decision.md)
+- Consider `docs/ARCHITECTURE.md` or [Known Decisions](../memory/known-decisions.md).
+
+### Release-visible change
 
 - [Write Changelog](../skills/docs/write-changelog.md)
 
-### Prompt
+### Need reusable agent prompt
 
 - [Write Prompt](../skills/docs/write-prompt.md)
 
 ## Finish
 
-- [Verify Result](../skills/core/verify-result.md)
-- [After Change Checklist](../checklists/after-change.md)
+- [Review Done Checklist](../checklists/review-done.md)
 - [Write Handoff](../skills/core/write-handoff.md)

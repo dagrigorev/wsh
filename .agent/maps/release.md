@@ -2,34 +2,36 @@
 
 ## Use this map when
 
-Use this map when preparing package, artifact, release notes, or final verification.
+Use this map when preparing a runnable bundle, ZIP package, release notes, or pre-release verification.
 
 ## Start
 
 - [Context Policy](../CONTEXT_POLICY.md)
-- [Inspect Task](../skills/core/inspect-task.md)
-- [Make Plan](../skills/core/make-plan.md)
+- [Commands](../memory/commands.md)
+- [Package Artifacts](../skills/build/package-artifacts.md)
 
 ## Choose path
 
-### Verify before release
+### Need clean build
 
-- [Regression Check](../skills/testing/regression-check.md)
+- [Configure Build](../skills/build/configure-build.md)
+- [Run Tests](../skills/testing/run-tests.md)
 
-### Build package
+### Need runtime bundle verification
 
 - [Package Artifacts](../skills/build/package-artifacts.md)
+- Confirm `Wsh.exe`, companion utilities, `config`, `themes`, and `man` exist in `dist`.
 
-### Changelog
+### Need release notes
 
 - [Write Changelog](../skills/docs/write-changelog.md)
 
-### Handoff
+### Need final QA
 
-- [Write Handoff](../skills/core/write-handoff.md)
+- [Manual QA](../skills/testing/manual-qa.md)
+- [Regression Check](../skills/testing/regression-check.md)
 
 ## Finish
 
-- [Verify Result](../skills/core/verify-result.md)
-- [After Change Checklist](../checklists/after-change.md)
+- [Before Commit Checklist](../checklists/before-commit.md)
 - [Write Handoff](../skills/core/write-handoff.md)

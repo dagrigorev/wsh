@@ -2,47 +2,52 @@
 
 ## Purpose
 
-Understand current structure, responsibilities, dependencies, and boundaries.
+Understand Wsh subsystem boundaries before design or refactoring.
 
 ## When to use
 
-Use before design, large feature work, or risky refactoring.
+Use before cross-cutting features, compatibility work, or structural cleanup.
 
 ## Inputs
 
-Task; relevant files; constraints
+- Task goal
+- Subsystem hints
+- Relevant docs
 
 ## Read first
 
-- [Context_Policy](../../CONTEXT_POLICY.md)
+- [Architecture Map](../../maps/architecture.md)
 - [Project Summary](../../memory/project-summary.md)
-- [Commands](../../memory/commands.md)
+- [Known Decisions](../../memory/known-decisions.md)
+- `docs/ARCHITECTURE.md`
+- `docs/REFACTORING_PLAN.md`
 
 ## Steps
 
-1. Read minimal context.
-2. inspect relevant files.
-3. make a small plan.
-4. apply focused work.
-5. verify.
-6. document result.
+1. Read architecture docs first.
+2. Identify source-of-truth modules.
+3. Map data/control flow across touched subsystems.
+4. List constraints and risks.
+5. Stop before coding unless the target is clear.
 
 ## Output
 
-Analyze Architecture result with short explanation and links.
+- Boundary summary
+- Target modules
+- Risk notes
 
 ## Verification
 
-Run the nearest relevant build, test, or manual check.
+The implementation path is narrowed to specific files/modules.
 
 ## Next skills
 
 - [Propose Design](propose-design.md)
 - [Check Boundaries](check-boundaries.md)
-- [Document Decision](document-decision.md)
+- [Make Plan](../core/make-plan.md)
 
 ## Anti-patterns
 
-- Do not make unrelated changes
-- Do not invent project facts
-- Do not skip verification.
+- Do not analyze every file.
+- Do not treat legacy duplicates as active without CMake evidence.
+- Do not invent compatibility guarantees.

@@ -2,43 +2,51 @@
 
 ## Purpose
 
-Leave enough information for another agent to continue safely.
+Leave enough context for the next local agent to continue without rereading everything.
 
 ## When to use
 
-Use at the end of a task or when stopping early.
+Use at the end of every non-trivial task.
 
 ## Inputs
 
-Task; changed files; commands; open questions
+- Task
+- Changed files
+- Commands run
+- Verification result
+- Open questions
 
 ## Read first
 
-- [Handoff_Template](../../HANDOFF_TEMPLATE.md)
+- [Handoff Template](../../HANDOFF_TEMPLATE.md)
 - [Known Issues](../../memory/known-issues.md)
 - [Known Decisions](../../memory/known-decisions.md)
 
 ## Steps
 
-1. Summarize work.
-2. list files.
-3. list commands.
-4. record verification.
-5. link next skill.
+1. Summarize the task and outcome.
+2. List changed files.
+3. List commands and results.
+4. State what worked and what did not.
+5. Record next recommended skill.
+6. Update known issues/decisions if durable.
 
 ## Output
 
-Short handoff note.
+- Short handoff
+- Updated memory when needed
 
 ## Verification
 
-Another agent can continue without rereading everything.
+Another agent can continue from the handoff without scanning the full repository.
 
 ## Next skills
 
 - [Router](../../ROUTER.md)
-- [Read Repository](read-repository.md)
+- [Task Template](../../TASK_TEMPLATE.md)
 
 ## Anti-patterns
 
-- Do not write long essays or hide failed checks.
+- Do not omit failed verification.
+- Do not include huge logs.
+- Do not invent unresolved facts.

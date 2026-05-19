@@ -1,21 +1,21 @@
 # Mind Maps
 
-Use this index to select one navigation map.
+Choose exactly one starting map unless the task clearly crosses boundaries.
 
-## Available maps
+## Maps
 
-- [Backend](backend.md)
-- [Frontend](frontend.md)
-- [Build](build.md)
-- [Testing](testing.md)
-- [Debugging](debugging.md)
-- [Architecture](architecture.md)
-- [Refactoring](refactoring.md)
-- [Documentation](documentation.md)
-- [Release](release.md)
+- [Backend Map](backend.md) — shell runtime, command execution, utilities, data flow.
+- [Frontend Map](frontend.md) — Win32 UI, terminal rendering, panes, input, themes.
+- [Build Map](build.md) — CMake, MSVC, linker, runtime bundle, package failures.
+- [Testing Map](testing.md) — CTest, targeted tests, manual QA, regression checks.
+- [Debugging Map](debugging.md) — crashes, logs, wrong behavior, root-cause isolation.
+- [Architecture Map](architecture.md) — boundaries, compatibility, design decisions.
+- [Refactoring Map](refactoring.md) — behavior-preserving cleanup.
+- [Documentation Map](documentation.md) — README, docs, man pages, prompts.
+- [Release Map](release.md) — verify, package, release notes.
 
-## Start
+## Memory first
 
-- [Router](../ROUTER.md)
-- [Context Policy](../CONTEXT_POLICY.md)
-- [Skills Index](../skills/index.md)
+- [Project Summary](../memory/project-summary.md)
+- [Commands](../memory/commands.md)
+- [Conventions](../memory/conventions.md)

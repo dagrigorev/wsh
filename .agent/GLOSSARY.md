@@ -1,20 +1,36 @@
 # Glossary
 
-Keep project terms short and link to source files or decisions when available.
+Keep terms short and factual. Add new terms only after confirming them in repository files.
 
-## Terms
+## Wsh
 
-- Agent: a local Open Code worker using this navigation system.
-- Skill: a small operational guide for one type of work.
-- Map: a routing page that links to relevant skills.
-- Handoff: a short summary that lets another agent continue safely.
+Windows-first shell and terminal environment built with C/C++, CMake, Win32, Direct2D/DirectWrite, and ConPTY.
 
-## Project-specific terms
+## Built-in shell
 
-TODO: Add terms only after confirming them in the repository.
+The internal Wsh shell runtime implemented mainly under `src/shell` and connected through `src/repl.c`.
+
+## ConPTY
+
+Windows pseudo-console API used for hosting external shells. Wsh platform code lives under `src/platform/pty.*`.
+
+## Terminal subsystem
+
+Screen buffer, VT parser, layout, font, and renderer code under `src/terminal`.
+
+## Companion utilities
+
+Standalone tools built from `tools`, copied into the runtime `dist` folder, and tested through CTest help/smoke tests.
+
+## Runtime resources
+
+`config`, `themes`, and `man` directories copied to `dist` during build.
+
+## Legacy duplicate sources
+
+Root-level duplicate files under `src/*.c|*.h|*.cpp` that are not the active modular source of truth according to `docs/ARCHITECTURE.md`.
 
 ## Related
 
 - [Project Summary](memory/project-summary.md)
 - [Architecture Map](maps/architecture.md)
-- [Known Decisions](memory/known-decisions.md)

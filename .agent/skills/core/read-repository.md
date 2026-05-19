@@ -2,45 +2,51 @@
 
 ## Purpose
 
-Understand only the repository area needed for the current task.
+Find the minimal Wsh source area needed for the task.
 
 ## When to use
 
-Use when the relevant files or modules are unknown.
+Use when the needed files are not obvious after reading the router and map.
 
 ## Inputs
 
-Task summary; selected map; suspected area if any
+- Task summary
+- Selected map
+- Likely subsystem
 
 ## Read first
 
-- [Context_Policy](../../CONTEXT_POLICY.md)
+- [Context Policy](../../CONTEXT_POLICY.md)
 - [Project Summary](../../memory/project-summary.md)
-- [Conventions](../../memory/conventions.md)
+- [Known Decisions](../../memory/known-decisions.md)
+- `docs/ARCHITECTURE.md`
 
 ## Steps
 
-1. Identify likely folders.
-2. avoid generated files.
-3. read names first.
-4. open only relevant small files.
-5. summarize findings.
+1. Identify task type and subsystem.
+2. Prefer memory and architecture docs before source.
+3. Open only CMake/docs/source files directly related to the subsystem.
+4. Stop when target files and verification path are known.
+5. Summarize what was found before deeper reading.
 
 ## Output
 
-Small map of relevant files and why they matter.
+- Minimal file list
+- Subsystem summary
+- Known verification path
 
 ## Verification
 
-Relevant area identified without full repository scan.
+Confirm that the selected files include the code path to be changed and a nearby test or QA path.
 
 ## Next skills
 
-- [Inspect Task](inspect-task.md)
 - [Make Plan](make-plan.md)
-- [Verify Result](verify-result.md)
+- [Apply Small Change](apply-small-change.md)
+- [Write Handoff](write-handoff.md)
 
 ## Anti-patterns
 
-- Do not read every file
-- Do not summarize unrelated modules.
+- Do not recursively read the whole repository.
+- Do not inspect build outputs or binaries.
+- Do not edit legacy duplicate `src` files unless explicitly required.

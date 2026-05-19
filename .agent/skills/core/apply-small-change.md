@@ -2,41 +2,51 @@
 
 ## Purpose
 
-Make the smallest useful change that satisfies the task.
+Make the smallest safe code or docs change for the selected Wsh task.
 
 ## When to use
 
-Use after plan and before verification.
+Use once the plan and target files are clear.
 
 ## Inputs
 
-Plan; target files; constraints
+- Plan
+- Target files
+- Conventions
+- Expected behavior
 
 ## Read first
 
-- [Before Change](../../checklists/before-change.md)
 - [Conventions](../../memory/conventions.md)
+- [Before Change Checklist](../../checklists/before-change.md)
+- [Known Decisions](../../memory/known-decisions.md)
 
 ## Steps
 
-1. Change one concern.
-2. preserve style.
-3. avoid unrelated formatting.
-4. keep diff reviewable.
+1. Open only the target files.
+2. Modify the minimal code path.
+3. Keep behavior outside the target unchanged.
+4. Update tests/docs only when relevant.
+5. Record exact changed files for handoff.
 
 ## Output
 
-Minimal code or documentation change.
+- Small patch
+- Changed file list
+- Notes for verification
 
 ## Verification
 
-Diff is limited and intentional.
+The diff is limited to the planned area and can be verified by the planned command or QA.
 
 ## Next skills
 
 - [Verify Result](verify-result.md)
+- [Run Tests](../testing/run-tests.md)
 - [Write Handoff](write-handoff.md)
 
 ## Anti-patterns
 
-- Do not mix feature work with cleanup.
+- Do not reformat entire files.
+- Do not update dependencies unnecessarily.
+- Do not introduce fake UI data.

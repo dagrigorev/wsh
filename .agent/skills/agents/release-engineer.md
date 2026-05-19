@@ -2,27 +2,21 @@
 
 ## Mission
 
-Prepare verified builds, packages, and release notes.
+Verify build, tests, runtime bundle, and packages.
 
 ## Start here
 
-- [Release](../../maps/release.md)
+- [Release Map](../../maps/release.md)
+- [Inspect Build System](../build/inspect-build-system.md)
 - [Package Artifacts](../build/package-artifacts.md)
-- [Regression Check](../testing/regression-check.md)
 
 ## Rules
 
-- Do not package unverified changes.
-- Do not change versioning without instruction.
-- Capture exact commands.
+- Use MSVC/Windows assumptions.
+- Verify runtime resources in dist.
+- Do not include local logs/user config in artifacts.
 
 ## Finish with
 
 - [Write Changelog](../docs/write-changelog.md)
 - [Write Handoff](../core/write-handoff.md)
-
-## Related
-
-- [Agents](../../AGENTS.md)
-- [Router](../../ROUTER.md)
-- [Handoff Template](../../HANDOFF_TEMPLATE.md)

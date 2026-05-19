@@ -1,28 +1,33 @@
-# Bugfix Prompt
-
-You are working locally in this repository through Open Code.
+You are working locally in the Wsh repository through Open Code with local Ollama models.
 
 Use the local agent system:
 
 1. Read `.agent/CONTEXT_POLICY.md`.
 2. Read `.agent/ROUTER.md`.
-3. Select the smallest relevant map.
-4. Use the most relevant skill.
-5. Read only needed files.
-6. Verify the result.
-7. Write a short handoff.
+3. Read `.agent/memory/project-summary.md` and `.agent/memory/commands.md`.
+4. Select the smallest relevant map.
+5. Use one primary skill.
+6. Read only the needed source files.
+7. Verify the result.
+8. Write a short handoff.
 
 Do not load unnecessary files.
 Do not rewrite unrelated code.
+Do not edit legacy duplicate root-level `src/*.c|*.h|*.cpp` files unless the task is specifically about them.
 Do not invent missing project facts.
-Use `.agent/memory/commands.md` for known commands.
+
+# Bugfix Prompt
 
 ## Focus
 
-Use `.agent/maps/debugging.md`. Reproduce the issue before changing code. Make the smallest safe fix.
+Use `.agent/maps/debugging.md`.
 
-## Related
+Reproduce the issue before changing code. For runtime bugs, inspect `%LOCALAPPDATA%\Wsh\logs\wsh.log` when available. Make the smallest safe fix and verify with the original failing case.
 
-- [Router](../ROUTER.md)
-- [Workflow](../WORKFLOW.md)
-- [Skills Index](../skills/index.md)
+## Wsh subsystem hints
+
+- Shell/parser/executor: `src/shell`, `src/repl.c`.
+- UI/input/panes: `src/window.cpp`, `src/platform/input.*`, `src/repl.c`.
+- Terminal/rendering/scrollback: `src/terminal`.
+- ConPTY/external shell: `src/platform/pty.*`.
+- Tools: `tools`, `man`, `tests`.

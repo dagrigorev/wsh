@@ -2,46 +2,48 @@
 
 ## Purpose
 
-Verify that a change respects module and layer boundaries.
+Ensure a Wsh change stays in the correct subsystem.
 
 ## When to use
 
-Use before and after architecture-sensitive changes.
+Use during feature, bugfix, refactor, or review.
 
 ## Inputs
 
-Task; relevant files; constraints
+- Changed files or planned files
+- Subsystem purpose
+- Relevant tests
 
 ## Read first
 
-- [Context_Policy](../../CONTEXT_POLICY.md)
-- [Project Summary](../../memory/project-summary.md)
-- [Commands](../../memory/commands.md)
+- [Conventions](../../memory/conventions.md)
+- [Known Decisions](../../memory/known-decisions.md)
+- [Architecture Map](../../maps/architecture.md)
 
 ## Steps
 
-1. Read minimal context.
-2. inspect relevant files.
-3. make a small plan.
-4. apply focused work.
-5. verify.
-6. document result.
+1. Check that shell code is not taking UI dependencies.
+2. Check terminal code is not taking shell semantics.
+3. Check platform code owns Win32/ConPTY details.
+4. Check tools have man/help/test updates when user-facing.
+5. Flag boundary violations early.
 
 ## Output
 
-Check Boundaries result with short explanation and links.
+- Boundary review
+- Required follow-up changes
 
 ## Verification
 
-Run the nearest relevant build, test, or manual check.
+No obvious module ownership violation remains.
 
 ## Next skills
 
 - [Preserve Compatibility](preserve-compatibility.md)
-- [Verify Result](../core/verify-result.md)
+- [Review Done Checklist](../../checklists/review-done.md)
 
 ## Anti-patterns
 
-- Do not make unrelated changes
-- Do not invent project facts
-- Do not skip verification.
+- Do not approve convenience coupling that makes tests harder.
+- Do not move logic into `main.cpp` as a shortcut.
+- Do not ignore runtime resources.

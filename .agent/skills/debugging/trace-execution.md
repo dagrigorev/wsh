@@ -2,38 +2,41 @@
 
 ## Purpose
 
-Follow the failing path through minimal relevant code.
+Follow Wsh control flow through a small path.
 
 ## When to use
 
-Use when the root cause is not obvious from logs.
+Use after reproduction/log analysis identifies a likely subsystem.
 
 ## Inputs
 
-Task; relevant files; constraints
+- Reproduction
+- Suspected files
+- Expected flow
 
 ## Read first
 
-- [Context_Policy](../../CONTEXT_POLICY.md)
 - [Project Summary](../../memory/project-summary.md)
-- [Commands](../../memory/commands.md)
+- [Conventions](../../memory/conventions.md)
+- [Read Repository](../core/read-repository.md)
 
 ## Steps
 
-1. Read minimal context.
-2. inspect relevant files.
-3. make a small plan.
-4. apply focused work.
-5. verify.
-6. document result.
+1. Start at the entrypoint closest to the behavior.
+2. Trace call flow through only necessary functions.
+3. Note state transitions and ownership.
+4. Identify where actual behavior diverges.
+5. Stop when root cause is localized.
 
 ## Output
 
-Trace Execution result with short explanation and links.
+- Trace notes
+- Root-cause candidate
+- Minimal patch location
 
 ## Verification
 
-Run the nearest relevant build, test, or manual check.
+The failing condition is localized to a function or small module.
 
 ## Next skills
 
@@ -42,6 +45,6 @@ Run the nearest relevant build, test, or manual check.
 
 ## Anti-patterns
 
-- Do not make unrelated changes
-- Do not invent project facts
-- Do not skip verification.
+- Do not trace unrelated subsystems.
+- Do not add permanent noisy logs.
+- Do not change code while still unsure.

@@ -2,46 +2,53 @@
 
 ## Purpose
 
-Fix incorrect behavior after reproduction and root cause analysis.
+Fix a confirmed Wsh bug with the smallest safe change.
 
 ## When to use
 
-Use when a bug has been reproduced or localized.
+Use after reproduction or clear failing test/log identifies a defect.
 
 ## Inputs
 
-Task; relevant files; constraints
+- Reproduction steps
+- Observed vs expected behavior
+- Target subsystem
+- Relevant logs/tests
 
 ## Read first
 
-- [Context_Policy](../../CONTEXT_POLICY.md)
-- [Project Summary](../../memory/project-summary.md)
+- [Debugging Map](../../maps/debugging.md)
+- [Known Issues](../../memory/known-issues.md)
 - [Commands](../../memory/commands.md)
+- [Conventions](../../memory/conventions.md)
 
 ## Steps
 
-1. Read minimal context.
-2. inspect relevant files.
-3. make a small plan.
-4. apply focused work.
-5. verify.
-6. document result.
+1. Confirm the bug path.
+2. Locate the smallest responsible function/module.
+3. Write or identify a failing test if practical.
+4. Patch only the root cause.
+5. Run the original failing case.
+6. Run nearest regression tests.
+7. Document manual QA for UI/runtime behavior.
 
 ## Output
 
-Fix Bug result with short explanation and links.
+- Minimal fix
+- Root-cause explanation
+- Verification result
 
 ## Verification
 
-Run the nearest relevant build, test, or manual check.
+Run original reproduction. Then run targeted CTest or manual QA from the selected map.
 
 ## Next skills
 
-- [Propose Minimal Fix](../debugging/propose-minimal-fix.md)
 - [Regression Check](../testing/regression-check.md)
+- [Write Handoff](../core/write-handoff.md)
 
 ## Anti-patterns
 
-- Do not make unrelated changes
-- Do not invent project facts
-- Do not skip verification.
+- Do not patch without reproduction when reproduction is possible.
+- Do not mask errors by ignoring return values.
+- Do not change unrelated behavior.

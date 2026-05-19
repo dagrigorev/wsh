@@ -10,6 +10,8 @@
 
 ## Verification result
 
+## Manual QA
+
 ## What worked
 
 ## What did not work

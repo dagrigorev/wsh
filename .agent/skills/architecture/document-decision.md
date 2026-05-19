@@ -2,46 +2,46 @@
 
 ## Purpose
 
-Record an important decision in a reusable format.
+Record durable architecture or workflow decisions.
 
 ## When to use
 
-Use when a design choice affects future agents.
+Use when a change affects future agents or module boundaries.
 
 ## Inputs
 
-Task; relevant files; constraints
+- Decision context
+- Chosen option
+- Alternatives or consequences
 
 ## Read first
 
-- [Context_Policy](../../CONTEXT_POLICY.md)
-- [Project Summary](../../memory/project-summary.md)
-- [Commands](../../memory/commands.md)
+- [Known Decisions](../../memory/known-decisions.md)
+- [DECISIONS](../../DECISIONS.md)
+- [Write Dev Notes](../docs/write-dev-notes.md)
 
 ## Steps
 
-1. Read minimal context.
-2. inspect relevant files.
-3. make a small plan.
-4. apply focused work.
-5. verify.
-6. document result.
+1. Write the decision in the standard format.
+2. Keep it short and factual.
+3. Link related files or docs.
+4. Update architecture docs if the repository layout changed.
 
 ## Output
 
-Document Decision result with short explanation and links.
+- Decision entry
+- Related links
 
 ## Verification
 
-Run the nearest relevant build, test, or manual check.
+Decision explains context, decision, consequences, and links.
 
 ## Next skills
 
-- [Write Dev Notes](../docs/write-dev-notes.md)
 - [Write Handoff](../core/write-handoff.md)
 
 ## Anti-patterns
 
-- Do not make unrelated changes
-- Do not invent project facts
-- Do not skip verification.
+- Do not document temporary guesses as decisions.
+- Do not duplicate long design docs.
+- Do not hide tradeoffs.

@@ -8,6 +8,20 @@ What needs to be done?
 
 What is known?
 
+## Target subsystem
+
+Choose one if possible:
+
+- `src/core`
+- `src/shell`
+- `src/terminal`
+- `src/platform`
+- `src/main.cpp` / `src/window.cpp` / `src/repl.c`
+- `tools`
+- `tests`
+- `docs` / `man`
+- build/package
+
 ## Constraints
 
 What must not be changed?
@@ -27,3 +41,9 @@ What should be produced?
 ## Verification
 
 How will the result be checked?
+
+## Related
+
+- [Router](ROUTER.md)
+- [Commands](memory/commands.md)
+- [Before Change Checklist](checklists/before-change.md)

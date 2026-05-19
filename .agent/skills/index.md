@@ -66,3 +66,9 @@
 - [Debugger Agent](agents/debugger.md)
 - [Documenter Agent](agents/documenter.md)
 - [Release Engineer Agent](agents/release-engineer.md)
+
+## Related
+
+- [Router](../ROUTER.md)
+- [Mind Maps](../maps/index.md)
+- [Workflow](../WORKFLOW.md)

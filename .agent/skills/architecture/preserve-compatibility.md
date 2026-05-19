@@ -2,46 +2,49 @@
 
 ## Purpose
 
-Avoid breaking public behavior, file formats, CLI, APIs, or workflows.
+Keep existing Wsh user-visible behavior stable during fixes/refactors.
 
 ## When to use
 
-Use when changing existing behavior or interfaces.
+Use when command output, config, themes, man pages, shell syntax, or UI behavior might change.
 
 ## Inputs
 
-Task; relevant files; constraints
+- Existing behavior
+- Proposed change
+- Tests/manual QA
 
 ## Read first
 
-- [Context_Policy](../../CONTEXT_POLICY.md)
-- [Project Summary](../../memory/project-summary.md)
-- [Commands](../../memory/commands.md)
+- [Known Decisions](../../memory/known-decisions.md)
+- [Conventions](../../memory/conventions.md)
+- [Testing Map](../../maps/testing.md)
 
 ## Steps
 
-1. Read minimal context.
-2. inspect relevant files.
-3. make a small plan.
-4. apply focused work.
-5. verify.
-6. document result.
+1. Identify public behavior.
+2. Compare old and new expected behavior.
+3. Add compatibility tests if possible.
+4. Document intentional breaking changes.
+5. Update docs/man pages if user-facing.
 
 ## Output
 
-Preserve Compatibility result with short explanation and links.
+- Compatibility notes
+- Regression tests/QA
+- Docs updates if needed
 
 ## Verification
 
-Run the nearest relevant build, test, or manual check.
+Existing tests and targeted compatibility checks pass.
 
 ## Next skills
 
 - [Regression Check](../testing/regression-check.md)
-- [Document Decision](document-decision.md)
+- [Write Handoff](../core/write-handoff.md)
 
 ## Anti-patterns
 
-- Do not make unrelated changes
-- Do not invent project facts
-- Do not skip verification.
+- Do not claim full Zsh compatibility.
+- Do not change command output casually.
+- Do not break config keys without migration notes.

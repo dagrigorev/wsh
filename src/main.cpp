@@ -1124,6 +1124,12 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     renderer_set_font(&g_renderer, g_cfg.font.family, g_renderer.font.pt_size + 1.0f); layout_panes(hwnd); InvalidateRect(hwnd, NULL, FALSE); break;
                 case INPUT_ZOOM_OUT:
                     if (g_renderer.font.pt_size > 6.0f) renderer_set_font(&g_renderer, g_cfg.font.family, g_renderer.font.pt_size - 1.0f); layout_panes(hwnd); InvalidateRect(hwnd, NULL, FALSE); break;
+                case INPUT_NEXT_TAB:
+                    if (g_tab_count > 1) { g_active_tab = (g_active_tab + 1) % g_tab_count; active_tab(); layout_panes(hwnd); refresh_runtime_status(true); InvalidateRect(hwnd, NULL, FALSE); }
+                    break;
+                case INPUT_PREV_TAB:
+                    if (g_tab_count > 1) { g_active_tab = (g_active_tab + g_tab_count - 1) % g_tab_count; active_tab(); layout_panes(hwnd); refresh_runtime_status(true); InvalidateRect(hwnd, NULL, FALSE); }
+                    break;
                 case INPUT_CHAR:
                     if (ev.len > 0) {
                         if (p->screen.viewport_offset) { EnterCriticalSection(&g_lock); p->screen.viewport_offset = 0; screen_mark_dirty_all(&p->screen); LeaveCriticalSection(&g_lock); update_native_scrollbar(hwnd); }

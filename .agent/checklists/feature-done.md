@@ -1,12 +1,16 @@
 # Feature Done Checklist
 
-- [ ] Expected behavior is implemented.
-- [ ] Existing behavior is preserved.
-- [ ] Relevant tests or manual QA were done.
-- [ ] Documentation or changelog was updated if needed.
+- [ ] Observable behavior is implemented.
+- [ ] Feature fits Wsh module boundaries.
+- [ ] No fake UI/status data was added.
+- [ ] Tests were added or skipped reason is documented.
+- [ ] Manual QA is recorded for interactive behavior.
+- [ ] README/man/docs were updated if user-facing.
+- [ ] Runtime bundle impact was checked if resources changed.
 - [ ] Handoff lists changed files and verification.
 
 ## Related
 
+- [Architecture Map](../maps/architecture.md)
 - [Implement Feature](../skills/coding/implement-feature.md)
-- [Regression Check](../skills/testing/regression-check.md)
+- [Manual QA](../skills/testing/manual-qa.md)

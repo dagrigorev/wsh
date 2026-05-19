@@ -1,13 +1,10 @@
 # Before Change Checklist
 
-- [ ] I understand the task.
+- [ ] I understand the Wsh task.
 - [ ] I selected the correct map.
 - [ ] I selected the correct skill.
+- [ ] I identified the target subsystem.
 - [ ] I identified the minimal files to inspect.
-- [ ] I know how to verify the change.
 - [ ] I checked project conventions.
-
-## Related
-
-- [Context Policy](../CONTEXT_POLICY.md)
-- [Make Plan](../skills/core/make-plan.md)
+- [ ] I know how to verify the change.
+- [ ] I am not editing legacy duplicate `src` files by accident.

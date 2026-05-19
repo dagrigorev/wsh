@@ -2,46 +2,48 @@
 
 ## Purpose
 
-Update user-facing repository overview or instructions.
+Update Wsh README or high-level docs accurately.
 
 ## When to use
 
-Use when README content is requested or stale.
+Use when user-facing features, build steps, screenshots, or project status change.
 
 ## Inputs
 
-Task; relevant files; constraints
+- Changed behavior
+- Docs to update
+- Verification status
 
 ## Read first
 
-- [Context_Policy](../../CONTEXT_POLICY.md)
+- [Documentation Map](../../maps/documentation.md)
 - [Project Summary](../../memory/project-summary.md)
 - [Commands](../../memory/commands.md)
 
 ## Steps
 
-1. Read minimal context.
-2. inspect relevant files.
-3. make a small plan.
-4. apply focused work.
-5. verify.
-6. document result.
+1. Update only the relevant section.
+2. Avoid overstating completeness.
+3. Keep commands aligned with commands memory.
+4. Link docs/man pages when useful.
+5. Verify Markdown links if changed.
 
 ## Output
 
-Update README result with short explanation and links.
+- Updated docs
+- Accuracy notes
 
 ## Verification
 
-Run the nearest relevant build, test, or manual check.
+README/docs match implemented behavior and commands.
 
 ## Next skills
 
-- [Write Dev Notes](write-dev-notes.md)
+- [Write Changelog](write-changelog.md)
 - [Write Handoff](../core/write-handoff.md)
 
 ## Anti-patterns
 
-- Do not make unrelated changes
-- Do not invent project facts
-- Do not skip verification.
+- Do not claim full Zsh compatibility.
+- Do not add fake screenshots/data claims.
+- Do not rewrite unrelated docs.

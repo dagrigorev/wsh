@@ -2,12 +2,10 @@
 
 - [ ] Build passes.
 - [ ] Relevant tests pass.
+- [ ] Manual QA is recorded for interactive changes.
 - [ ] No debug-only code remains.
 - [ ] No unrelated formatting changes.
 - [ ] No secrets or local paths were added.
-- [ ] Documentation was updated if needed.
-
-## Related
-
-- [After Change Checklist](after-change.md)
-- [Commands](../memory/commands.md)
+- [ ] No build outputs, logs, or user config were added.
+- [ ] Documentation/man pages were updated if needed.
+- [ ] Handoff or commit message includes verification commands.

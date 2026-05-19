@@ -2,38 +2,41 @@
 
 ## Purpose
 
-Remove unused code safely after confirming references.
+Safely remove unused code or obsolete files.
 
 ## When to use
 
-Use when code is obsolete or unreachable.
+Use for cleanup after confirming code is not built or referenced.
 
 ## Inputs
 
-Task; relevant files; constraints
+- Candidate code/files
+- Build graph evidence
+- Search results
 
 ## Read first
 
-- [Context_Policy](../../CONTEXT_POLICY.md)
-- [Project Summary](../../memory/project-summary.md)
-- [Commands](../../memory/commands.md)
+- [Refactoring Map](../../maps/refactoring.md)
+- [Known Decisions](../../memory/known-decisions.md)
+- [Inspect Build System](../build/inspect-build-system.md)
 
 ## Steps
 
-1. Read minimal context.
-2. inspect relevant files.
-3. make a small plan.
-4. apply focused work.
-5. verify.
-6. document result.
+1. Confirm the code is not part of current CMake targets.
+2. Search references.
+3. Remove or isolate in a dedicated change.
+4. Update docs if source layout changes.
+5. Run full build and tests.
 
 ## Output
 
-Remove Dead Code result with short explanation and links.
+- Removed dead code
+- Evidence of non-use
+- Verification result
 
 ## Verification
 
-Run the nearest relevant build, test, or manual check.
+Full build and tests pass. For legacy source cleanup, confirm active modular targets still build.
 
 ## Next skills
 
@@ -42,6 +45,6 @@ Run the nearest relevant build, test, or manual check.
 
 ## Anti-patterns
 
-- Do not make unrelated changes
-- Do not invent project facts
-- Do not skip verification.
+- Do not remove code based only on filename.
+- Do not mix dead-code removal with feature work.
+- Do not delete resources used at runtime.

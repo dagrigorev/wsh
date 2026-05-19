@@ -2,46 +2,48 @@
 
 ## Purpose
 
-Choose the smallest safe patch for a confirmed cause.
+Turn an isolated root cause into a safe patch plan.
 
 ## When to use
 
-Use after root cause is isolated.
+Use before editing code after debugging.
 
 ## Inputs
 
-Task; relevant files; constraints
+- Root cause
+- Target files
+- Verification case
 
 ## Read first
 
-- [Context_Policy](../../CONTEXT_POLICY.md)
-- [Project Summary](../../memory/project-summary.md)
-- [Commands](../../memory/commands.md)
+- [Make Plan](../core/make-plan.md)
+- [Conventions](../../memory/conventions.md)
+- [Before Change Checklist](../../checklists/before-change.md)
 
 ## Steps
 
-1. Read minimal context.
-2. inspect relevant files.
-3. make a small plan.
-4. apply focused work.
-5. verify.
-6. document result.
+1. State the one-line fix idea.
+2. List exact files/functions.
+3. Define pre/post behavior.
+4. Define tests/manual QA.
+5. Call out risks and rollback path.
 
 ## Output
 
-Propose Minimal Fix result with short explanation and links.
+- Minimal fix plan
+- Verification plan
 
 ## Verification
 
-Run the nearest relevant build, test, or manual check.
+The fix plan is smaller than a rewrite and directly addresses root cause.
 
 ## Next skills
 
 - [Fix Bug](../coding/fix-bug.md)
-- [Regression Check](../testing/regression-check.md)
+- [Apply Small Change](../core/apply-small-change.md)
 
 ## Anti-patterns
 
-- Do not make unrelated changes
-- Do not invent project facts
-- Do not skip verification.
+- Do not include unrelated cleanup.
+- Do not bypass failing behavior.
+- Do not disable tests to pass.

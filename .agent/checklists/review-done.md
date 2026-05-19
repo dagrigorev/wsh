@@ -1,10 +1,12 @@
 # Review Done Checklist
 
-- [ ] Task intent was understood.
-- [ ] Changed files were reviewed.
-- [ ] Build/test evidence was checked.
-- [ ] Findings are actionable.
-- [ ] No speculative issues were reported as facts.
+- [ ] Scope matches the task.
+- [ ] Module boundaries are respected.
+- [ ] No accidental legacy duplicate source edits.
+- [ ] Build/test/manual QA evidence is present or missing evidence is called out.
+- [ ] User-facing docs/man pages are consistent.
+- [ ] Runtime resources are preserved.
+- [ ] Findings are actionable and prioritized.
 
 ## Related
 

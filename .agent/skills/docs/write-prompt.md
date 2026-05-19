@@ -2,38 +2,40 @@
 
 ## Purpose
 
-Create a reusable prompt for Open Code or another agent.
+Create or update reusable Open Code prompts for Wsh work.
 
 ## When to use
 
-Use when a future task should be delegated.
+Use when agent workflow should be reusable.
 
 ## Inputs
 
-Task; relevant files; constraints
+- Task type
+- Workflow
+- Constraints
 
 ## Read first
 
-- [Context_Policy](../../CONTEXT_POLICY.md)
-- [Project Summary](../../memory/project-summary.md)
-- [Commands](../../memory/commands.md)
+- [Prompts Directory](../../prompts/task-intake.md)
+- [Context Policy](../../CONTEXT_POLICY.md)
+- [AGENTS](../../AGENTS.md)
 
 ## Steps
 
-1. Read minimal context.
-2. inspect relevant files.
-3. make a small plan.
-4. apply focused work.
-5. verify.
-6. document result.
+1. State role and task type.
+2. Reference router, maps, skills, memory.
+3. Include Wsh constraints.
+4. Keep prompt short and reusable.
+5. Avoid embedding large code or docs.
 
 ## Output
 
-Write Prompt result with short explanation and links.
+- Reusable prompt
+- Related links
 
 ## Verification
 
-Run the nearest relevant build, test, or manual check.
+Prompt routes future agents without loading excessive context.
 
 ## Next skills
 
@@ -41,6 +43,6 @@ Run the nearest relevant build, test, or manual check.
 
 ## Anti-patterns
 
-- Do not make unrelated changes
-- Do not invent project facts
-- Do not skip verification.
+- Do not paste entire project context.
+- Do not hardcode stale facts.
+- Do not tell agents to scan everything.

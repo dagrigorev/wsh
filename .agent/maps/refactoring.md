@@ -7,8 +7,9 @@ Use this map when behavior should stay the same while code structure improves.
 ## Start
 
 - [Context Policy](../CONTEXT_POLICY.md)
+- [Known Decisions](../memory/known-decisions.md)
+- [Conventions](../memory/conventions.md)
 - [Inspect Task](../skills/core/inspect-task.md)
-- [Make Plan](../skills/core/make-plan.md)
 
 ## Choose path
 
@@ -28,8 +29,14 @@ Use this map when behavior should stay the same while code structure improves.
 
 - [Remove Dead Code](../skills/coding/remove-dead-code.md)
 
+### Refactoring legacy duplicate sources
+
+- [Analyze Architecture](../skills/architecture/analyze-architecture.md)
+- [Regression Check](../skills/testing/regression-check.md)
+- Treat this as a dedicated task; do not mix with feature work.
+
 ## Finish
 
-- [Verify Result](../skills/core/verify-result.md)
-- [After Change Checklist](../checklists/after-change.md)
+- [Run Tests](../skills/testing/run-tests.md)
+- [Regression Check](../skills/testing/regression-check.md)
 - [Write Handoff](../skills/core/write-handoff.md)
