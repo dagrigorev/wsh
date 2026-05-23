@@ -88,6 +88,9 @@ bool renderer_init(Renderer *r, HWND hwnd, const Config *cfg) {
     r->cell_w=r->font.cell_width; r->cell_h=r->font.cell_height;
     r->cursor_style=cfg->cursor.style; r->cursor_visible=true; r->cursor_blink_state=true;
     r->tab_bar_height=0;
+    r->reasoning_line1[0] = L'\0';
+    r->reasoning_line2[0] = L'\0';
+    r->reasoning_active = false;
     if (cfg->cursor.blink) r->blink_timer_id=SetTimer(hwnd,1,cfg->cursor.blink_rate_ms,NULL);
     RECT rc; GetClientRect(hwnd,&rc); renderer_resize(r,rc.right-rc.left,rc.bottom-rc.top);
     return true;
@@ -304,6 +307,44 @@ void renderer_paint_region(Renderer *r, const ScreenBuffer *sb, const RECT *rect
             r->fg_brush->SetColor(thumb);
             D2D1_ROUNDED_RECT th = {{track_x0, thumb_y, track_x1, thumb_y + thumb_h}, track_w * 0.5f, track_w * 0.5f};
             r->render_target->FillRoundedRectangle(th, r->fg_brush);
+        }
+    }
+
+    /* ── Reasoning overlay (proactive AI subtitles) ────────────────────────── */
+    if (active && r->reasoning_active) {
+        float overlay_y = oy + (float)(cursor_y + 1) * r->cell_h + 2.0f;
+        D2D1_COLOR_F overlay_bg = to_d2d(r->bg_color);
+        overlay_bg.a = 0.65f;
+        D2D1_COLOR_F overlay_fg = to_d2d(r->fg_color);
+        overlay_fg.a = 0.80f;
+
+        float max_w = cols * r->cell_w;
+        float line_h = r->cell_h * 0.80f; /* slightly smaller than cell */
+
+        for (int line = 0; line < 2; line++) {
+            const wchar_t* text = (line == 0) ? r->reasoning_line1 : r->reasoning_line2;
+            if (!text || text[0] == L'\0') continue;
+
+            /* Background pill */
+            D2D1_ROUNDED_RECT bg_rect;
+            bg_rect.rect.left   = ox;
+            bg_rect.rect.top    = overlay_y;
+            bg_rect.rect.right  = ox + max_w;
+            bg_rect.rect.bottom = overlay_y + line_h;
+            bg_rect.radiusX = 4.0f;
+            bg_rect.radiusY = 4.0f;
+            r->bg_brush->SetColor(overlay_bg);
+            r->render_target->FillRoundedRectangle(bg_rect, r->bg_brush);
+
+            /* Text */
+            D2D1_RECT_F text_rect = { ox + 4.0f, overlay_y + 1.0f,
+                                      ox + max_w - 4.0f, overlay_y + line_h };
+            r->fg_brush->SetColor(overlay_fg);
+            r->render_target->DrawTextW(text, (UINT32)wcslen(text),
+                r->font.fmt_normal, text_rect, r->fg_brush,
+                D2D1_DRAW_TEXT_OPTIONS_CLIP);
+
+            overlay_y += line_h + 2.0f;
         }
     }
 

@@ -5,6 +5,8 @@ add_library(wsh_ai STATIC
     providers/rule_based_ai_provider.cpp
     providers/ngram_model.cpp
     providers/ngram_ai_provider.cpp
+    providers/tiny_llm_provider.cpp
+    inference/tiny_reasoning_model.cpp
 )
 
 target_include_directories(wsh_ai PUBLIC

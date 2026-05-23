@@ -30,6 +30,7 @@
 #include "shell/completion.h"
 #include "window.h"
 #include "repl.h"
+#include "ai/wsh_ai.h"
 
 #define WSH_MAX_PANES 4
 #define WSH_MAX_TABS 8
@@ -338,6 +339,10 @@ static bool pane_start(TerminalPane *pane) {
     if (old_cwd) {
         SetCurrentDirectoryW(old_cwd);
         HeapFree(GetProcessHeap(), 0, old_cwd);
+    }
+    /* Initialize proactive AI reasoning micro-model */
+    if (pane->shell.ai_enabled) {
+        wsh_ai_init_reasoning(&pane->shell);
     }
     source_user_zshrc(&pane->shell);
     apply_default_gui_prompt(&pane->shell);
@@ -1036,6 +1041,21 @@ static void draw_chrome(Renderer *r) {
     draw_text_u8(r, stbuf, &str, 0xffffff);
 }
 
+/* ── Trigger AI reasoning update after input changes ───────────────────────── */
+
+static void trigger_ai_reasoning(TerminalPane *p) {
+    if (!p || p->use_pty) return;
+    if (!p->shell.ai_enabled) return;
+    /* Check if REPL's line changed and trigger async analysis */
+    if (repl_is_reasoning_dirty(&p->repl)) {
+        const char *line = repl_get_line(&p->repl);
+        if (line && line[0]) {
+            wsh_ai_trigger_analysis(&p->shell, line);
+        }
+        InvalidateRect(g_hwnd, NULL, FALSE);
+    }
+}
+
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
         case WM_PAINT: {
@@ -1052,6 +1072,48 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             strncpy(g_renderer.search_query, g_search.query, sizeof(g_renderer.search_query) - 1);
             g_renderer.search_query[sizeof(g_renderer.search_query) - 1] = '\0';
             TerminalTab *tab = active_tab();
+            /* Update proactive reasoning overlay from AI state */
+            {
+                TerminalPane *ap = active_pane();
+                if (ap && ap->initialized && !ap->use_pty) {
+                    ShellContext *sh = &ap->shell;
+                    if (sh->ai_enabled && sh->ai_state) {
+                        const char *input = repl_get_line(&ap->repl);
+                        if (input && input[0]) {
+                            /* Line 1: show what the user typed */
+                            char line_buf[260];
+                            _snprintf(line_buf, sizeof(line_buf), "user input: %s", input);
+                            wchar_t *winput = u8_to_u16(line_buf, NULL);
+                            if (winput) {
+                                wcsncpy(g_renderer.reasoning_line1, winput, 255);
+                                g_renderer.reasoning_line1[255] = L'\0';
+                                str_free(winput);
+                            }
+                            /* Line 2: friendly AI reasoning (may lag by one keystroke) */
+                            const char *reason = wsh_ai_get_reasoning(sh);
+                            if (reason && reason[0]) {
+                                char reason_buf[260];
+                                _snprintf(reason_buf, sizeof(reason_buf), "reason: %s", reason);
+                                wchar_t *wreason = u8_to_u16(reason_buf, NULL);
+                                if (wreason) {
+                                    wcsncpy(g_renderer.reasoning_line2, wreason, 255);
+                                    g_renderer.reasoning_line2[255] = L'\0';
+                                    str_free(wreason);
+                                }
+                            } else {
+                                g_renderer.reasoning_line2[0] = L'\0';
+                            }
+                            g_renderer.reasoning_active = true;
+                        } else {
+                            g_renderer.reasoning_active = false;
+                        }
+                    } else {
+                        g_renderer.reasoning_active = false;
+                    }
+                } else {
+                    g_renderer.reasoning_active = false;
+                }
+            }
             if (tab) {
                 for (int i = 0; i < tab->pane_count; ++i) {
                     TerminalPane *p = &tab->panes[i];
@@ -1169,7 +1231,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                             if (wtext) {
                                 int u8len = 0;
                                 char *text = wsh_utf16_to_utf8_clipboard(wtext, &u8len);
-                                if (text) { if (p->use_pty) pty_write(&p->pty, text, u8len); else repl_handle_input(&p->repl, text, u8len); str_free(text); }
+                                if (text) { if (p->use_pty) pty_write(&p->pty, text, u8len); else { repl_handle_input(&p->repl, text, u8len); trigger_ai_reasoning(p); } str_free(text); }
                                 GlobalUnlock(hd);
                             }
                         }
@@ -1198,7 +1260,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     if (ev.len > 0) {
                         if (p->screen.viewport_offset) { EnterCriticalSection(&g_lock); p->screen.viewport_offset = 0; screen_mark_dirty_all(&p->screen); LeaveCriticalSection(&g_lock); update_native_scrollbar(hwnd); }
                         if (p->use_pty) pty_write(&p->pty, ev.bytes, ev.len);
-                        else if (!repl_handle_input(&p->repl, ev.bytes, ev.len)) PostQuitMessage(0);
+                        else {
+                            if (!repl_handle_input(&p->repl, ev.bytes, ev.len)) PostQuitMessage(0);
+                            trigger_ai_reasoning(p);
+                        }
                     }
                     break;
                 default: break;
@@ -1224,7 +1289,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             if (ev.action == INPUT_CHAR && ev.len > 0) {
                 if (p->screen.viewport_offset) { EnterCriticalSection(&g_lock); p->screen.viewport_offset = 0; screen_mark_dirty_all(&p->screen); LeaveCriticalSection(&g_lock); update_native_scrollbar(hwnd); }
                 if (p->use_pty) pty_write(&p->pty, ev.bytes, ev.len);
-                else if (!repl_handle_input(&p->repl, ev.bytes, ev.len)) PostQuitMessage(0);
+                else {
+                    if (!repl_handle_input(&p->repl, ev.bytes, ev.len)) PostQuitMessage(0);
+                    trigger_ai_reasoning(p);
+                }
             }
             return 0;
         }
@@ -1318,7 +1386,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     const wchar_t *wtxt = (const wchar_t *)GlobalLock(hd);
                     if (wtxt) {
                         int u8len = 0; char *txt = wsh_utf16_to_utf8_clipboard(wtxt, &u8len);
-                        if (txt) { if (p->use_pty) pty_write(&p->pty, txt, u8len); else repl_handle_input(&p->repl, txt, u8len); str_free(txt); }
+                        if (txt) { if (p->use_pty) pty_write(&p->pty, txt, u8len); else { repl_handle_input(&p->repl, txt, u8len); trigger_ai_reasoning(p); } str_free(txt); }
                         GlobalUnlock(hd);
                     }
                 }

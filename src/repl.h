@@ -61,6 +61,10 @@ struct Repl {
     char           *execute_line; /* owned copy of the line being executed */
     int             exec_result;  /* exit status of last command */
     ReplExecDoneFn  on_exec_done; /* completion callback (may be NULL) */
+
+    /* AI reasoning overlay text (max 2 lines) */
+    wchar_t         reasoning_text[2][256];
+    bool            reasoning_dirty; /* set when reasoning needs update */
 };
 
 /* ── API ───────────────────────────────────────────────────────────────────── */
@@ -92,6 +96,19 @@ void repl_cancel_exec(Repl *r);
  * command finishes.  The UI layer should forward this to the main thread
  * before showing the prompt or mutating REPL state. */
 void repl_set_on_exec_done(Repl *r, ReplExecDoneFn cb);
+
+/* Get current line content. Returns pointer to internal buffer. */
+static inline const char *repl_get_line(const Repl *r) { return r->line; }
+
+/* Get current line length. */
+static inline int repl_get_line_len(const Repl *r) { return r->len; }
+
+/* Check if reasoning should be re-triggered (called from UI thread). */
+static inline bool repl_is_reasoning_dirty(Repl *r) {
+    bool d = r->reasoning_dirty;
+    r->reasoning_dirty = false;
+    return d;
+}
 
 
 #ifdef __cplusplus

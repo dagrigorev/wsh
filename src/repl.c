@@ -51,6 +51,9 @@ static void emit_fmt(Repl *r, const char *fmt, ...) {
 void repl_init(Repl *r, ShellContext *ctx) {
     memset(r, 0, sizeof(*r));
     r->ctx = ctx;
+    r->reasoning_text[0][0] = L'\0';
+    r->reasoning_text[1][0] = L'\0';
+    r->reasoning_dirty = false;
 }
 
 void repl_free(Repl *r) {
@@ -192,6 +195,7 @@ static void insert_bytes(Repl *r, const char *bytes, int len) {
     memcpy(r->line + r->cursor, bytes, (size_t)len);
     r->cursor += len;
     r->len    += len;
+    r->reasoning_dirty = true;
     repl_redraw_line(r);
 }
 
@@ -207,6 +211,7 @@ static void delete_backward(Repl *r) {
             (size_t)(r->len - r->cursor));
     r->cursor -= back;
     r->len    -= back;
+    r->reasoning_dirty = true;
     repl_redraw_line(r);
 }
 
@@ -385,6 +390,7 @@ bool repl_handle_input(Repl *r, const char *bytes, int len) {
             case 0x03:
                 emit(r, "^C\r\n");
                 r->len = r->cursor = 0;
+                r->reasoning_dirty = true;
                 completion_free(&r->completion);
                 repl_show_prompt(r);
                 return true;
@@ -442,13 +448,13 @@ bool repl_handle_input(Repl *r, const char *bytes, int len) {
 
             /* Ctrl+K — kill to EOL */
             case 0x0B:
-                r->len = r->cursor; repl_redraw_line(r); return true;
+                r->len = r->cursor; r->reasoning_dirty = true; repl_redraw_line(r); return true;
 
             /* Ctrl+U — kill to BOL */
             case 0x15:
                 memmove(r->line, r->line + r->cursor,
                         (size_t)(r->len - r->cursor + 1));
-                r->len -= r->cursor; r->cursor = 0;
+                r->len -= r->cursor; r->cursor = 0; r->reasoning_dirty = true;
                 repl_redraw_line(r); return true;
 
             /* Ctrl+W — kill word before cursor */
@@ -461,6 +467,7 @@ bool repl_handle_input(Repl *r, const char *bytes, int len) {
                 memmove(r->line + r->cursor, r->line + end,
                         (size_t)(r->len - end + 1));
                 r->len -= (end - r->cursor);
+                r->reasoning_dirty = true;
                 repl_redraw_line(r); return true;
             }
 

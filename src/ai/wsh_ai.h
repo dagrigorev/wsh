@@ -21,6 +21,20 @@ void wsh_ai_cmd_suggest(ShellContext *ctx, int argc, char **argv);
 void wsh_ai_cmd_explain(ShellContext *ctx);
 void wsh_ai_cmd_fix(ShellContext *ctx);
 
+/* ── Proactive reasoning API ───────────────────────────────────────────────── */
+/* Initialize the tiny LLM micro-model (allocates ~2MB). Called on startup. */
+void wsh_ai_init_reasoning(ShellContext *ctx);
+
+/* Trigger async analysis of current input. Non-blocking, called from REPL. */
+void wsh_ai_trigger_analysis(ShellContext *ctx, const char *input);
+
+/* Get the latest reasoning result text. Returns "" if no result yet. 
+ * The result is cached; this is safe to call from the UI paint thread. */
+const char *wsh_ai_get_reasoning(ShellContext *ctx);
+
+/* Get the latest analysis input (to check if reasoning is stale). */
+const char *wsh_ai_get_reasoning_input(ShellContext *ctx);
+
 #ifdef __cplusplus
 }
 #endif

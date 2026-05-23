@@ -3,18 +3,26 @@
 #include "ai_suggestion.h"
 #include "ai_provider.h"
 #include "providers/ngram_ai_provider.h"
+#include "providers/tiny_llm_provider.h"
 #include "../shell/history.h"
 #include <windows.h>
 #include <string>
 #include <vector>
 #include <algorithm>
 #include <cstring>
+#include <mutex>
 
 /* ── Opaque AI state ─────────────────────────────────────────────────────── */
 
 struct WshAiState {
     wsh::NgramAiProvider provider;
+    wsh::TinyLlmProvider tiny_llm;
     WshAiContext context;
+
+    /* Proactive reasoning cache (accessed from UI + worker threads) */
+    std::mutex reason_mutex;
+    std::string reason_result;
+    std::string reason_input;
 };
 
 /* ── C API — lifecycle ───────────────────────────────────────────────────── */
@@ -94,10 +102,60 @@ extern "C" void wsh_ai_update_context(ShellContext *ctx) {
 
 extern "C" void wsh_ai_cmd_status(ShellContext *ctx) {
     io_writeln(ctx->io, ctx->ai_enabled ? "AI: enabled" : "AI: disabled");
-    io_writeln(ctx->io, "Provider: ngram+rules");
-    io_writeln(ctx->io, "Model: 4-gram (built-in, 74 KB)");
+    io_writeln(ctx->io, "Provider: ngram+rules+tiny_llm");
+    io_writeln(ctx->io, "Model: 4-gram (built-in, 74 KB) + tiny_llm (~2 MB)");
+    auto *s = static_cast<WshAiState *>(ctx->ai_state);
+    if (s) {
+        io_writeln(ctx->io, s->tiny_llm.IsLoaded() ? "Tiny LLM: loaded" : "Tiny LLM: not loaded");
+    }
     io_writeln(ctx->io, "Network: disabled");
     io_writeln(ctx->io, "Default: enabled");
+}
+
+/* ── Proactive reasoning lifecycle ────────────────────────────────────────── */
+
+extern "C" void wsh_ai_init_reasoning(ShellContext *ctx) {
+    if (!ctx || !ctx->ai_state) return;
+    auto *s = static_cast<WshAiState *>(ctx->ai_state);
+    s->tiny_llm.Init();
+}
+
+extern "C" void wsh_ai_trigger_analysis(ShellContext *ctx, const char *input) {
+    if (!ctx || !ctx->ai_state || !input) return;
+    auto *s = static_cast<WshAiState *>(ctx->ai_state);
+    if (!s->tiny_llm.IsLoaded()) return;
+
+    /* Update context's currentInput for the provider */
+    s->context.currentInput = input;
+
+    /* Trigger async analysis */
+    s->tiny_llm.TriggerAnalysis(input);
+}
+
+extern "C" const char *wsh_ai_get_reasoning(ShellContext *ctx) {
+    if (!ctx || !ctx->ai_state) return "";
+    auto *s = static_cast<WshAiState *>(ctx->ai_state);
+
+    /* Get latest proactive reasoning result. This is safe to call
+     * from the paint thread - the provider returns cached results. */
+    std::string current = s->context.currentInput;
+    std::string result = s->tiny_llm.GetProactiveReasoning(current);
+
+    /* Cache in the AI state for C string access */
+    {
+        std::lock_guard<std::mutex> lock(s->reason_mutex);
+        s->reason_result = result;
+        s->reason_input = current;
+    }
+
+    return s->reason_result.c_str();
+}
+
+extern "C" const char *wsh_ai_get_reasoning_input(ShellContext *ctx) {
+    if (!ctx || !ctx->ai_state) return "";
+    auto *s = static_cast<WshAiState *>(ctx->ai_state);
+    std::lock_guard<std::mutex> lock(s->reason_mutex);
+    return s->reason_input.c_str();
 }
 
 extern "C" void wsh_ai_cmd_suggest(ShellContext *ctx, int argc, char **argv) {
