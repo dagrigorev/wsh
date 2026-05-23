@@ -31,6 +31,7 @@ add_wsh_test(test_history      test_history.c)
 add_wsh_test(test_prompt       test_prompt.c)
 
 add_wsh_test(test_config       test_config.c)
+add_wsh_test(test_scheduler    test_scheduler.c)
 add_wsh_test(test_completion   test_completion.c)
 add_wsh_test(test_executor     test_executor.c)
 add_wsh_test(test_screen       test_screen.c)

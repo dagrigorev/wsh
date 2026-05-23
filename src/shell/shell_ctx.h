@@ -26,6 +26,7 @@
 #include "env.h"
 #include "history.h"
 #include "jobs.h"
+#include "scheduler.h"
 #include "../core/arena.h"
 
 
@@ -108,6 +109,7 @@ typedef struct ShellContext {
     /* Persistent subsystems */
     History       history;
     JobTable      jobs;
+    Scheduler     scheduler;
 
     /* Shell options */
     ShellOptions  opts;
@@ -174,6 +176,12 @@ char *shell_expand_prompt(ShellContext *ctx, const char *fmt);
 /* Resolve a command name to its full path.  Caller frees. Returns NULL if
  * not found. */
 char *shell_which(ShellContext *ctx, const char *name);
+
+/* ── Scheduler tick ──────────────────────────────────────────────────────── */
+
+/* Poll the scheduler and execute any due tasks. Safe to call from REPL
+ * prompt cycle or from a UI timer. Returns number of tasks executed. */
+int shell_scheduler_tick(ShellContext *ctx);
 
 /* ── Environment helpers (thin wrappers; env.h is the authority) ─────────── */
 

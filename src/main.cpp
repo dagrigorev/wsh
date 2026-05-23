@@ -1088,7 +1088,13 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
         case WM_TIMER:
             if (wParam == 1) { renderer_toggle_cursor_blink(&g_renderer); InvalidateRect(hwnd, NULL, FALSE); }
-            if (wParam == 2) { refresh_runtime_status(false); InvalidateRect(hwnd, NULL, FALSE); }
+            if (wParam == 2) {
+                refresh_runtime_status(false);
+                TerminalPane *tp = active_pane();
+                if (tp && tp->initialized && !tp->use_pty)
+                    shell_scheduler_tick(&tp->shell);
+                InvalidateRect(hwnd, NULL, FALSE);
+            }
             return 0;
 
         case WM_SETFOCUS: { TerminalPane *p = active_pane(); if (p) p->screen.cursor_visible = true; InvalidateRect(hwnd, NULL, FALSE); return 0; }

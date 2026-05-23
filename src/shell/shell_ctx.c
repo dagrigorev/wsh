@@ -94,6 +94,7 @@ void shell_ctx_init(ShellContext *ctx, IShellIO *io) {
 
     history_init(&ctx->history);
     job_table_init(&ctx->jobs);
+    scheduler_init(&ctx->scheduler);
 
     WSH_LOG_DEBUG("shell_ctx_init complete, pid=%lu", (unsigned long)ctx->shell_pid);
 }
@@ -102,6 +103,7 @@ void shell_ctx_free(ShellContext *ctx) {
     history_save(&ctx->history);
     history_free(&ctx->history);
     job_table_free(&ctx->jobs);
+    scheduler_free(&ctx->scheduler);
 
     /* Free aliases */
     for (Alias *a = ctx->aliases; a;) {
@@ -425,4 +427,10 @@ char *shell_expand_prompt(ShellContext *ctx, const char *fmt) {
     }
     buf[bi] = '\0';
     return str_dup(buf);
+}
+
+/* ── Scheduler tick ────────────────────────────────────────────────────────── */
+
+int shell_scheduler_tick(ShellContext *ctx) {
+    return scheduler_tick(&ctx->scheduler, ctx);
 }

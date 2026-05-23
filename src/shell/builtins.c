@@ -11,6 +11,7 @@
 #include <string.h>
 #include <ctype.h>
 #include <stdarg.h>
+#include <stdint.h>
 #include "builtins.h"
 #include "shell_ctx.h"
 #include "expand.h"
@@ -67,6 +68,9 @@ int builtin_sudo(int,char**,ShellContext*);
 int builtin_man(int,char**,ShellContext*);
 int builtin_help(int,char**,ShellContext*);
 int builtin_history(int,char**,ShellContext*);
+int builtin_at(int,char**,ShellContext*);
+int builtin_atq(int,char**,ShellContext*);
+int builtin_atrm(int,char**,ShellContext*);
 int builtin_noop(int,char**,ShellContext*);
 
 static const BuiltinEntry BUILTIN_TABLE[] = {
@@ -116,6 +120,9 @@ static const BuiltinEntry BUILTIN_TABLE[] = {
     { "man",      builtin_man         },
     { "help",     builtin_help        },
     { "history",  builtin_history     },
+    { "at",       builtin_at          },
+    { "atq",      builtin_atq         },
+    { "atrm",     builtin_atrm        },
     { "umask",    builtin_noop        },
     { "ulimit",   builtin_noop        },
     { "autoload", builtin_noop        },
@@ -724,7 +731,7 @@ int builtin_help(int argc, char **argv, ShellContext *ctx) {
     outln(ctx, "Wsh built-ins:");
     outln(ctx, "  cd pwd echo printf export unset alias unalias source exit return");
     outln(ctx, "  set setopt jobs fg bg kill wait type which command eval exec");
-    outln(ctx, "  open clip env sudo man help");
+    outln(ctx, "  open clip env sudo man help at atq atrm");
     outln(ctx, "Utilities distributed with Wsh:");
     outln(ctx, "  ls md tree wshinit");
     outln(ctx, "Use: man <topic> or <utility> --help");
@@ -760,4 +767,139 @@ int builtin_history(int argc, char **argv, ShellContext *ctx) {
     }
 
     return 0;
+}
+
+/* ── at — schedule a task ────────────────────────────────────────────────────── */
+
+static DWORD parse_delay(const char *s) {
+    if (!s || !s[0]) return 0;
+    long n = 0;
+    const char *p = s;
+    if (*p == '+') p++;
+    while (*p >= '0' && *p <= '9') { n = n * 10 + (*p - '0'); p++; }
+    if (n <= 0) return 0;
+    switch (*p) {
+        case 's': case 'S': return (DWORD)n * 1000;
+        case 'm': case 'M': return (DWORD)n * 60000;
+        case 'h': case 'H': return (DWORD)n * 3600000;
+        default:            return (DWORD)n * 1000; /* default seconds */
+    }
+}
+
+int builtin_at(int argc, char **argv, ShellContext *ctx) {
+    /* at -l  — list queue (same as atq) */
+    if (argc == 2 && (!strcmp(argv[1], "-l") || !strcmp(argv[1], "--list"))) {
+        return builtin_atq(argc, argv, ctx);
+    }
+    /* at -r <id> — remove task (same as atrm) */
+    if (argc >= 3 && (!strcmp(argv[1], "-r") || !strcmp(argv[1], "--remove"))) {
+        char *eargv[3] = { "atrm", argv[2], NULL };
+        return builtin_atrm(2, eargv, ctx);
+    }
+    /* at — show usage */
+    if (argc < 3) {
+        outln(ctx, "Usage:");
+        outln(ctx, "  at +N[s|m|h] <command>   schedule command after N seconds/minutes/hours");
+        outln(ctx, "  at -l                    list scheduled tasks (atq)");
+        outln(ctx, "  at -r <id>               remove scheduled task (atrm)");
+        outln(ctx, "  atrm <id>                remove scheduled task");
+        outln(ctx, "  atq                      list scheduled tasks");
+        outln(ctx, "Examples:");
+        outln(ctx, "  at +5s echo hello        run echo hello in 5 seconds");
+        outln(ctx, "  at +2m ls -la            run ls -la in 2 minutes");
+        outln(ctx, "  atq                      list all scheduled tasks");
+        return 0;
+    }
+
+    DWORD delay = parse_delay(argv[1]);
+    if (delay == 0) {
+        outfmt(ctx, "at: invalid delay: %s (use +N[s|m|h])\r\n", argv[1]);
+        return 1;
+    }
+
+    char *command = str_join(argv + 2, argc - 2, " ");
+    if (!command) return 1;
+
+    int id = scheduler_add(&ctx->scheduler, delay, command);
+    if (id < 0) {
+        outln(ctx, "at: failed to schedule task (queue full?)");
+        str_free(command);
+        return 1;
+    }
+
+    outfmt(ctx, "task #%d scheduled\r\n", id);
+    str_free(command);
+    return 0;
+}
+
+/* ── atq — list scheduled tasks ───────────────────────────────────────────────── */
+
+int builtin_atq(int argc, char **argv, ShellContext *ctx) {
+    (void)argc; (void)argv;
+    Scheduler *s = &ctx->scheduler;
+
+    if (s->count == 0) {
+        outln(ctx, "no scheduled tasks");
+        return 0;
+    }
+
+    outfmt(ctx, "%-4s %-8s %-10s %s\r\n", "ID", "Due(s)", "Status", "Command");
+    DWORD now = GetTickCount();
+
+    for (int i = 0; i < SCHED_MAX; i++) {
+        SchedTask *t = &s->tasks[i];
+        if (!t->id) continue;
+
+        int32_t remaining = (int32_t)(t->due_at - now);
+        if (remaining < 0) remaining = 0;
+
+        const char *status_str = "pending";
+        if (t->status == SCHED_RUNNING) status_str = "running";
+        else if (t->status == SCHED_DONE)   status_str = "done";
+        else if (t->status == SCHED_FAILED) status_str = "failed";
+        if (t->interval_ms > 0) status_str = "repeat";
+
+        char time_str[32];
+        if (remaining > 0) {
+            _snprintf(time_str, sizeof(time_str), "%lus",
+                      (unsigned long)(remaining / 1000));
+        } else {
+            _snprintf(time_str, sizeof(time_str), "now");
+        }
+
+        outfmt(ctx, "%-4d %-8s %-10s %s\r\n",
+               t->id, time_str, status_str, t->label);
+    }
+
+    return 0;
+}
+
+/* ── atrm — remove a scheduled task ──────────────────────────────────────────── */
+
+int builtin_atrm(int argc, char **argv, ShellContext *ctx) {
+    if (argc < 2) {
+        outln(ctx, "Usage: atrm <id>");
+        outln(ctx, "       atrm -a    remove all scheduled tasks");
+        return 1;
+    }
+
+    if (!strcmp(argv[1], "-a") || !strcmp(argv[1], "--all")) {
+        scheduler_clear(&ctx->scheduler);
+        outln(ctx, "all scheduled tasks removed");
+        return 0;
+    }
+
+    int id = atoi(argv[1]);
+    if (id <= 0) {
+        outfmt(ctx, "atrm: invalid task id: %s\r\n", argv[1]);
+        return 1;
+    }
+
+    if (scheduler_remove(&ctx->scheduler, id)) {
+        outfmt(ctx, "task #%d removed\r\n", id);
+        return 0;
+    }
+
+    outfmt(ctx, "atrm: task #%d not found\r\n", id);
+    return 1;
 }

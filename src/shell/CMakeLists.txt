@@ -12,6 +12,7 @@ add_library(wsh_shell STATIC
     jobs.c
     completion.c
     shell_ctx.c
+    scheduler.c
 )
 
 target_include_directories(wsh_shell PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})

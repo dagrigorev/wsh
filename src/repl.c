@@ -116,6 +116,9 @@ static DWORD WINAPI repl_execute_thread_proc(LPVOID param) {
 /* ── Prompt ────────────────────────────────────────────────────────────────── */
 
 void repl_show_prompt(Repl *r) {
+    /* Tick the scheduler: execute any due tasks before showing the prompt */
+    shell_scheduler_tick(r->ctx);
+
     /* Call precmd hook if defined */
     for (ShellFunc *f = r->ctx->functions; f; f = f->next) {
         if (strcmp(f->name, "precmd") == 0) {

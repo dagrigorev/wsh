@@ -61,6 +61,11 @@ int builtin_open(int argc, char **argv, ShellContext *ctx);
 int builtin_clip(int argc, char **argv, ShellContext *ctx);
 int builtin_env_cmd(int argc, char **argv, ShellContext *ctx);
 int builtin_sudo(int argc, char **argv, ShellContext *ctx);
+/* Scheduler commands */
+int builtin_at(int argc, char **argv, ShellContext *ctx);
+int builtin_atq(int argc, char **argv, ShellContext *ctx);
+int builtin_atrm(int argc, char **argv, ShellContext *ctx);
+
 /* ZSH completion stubs (no-ops that prevent "command not found" errors) */
 int builtin_noop(int argc, char **argv, ShellContext *ctx);
 
