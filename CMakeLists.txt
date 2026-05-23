@@ -67,6 +67,7 @@ add_link_options(
 
 # ── Sub-libraries (each a static lib — SOLID: one reason to change) ──────────
 add_subdirectory(src/core)
+add_subdirectory(src/ai)
 add_subdirectory(src/shell)
 add_subdirectory(src/terminal)
 add_subdirectory(src/platform)

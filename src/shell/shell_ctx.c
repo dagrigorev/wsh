@@ -22,6 +22,7 @@
 #include "../core/path_util.h"
 #include "../core/log.h"
 #include "../core/unicode.h"
+#include "../ai/wsh_ai.h"
 
 /* ── Handle fields (child process I/O; stored directly in ctx) ────────────── */
 /*
@@ -89,6 +90,12 @@ void shell_ctx_init(ShellContext *ctx, IShellIO *io) {
     env_set(ctx->env, "WSH_TERM", "1", true);
     env_set(ctx->env, "IFS",   " \t\n",  false);
 
+    /* AI assistant: enabled by default */
+    ctx->ai_enabled = true;
+    ctx->ai_state = wsh_ai_state_create();
+    ctx->last_command[0] = '\0';
+    ctx->last_stderr_snippet[0] = '\0';
+
     /* Shell options: interactive mode on by default */
     ctx->opts.interactive = 1;
 
@@ -123,6 +130,12 @@ void shell_ctx_free(ShellContext *ctx) {
 
     /* Free trap handlers */
     for (int i = 0; i < TRAP_COUNT; i++) str_free(ctx->traps[i]);
+
+    /* Free AI state */
+    if (ctx->ai_state) {
+        wsh_ai_state_free(ctx->ai_state);
+        ctx->ai_state = NULL;
+    }
 
     /* Free env scope chain */
     while (ctx->env) ctx->env = env_scope_pop(ctx->env);
@@ -187,6 +200,12 @@ int shell_exec_line(ShellContext *ctx, const char *line) {
     } else {
         ret = exec_node(ctx, ast);
         ctx->last_status = ret;
+    }
+
+    /* Store last command at top-level execution only */
+    if (top_level_exec) {
+        strncpy(ctx->last_command, line, sizeof(ctx->last_command) - 1);
+        ctx->last_command[sizeof(ctx->last_command) - 1] = '\0';
     }
 
     ctx->exec_depth--;

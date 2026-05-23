@@ -26,6 +26,7 @@ target_link_libraries(Wsh PRIVATE
     wsh_shell
     wsh_terminal
     wsh_platform
+    wsh_ai
     kernel32 user32 gdi32 shell32
     advapi32 shlwapi ole32 oleaut32
     d2d1 dwrite

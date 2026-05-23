@@ -21,6 +21,7 @@
 #include "../core/str_util.h"
 #include "../core/path_util.h"
 #include "../core/log.h"
+#include "../ai/wsh_ai.h"
 
 /* ── Dispatch table (Open/Closed: add entries, never touch builtin_find) ───── */
 
@@ -72,6 +73,7 @@ int builtin_at(int,char**,ShellContext*);
 int builtin_atq(int,char**,ShellContext*);
 int builtin_atrm(int,char**,ShellContext*);
 int builtin_noop(int,char**,ShellContext*);
+int builtin_ai(int,char**,ShellContext*);
 
 static const BuiltinEntry BUILTIN_TABLE[] = {
     { "cd",       builtin_cd          },
@@ -131,6 +133,7 @@ static const BuiltinEntry BUILTIN_TABLE[] = {
     { "compinit", builtin_noop        },
     { "zstyle",   builtin_noop        },
     { "zle",      builtin_noop        },
+    { "ai",       builtin_ai          },
     { NULL,       NULL                }
 };
 
@@ -902,4 +905,43 @@ int builtin_atrm(int argc, char **argv, ShellContext *ctx) {
 
     outfmt(ctx, "atrm: task #%d not found\r\n", id);
     return 1;
+}
+
+/* ── ai — built-in AI assistant ──────────────────────────────────────────── */
+
+int builtin_ai(int argc, char **argv, ShellContext *ctx) {
+    if (argc < 2) {
+        outln(ctx, "ai: expected subcommand: status, suggest, explain, fix, on, off");
+        outln(ctx, "Usage:");
+        outln(ctx, "  ai status              show AI status");
+        outln(ctx, "  ai suggest             show project-aware suggestions");
+        outln(ctx, "  ai suggest build       show build suggestions");
+        outln(ctx, "  ai suggest test        show test suggestions");
+        outln(ctx, "  ai suggest git         show Git suggestions");
+        outln(ctx, "  ai explain             explain last command failure");
+        outln(ctx, "  ai fix                 suggest a command fix");
+        outln(ctx, "  ai on                  enable AI assistance");
+        outln(ctx, "  ai off                 disable AI assistance");
+        return 1;
+    }
+
+    if (strcmp(argv[1], "status") == 0) {
+        wsh_ai_cmd_status(ctx);
+    } else if (strcmp(argv[1], "suggest") == 0) {
+        wsh_ai_cmd_suggest(ctx, argc - 2, argv + 2);
+    } else if (strcmp(argv[1], "explain") == 0) {
+        wsh_ai_cmd_explain(ctx);
+    } else if (strcmp(argv[1], "fix") == 0) {
+        wsh_ai_cmd_fix(ctx);
+    } else if (strcmp(argv[1], "on") == 0) {
+        ctx->ai_enabled = true;
+        outln(ctx, "AI: enabled");
+    } else if (strcmp(argv[1], "off") == 0) {
+        ctx->ai_enabled = false;
+        outln(ctx, "AI: disabled");
+    } else {
+        outfmt(ctx, "ai: unknown subcommand: %s\r\n", argv[1]);
+        return 1;
+    }
+    return 0;
 }

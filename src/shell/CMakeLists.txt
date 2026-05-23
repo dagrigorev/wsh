@@ -16,4 +16,4 @@ add_library(wsh_shell STATIC
 )
 
 target_include_directories(wsh_shell PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
-target_link_libraries(wsh_shell PUBLIC wsh_core)
+target_link_libraries(wsh_shell PUBLIC wsh_core wsh_ai)

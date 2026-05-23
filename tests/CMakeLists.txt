@@ -105,3 +105,22 @@ set_tests_properties(test_tool_tree_runs PROPERTIES
 add_test(NAME test_tool_true_runs COMMAND true)
 add_test(NAME test_tool_false_runs COMMAND false)
 set_tests_properties(test_tool_false_runs PROPERTIES WILL_FAIL TRUE)
+
+# ── AI tests ──────────────────────────────────────────────────────────────────
+add_executable(test_ai test_ai.cpp test_helpers.c)
+target_include_directories(test_ai PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/src/core
+    ${CMAKE_SOURCE_DIR}/src/shell
+    ${CMAKE_SOURCE_DIR}/src/ai
+    ${CMAKE_SOURCE_DIR}/src/terminal
+    ${CMAKE_SOURCE_DIR}/src/platform
+)
+target_link_libraries(test_ai PRIVATE wsh_ai wsh_core wsh_shell wsh_platform wsh_terminal)
+if(MSVC)
+    target_compile_options(test_ai PRIVATE /TP)
+    set_target_properties(test_ai PROPERTIES
+        LINK_FLAGS "/SUBSYSTEM:CONSOLE /MANIFEST:NO")
+endif()
+add_test(NAME test_ai COMMAND test_ai)
+

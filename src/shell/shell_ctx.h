@@ -153,6 +153,12 @@ typedef struct ShellContext {
      * currently executing command to stop. Checked periodically by long-running
      * operations (WaitForSingleObject loops, etc.). */
     volatile LONG cancel_requested;
+
+    /* ── AI assistant ──────────────────────────────────────────────────── */
+    bool   ai_enabled;                    /* default true */
+    void  *ai_state;                      /* opaque WshAiState* */
+    char   last_command[4096];            /* last executed command text */
+    char   last_stderr_snippet[4096];     /* captured stderr from last cmd */
 } ShellContext;
 
 /* ── Lifecycle ─────────────────────────────────────────────────────────────── */
