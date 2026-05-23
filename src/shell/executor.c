@@ -221,6 +221,10 @@ static void append_quoted_arg(char *out, int out_size, int *pos, const char *arg
 static void forward_pipe_to_io(ShellContext *ctx, HANDLE hread, HANDLE hprocess) {
     char buf[4096];
     for (;;) {
+        if (ctx->cancel_requested) {
+            TerminateProcess(hprocess, 1);
+            break;
+        }
         DWORD available = 0;
         if (!PeekNamedPipe(hread, NULL, 0, NULL, &available, NULL)) break;
         if (available > 0) {
@@ -236,6 +240,10 @@ static void forward_pipe_to_io(ShellContext *ctx, HANDLE hread, HANDLE hprocess)
             continue;
         }
         DWORD wait = WaitForSingleObject(hprocess, 15);
+        if (ctx->cancel_requested) {
+            TerminateProcess(hprocess, 1);
+            break;
+        }
         if (wait == WAIT_OBJECT_0) {
             while (PeekNamedPipe(hread, NULL, 0, NULL, &available, NULL) && available > 0) {
                 DWORD to_read = available > sizeof(buf) ? sizeof(buf) : available;
@@ -350,7 +358,16 @@ static int spawn_external(ShellContext *ctx, char **argv, int argc, bool bg) {
     }
 
     if (capture && cap_read) forward_pipe_to_io(ctx, cap_read, pi.hProcess);
-    else WaitForSingleObject(pi.hProcess, INFINITE);
+    else {
+        for (;;) {
+            DWORD wait = WaitForSingleObject(pi.hProcess, 50);
+            if (wait == WAIT_OBJECT_0) break;
+            if (ctx->cancel_requested) {
+                TerminateProcess(pi.hProcess, 1);
+                break;
+            }
+        }
+    }
 
     DWORD code = 0;
     GetExitCodeProcess(pi.hProcess, &code);

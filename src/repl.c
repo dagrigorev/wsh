@@ -10,6 +10,13 @@
  *   - Multi-byte UTF-8 character insertion
  *   - precmd / preexec hook calls (ZSH compatibility)
  *
+ * Execution model:
+ *   Commands run on a dedicated worker thread.  The UI thread posts the command
+ *   and returns immediately.  When the worker finishes it invokes the
+ *   on_exec_done callback.  The UI layer should forward this callback to the
+ *   main thread (e.g. via PostMessage) before showing the prompt or mutating
+ *   REPL state.
+ *
  * The IShellIO output path goes through ctx->io so the REPL is decoupled
  * from Win32 handles.  This makes it fully unit-testable.
  */
@@ -47,6 +54,11 @@ void repl_init(Repl *r, ShellContext *ctx) {
 }
 
 void repl_free(Repl *r) {
+    /* If a command is still running, cancel it and wait */
+    if (r->executing) {
+        repl_cancel_exec(r);
+    }
+
     completion_free(&r->completion);
 
     if (r->execute_line) {
@@ -54,9 +66,15 @@ void repl_free(Repl *r) {
         r->execute_line = NULL;
     }
 
-    r->executing = false;
-    r->execute_thread = NULL;
+    if (r->exec_thread) {
+        CloseHandle(r->exec_thread);
+        r->exec_thread = NULL;
+    }
+
+    r->executing = 0;
 }
+
+/* ── Execution thread ──────────────────────────────────────────────────────── */
 
 static DWORD WINAPI repl_execute_thread_proc(LPVOID param) {
     Repl *r = (Repl *)param;
@@ -72,14 +90,23 @@ static DWORD WINAPI repl_execute_thread_proc(LPVOID param) {
         }
     }
 
-    shell_exec_line(r->ctx, line);
+    /* Reset cancellation flag before each command */
+    r->ctx->cancel_requested = 0;
+
+    int result = shell_exec_line(r->ctx, line);
 
     str_free(r->execute_line);
     r->execute_line = NULL;
 
-    r->executing = false;
+    r->exec_result = result;
+    r->executing = 0;
 
-    if (!r->ctx->exit_requested) {
+    /* Notify the UI layer via callback (should forward to main thread).
+     * If no callback is registered, show the prompt directly from the worker
+     * thread for backward compatibility. */
+    if (r->on_exec_done) {
+        r->on_exec_done(r, result);
+    } else if (!r->ctx->exit_requested) {
         repl_show_prompt(r);
     }
 
@@ -241,9 +268,41 @@ static void handle_tab(Repl *r) {
     }
 }
 
+/* ── Cancel current execution ─────────────────────────────────────────────── */
+
+void repl_cancel_exec(Repl *r) {
+    if (!r || !r->executing) return;
+
+    /* Signal cancellation to the running command */
+    r->ctx->cancel_requested = 1;
+
+    /* Wait for the thread to exit cleanly (up to 3 seconds) */
+    if (r->exec_thread) {
+        DWORD wait = WaitForSingleObject(r->exec_thread, 3000);
+        if (wait == WAIT_TIMEOUT) {
+            WSH_LOG_WARN("repl: command thread did not exit in 3s, terminating");
+            TerminateThread(r->exec_thread, 1);
+            WaitForSingleObject(r->exec_thread, INFINITE);
+        }
+        CloseHandle(r->exec_thread);
+        r->exec_thread = NULL;
+    }
+
+    /* Free the command line copy if the thread didn't consume it */
+    if (r->execute_line) {
+        str_free(r->execute_line);
+        r->execute_line = NULL;
+    }
+
+    r->executing = 0;
+}
+
 /* ── Execute the current line ─────────────────────────────────────────────── */
 
-static void execute_line(Repl *r) {
+/* Returns true if execution was launched on a worker thread.
+ * Returns false if the line was empty, a command is already running, or thread
+ * creation failed.  The caller should show the prompt immediately on false. */
+static bool execute_line(Repl *r) {
     emit(r, "\r\n");
     r->line[r->len] = '\0';
 
@@ -253,8 +312,10 @@ static void execute_line(Repl *r) {
         r->cursor = 0;
         completion_free(&r->completion);
         r->completing = false;
-        return;
+        return false;
     }
+
+    bool launched = false;
 
     if (r->len > 0) {
         history_push(&r->ctx->history, r->line);
@@ -263,8 +324,8 @@ static void execute_line(Repl *r) {
         if (!r->execute_line) {
             emitln(r, "wsh: failed to allocate command line");
         } else {
-            r->executing = true;
-            r->execute_thread = CreateThread(
+            r->executing = 1;
+            r->exec_thread = CreateThread(
                 NULL,
                 0,
                 repl_execute_thread_proc,
@@ -273,14 +334,13 @@ static void execute_line(Repl *r) {
                 NULL
             );
 
-            if (!r->execute_thread) {
-                r->executing = false;
+            if (!r->exec_thread) {
+                r->executing = 0;
                 str_free(r->execute_line);
                 r->execute_line = NULL;
                 emitln(r, "wsh: failed to start command thread");
             } else {
-                CloseHandle(r->execute_thread);
-                r->execute_thread = NULL;
+                launched = true;
             }
         }
     }
@@ -289,6 +349,7 @@ static void execute_line(Repl *r) {
     r->cursor = 0;
     completion_free(&r->completion);
     r->completing = false;
+    return launched;
 }
 
 /* ── Main input handler ───────────────────────────────────────────────────── */
@@ -299,6 +360,10 @@ bool repl_handle_input(Repl *r, const char *bytes, int len) {
     if (r->executing) {
         if (len == 1 && bytes[0] == 0x03) {
             emit(r, "^C\r\n");
+            repl_cancel_exec(r);
+            if (!r->ctx->exit_requested) {
+                repl_show_prompt(r);
+            }
             return true;
         }
 
@@ -344,11 +409,15 @@ bool repl_handle_input(Repl *r, const char *bytes, int len) {
                 return true;
 
             /* Enter */
-            case '\r': case '\n':
-                execute_line(r);
+            case '\r': case '\n': {
+                bool launched = execute_line(r);
                 if (r->ctx->exit_requested) return false;
-                if (!r->executing) repl_show_prompt(r);
+                /* If we didn't launch a thread (empty line, failure), show
+                 * the prompt now.  Otherwise the completion callback handles
+                 * prompt display on the main thread. */
+                if (!launched) repl_show_prompt(r);
                 return true;
+            }
 
             /* Tab */
             case '\t':
@@ -485,4 +554,10 @@ bool repl_handle_input(Repl *r, const char *bytes, int len) {
     }
 
     return true;
+}
+
+/* ── Callback registration ────────────────────────────────────────────────── */
+
+void repl_set_on_exec_done(Repl *r, ReplExecDoneFn cb) {
+    if (r) r->on_exec_done = cb;
 }

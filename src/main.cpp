@@ -235,6 +235,25 @@ static void apply_default_gui_prompt(ShellContext *shell) {
                  false);
 }
 
+#define WM_WSH_EXEC_DONE (WM_USER + 100)
+
+static void repl_exec_done_cb(Repl *r, int exec_result) {
+    (void)exec_result;
+    /* Find the pane that owns this REPL and post a message to the main window.
+     * We walk the tabs/panes to find the matching Repl pointer. */
+    for (int ti = 0; ti < g_tab_count; ++ti) {
+        TerminalTab *tab = &g_tabs[ti];
+        if (!tab->initialized) continue;
+        for (int pi = 0; pi < tab->pane_count; ++pi) {
+            TerminalPane *pane = &tab->panes[pi];
+            if (&pane->repl == r) {
+                PostMessageW(g_hwnd, WM_WSH_EXEC_DONE, (WPARAM)ti, (LPARAM)pi);
+                return;
+            }
+        }
+    }
+}
+
 static void pane_grid_from_rect(const RECT *rc, int *cols, int *rows) {
     int w = rc->right - rc->left;
     int h = rc->bottom - rc->top;
@@ -323,6 +342,7 @@ static bool pane_start(TerminalPane *pane) {
     source_user_zshrc(&pane->shell);
     apply_default_gui_prompt(&pane->shell);
     repl_init(&pane->repl, &pane->shell);
+    repl_set_on_exec_done(&pane->repl, repl_exec_done_cb);
 
     pane->initialized = true;
     if (strcmp(g_cfg.general.shell, "wsh") == 0 || g_cfg.general.shell[0] == '\0') {
@@ -1303,6 +1323,23 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         }
 
         case WM_USER: update_native_scrollbar(hwnd); InvalidateRect(hwnd, NULL, FALSE); return 0;
+
+        case WM_WSH_EXEC_DONE: {
+            int ti = (int)wParam;
+            int pi = (int)lParam;
+            if (ti >= 0 && ti < g_tab_count && pi >= 0 && pi < WSH_MAX_PANES) {
+                TerminalTab *tab = &g_tabs[ti];
+                if (tab->initialized && pi < tab->pane_count) {
+                    TerminalPane *pane = &tab->panes[pi];
+                    if (pane->initialized && !pane->shell.exit_requested) {
+                        repl_show_prompt(&pane->repl);
+                        update_native_scrollbar(hwnd);
+                        InvalidateRect(hwnd, NULL, FALSE);
+                    }
+                }
+            }
+            return 0;
+        }
 
         case WM_CLOSE:
             if (g_cfg.general.confirm_exit) {
