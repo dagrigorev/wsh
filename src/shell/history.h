@@ -16,7 +16,8 @@ typedef struct {
     char   **entries;       /* Ring buffer of heap-allocated strings */
     int      capacity;      /* Max entries (from HISTSIZE env var or HISTORY_MAX) */
     int      head;          /* Next write index */
-    int      count;         /* Total entries stored */
+    int      count;         /* Total entries stored in the ring buffer */
+    int      total_commands;/* Monotonic counter of all pushes (for !n absolute indexing) */
     int      cursor;        /* Current navigation position (-1 = live input) */
     char    *search_pat;    /* Active Ctrl-R search pattern (heap, may be NULL) */
     int      search_idx;    /* Current search result index */

@@ -205,14 +205,31 @@ static bool handle_is_usable(HANDLE h) {
     return true;
 }
 
+static bool arg_needs_quoting(const char *arg) {
+    if (!arg || !arg[0]) return true;
+    return strchr(arg, ' ') || strchr(arg, '\t') || strchr(arg, '"');
+}
+
 static void append_quoted_arg(char *out, int out_size, int *pos, const char *arg) {
     if (!out || !pos || *pos >= out_size - 1) return;
     if (!arg) arg = "";
-    bool q = !arg[0] || strchr(arg, ' ') || strchr(arg, '\t') || strchr(arg, '"');
+    bool q = arg_needs_quoting(arg);
     if (q && *pos < out_size - 1) out[(*pos)++] = '"';
-    for (const char *p = arg; *p && *pos < out_size - 2; ++p) {
+    for (const char *p = arg; *p && *pos < out_size - 2; ) {
+        /* Count consecutive backslashes */
+        int bs = 0;
+        while (*p == '\\') { bs++; p++; }
+        if (*p == '"' || *p == '\0') {
+            /* Double backslashes before " or end-of-string */
+            for (int i = 0; i < bs * 2 && *pos < out_size - 2; i++)
+                out[(*pos)++] = '\\';
+        } else {
+            for (int i = 0; i < bs && *pos < out_size - 2; i++)
+                out[(*pos)++] = '\\';
+        }
+        if (*p == '\0') break;
         if (*p == '"' && *pos < out_size - 2) out[(*pos)++] = '\\';
-        out[(*pos)++] = *p;
+        out[(*pos)++] = *p++;
     }
     if (q && *pos < out_size - 1) out[(*pos)++] = '"';
     out[*pos] = '\0';
@@ -486,6 +503,10 @@ static int exec_cmd_node(ShellContext *ctx, ASTNode *node, bool bg) {
         /* Shell functions */
         for (ShellFunc *f = ctx->functions; f; f = f->next) {
             if (strcmp(f->name, eargv[0]) == 0) {
+                if (ctx->call_depth >= 64) {
+                    io_writeln(ctx->io, "wsh: maximum function recursion depth exceeded");
+                    ret = 1; goto done;
+                }
                 EnvScope *old_env = ctx->env;
                 ctx->env = env_scope_push(old_env);
                 for (int i = 1; i < eargc; i++) {
@@ -495,6 +516,10 @@ static int exec_cmd_node(ShellContext *ctx, ASTNode *node, bool bg) {
                 ctx->call_depth++;
                 ret = exec_node(ctx, f->body);
                 ctx->call_depth--;
+                if (ctx->return_requested) {
+                    ret = ctx->return_code;
+                    ctx->return_requested = false;
+                }
                 ctx->env = env_scope_pop(ctx->env);
                 ctx->env = old_env;
                 goto done;
@@ -515,6 +540,63 @@ done:
     return ret;
 }
 
+/* ── Pipe IO adapters ──────────────────────────────────────────────────────── */
+/*
+ * These bridge ctx->io ↔ Win32 pipe so builtins (which write through
+ * ctx->io->write / read through ctx->io->read_line) work correctly in
+ * pipelines where the other side is also a builtin or external process.
+ */
+
+/* Left-side adapter: writes go to the pipe handle, reads are no-op. */
+typedef struct { IShellIO base; HANDLE h; } PipeWriteIO;
+static void pipe_wr_write(IShellIO *self, const char *buf, int len) {
+    DWORD written;
+    WriteFile(((PipeWriteIO *)self)->h, buf, (DWORD)len, &written, NULL);
+}
+static int pipe_wr_read(IShellIO *self, char *buf, int size) {
+    (void)self; (void)buf; (void)size; return 0;
+}
+
+/* Right-side adapter: reads come from the pipe handle, writes passthrough. */
+typedef struct { IShellIO base; HANDLE h; IShellIO *terminal; } PipeReadIO;
+static void pipe_rd_write(IShellIO *self, const char *buf, int len) {
+    IShellIO *term = ((PipeReadIO *)self)->terminal;
+    if (term && term->write) term->write(term, buf, len);
+}
+static int pipe_rd_read(IShellIO *self, char *buf, int size) {
+    HANDLE h = ((PipeReadIO *)self)->h;
+    int i = 0;
+    while (i < size - 1) {
+        char c; DWORD got = 0;
+        if (!ReadFile(h, &c, 1, &got, NULL) || got == 0) break;
+        if (c == '\n') break;
+        if (c != '\r') buf[i++] = c;
+    }
+    buf[i] = '\0';
+    return i;
+}
+
+/* Thread parameter for left-side pipe execution (BUG-002: concurrency). */
+typedef struct {
+    HANDLE       hwrite;
+    ShellContext *ctx;
+    ASTNode      *node;
+    int          ret;
+} PipeThreadParam;
+
+static DWORD WINAPI exec_pipe_left_thread(LPVOID param) {
+    PipeThreadParam *ptp = (PipeThreadParam *)param;
+    PipeWriteIO pio = { { pipe_wr_write, pipe_wr_read }, ptp->hwrite };
+    IShellIO *saved_io  = ptp->ctx->io;
+    HANDLE    old_out   = ptp->ctx->h_stdout;
+    ptp->ctx->io       = &pio.base;
+    ptp->ctx->h_stdout = ptp->hwrite;
+    ptp->ret = exec_node(ptp->ctx, ptp->node);
+    ptp->ctx->io       = saved_io;
+    ptp->ctx->h_stdout = old_out;
+    return 0;
+}
+
 /* ── Execute pipe: left | right ───────────────────────────────────────────── */
 
 static int exec_pipe(ShellContext *ctx, ASTNode *node) {
@@ -522,20 +604,25 @@ static int exec_pipe(ShellContext *ctx, ASTNode *node) {
     SECURITY_ATTRIBUTES sa = { sizeof(sa), NULL, TRUE };
     if (!CreatePipe(&hread, &hwrite, &sa, 65536)) return 1;
 
-    /* Left → writes to hwrite */
-    HANDLE old_out = ctx->h_stdout;
-    ctx->h_stdout  = hwrite;
-    exec_node(ctx, node->binary.left);
-    ctx->h_stdout  = old_out;
-    CloseHandle(hwrite);
+    /* Left side runs in a thread so large pipe output does not deadlock. */
+    PipeThreadParam ptp = { hwrite, ctx, node->binary.left, 0 };
+    HANDLE hthread = CreateThread(NULL, 0, exec_pipe_left_thread, &ptp, 0, NULL);
+    if (!hthread) { CloseHandle(hread); CloseHandle(hwrite); return 1; }
 
-    /* Right ← reads from hread */
-    HANDLE old_in = ctx->h_stdin;
-    ctx->h_stdin  = hread;
+    /* Right side reads from the pipe via the IO adapter. */
+    PipeReadIO rio = { { pipe_rd_write, pipe_rd_read }, hread, ctx->io };
+    IShellIO *saved_io = ctx->io;
+    HANDLE    old_in   = ctx->h_stdin;
+    ctx->io           = &rio.base;
+    ctx->h_stdin      = hread;
     int ret = exec_node(ctx, node->binary.right);
-    ctx->h_stdin  = old_in;
-    CloseHandle(hread);
+    ctx->io           = saved_io;
+    ctx->h_stdin      = old_in;
 
+    WaitForSingleObject(hthread, INFINITE);
+    CloseHandle(hthread);
+    CloseHandle(hwrite);
+    CloseHandle(hread);
     return ret;
 }
 
@@ -543,6 +630,7 @@ static int exec_pipe(ShellContext *ctx, ASTNode *node) {
 
 int exec_node(ShellContext *ctx, ASTNode *node) {
     if (!node || ctx->exit_requested) return ctx->exit_code;
+    if (ctx->return_requested) return ctx->return_code;
 
     int ret = 0;
 
@@ -557,19 +645,19 @@ int exec_node(ShellContext *ctx, ASTNode *node) {
 
         case NODE_AND:
             ret = exec_node(ctx, node->binary.left);
-            if (ret == 0 && !ctx->exit_requested)
+            if (ret == 0 && !ctx->exit_requested && !ctx->return_requested)
                 ret = exec_node(ctx, node->binary.right);
             break;
 
         case NODE_OR:
             ret = exec_node(ctx, node->binary.left);
-            if (ret != 0 && !ctx->exit_requested)
+            if (ret != 0 && !ctx->exit_requested && !ctx->return_requested)
                 ret = exec_node(ctx, node->binary.right);
             break;
 
         case NODE_SEQ:
             ret = exec_node(ctx, node->binary.left);
-            if (!ctx->exit_requested)
+            if (!ctx->exit_requested && !ctx->return_requested)
                 ret = exec_node(ctx, node->binary.right);
             break;
 

@@ -30,7 +30,30 @@
 
 /* ── Helpers ──────────────────────────────────────────────────────────────── */
 
-static void advance(Parser *p) { p->cur = lex_next(p->lex); }
+/* Promote TOK_WORD to a keyword token when in command/keyword position.
+ * This fixes BUG-005: keywords like "if", "then", "done" are only recognised
+ * where the grammar expects them, not in arbitrary argument positions. */
+static void promote(Parser *p) {
+    if (p->cur.kind != TOK_WORD || !p->cur.text) return;
+    static const struct { const char *word; TokenKind kind; } KW[] = {
+        { "if",       TOK_IF       }, { "then",     TOK_THEN     },
+        { "else",     TOK_ELSE     }, { "elif",     TOK_ELIF     },
+        { "fi",       TOK_FI       }, { "while",    TOK_WHILE    },
+        { "until",    TOK_UNTIL    }, { "do",       TOK_DO       },
+        { "done",     TOK_DONE     }, { "for",      TOK_FOR      },
+        { "in",       TOK_IN       }, { "case",     TOK_CASE     },
+        { "esac",     TOK_ESAC     }, { "function", TOK_FUNCTION },
+        { NULL, 0 }
+    };
+    for (int i = 0; KW[i].word; i++) {
+        if (strcmp(p->cur.text, KW[i].word) == 0) {
+            p->cur.kind = KW[i].kind;
+            return;
+        }
+    }
+}
+
+static void advance(Parser *p) { p->cur = lex_next(p->lex); promote(p); }
 
 static bool at(const Parser *p, TokenKind k) { return p->cur.kind == k; }
 
@@ -431,6 +454,7 @@ void parser_init(Parser *p, Lexer *l, Arena *arena) {
     p->error = 0;
     p->errmsg[0] = '\0';
     p->cur = lex_next(l); /* prime lookahead */
+    promote(p);
 }
 
 ASTNode *parser_parse(Parser *p) {

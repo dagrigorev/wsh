@@ -177,21 +177,6 @@ static Token read_word(Lexer *l, int start_line) {
     char *text = tb_to_arena(&buf, l->arena);
     Token t    = { .kind = TOK_WORD, .text = text, .line = start_line, .fd = -1 };
 
-    /* Keyword detection */
-    static const struct { const char *word; TokenKind kind; } KEYWORDS[] = {
-        { "if",       TOK_IF       }, { "then",     TOK_THEN     },
-        { "else",     TOK_ELSE     }, { "elif",     TOK_ELIF     },
-        { "fi",       TOK_FI       }, { "while",    TOK_WHILE    },
-        { "until",    TOK_UNTIL    }, { "do",       TOK_DO       },
-        { "done",     TOK_DONE     }, { "for",      TOK_FOR      },
-        { "in",       TOK_IN       }, { "case",     TOK_CASE     },
-        { "esac",     TOK_ESAC     }, { "function", TOK_FUNCTION },
-        { NULL, 0 }
-    };
-    for (int i = 0; KEYWORDS[i].word; i++) {
-        if (strcmp(text, KEYWORDS[i].word) == 0) { t.kind = KEYWORDS[i].kind; return t; }
-    }
-
     /* Assignment: valid-identifier '=' value */
     const char *eq = strchr(text, '=');
     if (eq && eq != text) {

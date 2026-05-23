@@ -5,6 +5,9 @@
 #include <windows.h>
 #include "wsh_bool.h"
 
+/* Forward declaration for job_print_all/fg/bg */
+struct IShellIO;
+
 
 #ifdef __cplusplus
 extern "C" {
@@ -51,14 +54,14 @@ Job *job_find(JobTable *jt, int id);
 /* Update status of all jobs (poll via WaitForSingleObject) */
 void job_poll_all(JobTable *jt);
 
-/* Print job table to stdout-equivalent */
-void job_print_all(JobTable *jt);
+/* Print job table via IShellIO */
+void job_print_all(JobTable *jt, struct IShellIO *io);
 
 /* Bring job to foreground: waits for it to finish */
-int  job_fg(JobTable *jt, int id);
+int  job_fg(JobTable *jt, int id, struct IShellIO *io);
 
 /* Resume job in background */
-bool job_bg(JobTable *jt, int id);
+bool job_bg(JobTable *jt, int id, struct IShellIO *io);
 
 /* Kill job */
 bool job_kill(JobTable *jt, int id, int signum);

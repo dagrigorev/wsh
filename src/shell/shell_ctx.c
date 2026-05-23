@@ -202,6 +202,12 @@ int shell_exec_line(ShellContext *ctx, const char *line) {
         ctx->last_status = ret;
     }
 
+    /* Consume any stray return request (return outside function → like exit) */
+    if (ctx->return_requested) {
+        ctx->return_requested = false;
+        ret = ctx->return_code;
+    }
+
     /* Store last command at top-level execution only */
     if (top_level_exec) {
         strncpy(ctx->last_command, line, sizeof(ctx->last_command) - 1);
@@ -282,6 +288,11 @@ int shell_source(ShellContext *ctx, const char *path) {
     }
 
     ctx->call_depth--;
+    /* Consume return request from inside the sourced file */
+    if (ctx->return_requested) {
+        ctx->return_requested = false;
+        ret = ctx->return_code;
+    }
     HeapFree(GetProcessHeap(), 0, buf);
     return ret;
 }

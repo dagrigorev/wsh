@@ -93,8 +93,10 @@ static char *expand_param(ShellContext *ctx, const char *spec) {
         char buf[32]; _snprintf(buf, sizeof(buf), "%d", val ? (int)strlen(val) : 0);
         return str_dup(buf);
     }
-    const char *op = strpbrk(spec, ":-:=:?:+/");
-    if (!op) return str_dup(shell_getenv(ctx, spec) ? shell_getenv(ctx, spec) : "");
+    /* Scan past the variable name to find the operator position. */
+    const char *op = spec;
+    while (isalnum((unsigned char)*op) || *op == '_') op++;
+    if (!*op) return str_dup(shell_getenv(ctx, spec) ? shell_getenv(ctx, spec) : "");
     char name[256] = {0};
     size_t nlen = (size_t)(op - spec); if (nlen > 255) nlen = 255;
     strncpy(name, spec, nlen);
@@ -134,34 +136,28 @@ static char *expand_param(ShellContext *ctx, const char *spec) {
 
 /* ── Command substitution ─────────────────────────────────────────────────── */
 /*
- * The capture buffer and IO object MUST be at file scope and declared BEFORE
- * expand_cmd_subst — MSVC does not allow forward references to statics, and
- * prohibits extern declarations inside function bodies (C4210).
+ * Capture IO adapter that writes into a local SB.  No globals — this is
+ * reentrant and safe for nested $() substitutions.
  */
 
-static SB       s_cap_buf;
-static IShellIO s_cap_io;
+typedef struct { IShellIO base; SB *buf; } CapIO;
 
 static void cap_write(IShellIO *self, const char *buf, int len) {
-    (void)self;
-    for (int i = 0; i < len; i++) sb_push(&s_cap_buf, buf[i]);
+    SB *sb = ((CapIO *)self)->buf;
+    for (int i = 0; i < len; i++) sb_push(sb, buf[i]);
 }
-static int cap_read(IShellIO *self, char *buf, int size) {
+static int cap_read_noop(IShellIO *self, char *buf, int size) {
     (void)self; (void)buf; (void)size; return 0;
 }
 
 static char *expand_cmd_subst(ShellContext *ctx, const char *cmd) {
-    if (!s_cap_io.write) {
-        s_cap_io.write     = cap_write;
-        s_cap_io.read_line = cap_read;
-    }
-    sb_free(&s_cap_buf);
-    memset(&s_cap_buf, 0, sizeof(s_cap_buf));
-    IShellIO *saved_io = ctx->io;
-    ctx->io = &s_cap_io;
+    SB cap = {0};
+    CapIO cio = { { cap_write, cap_read_noop }, &cap };
+    IShellIO *saved = ctx->io;
+    ctx->io = &cio.base;
     shell_exec_line(ctx, cmd);
-    ctx->io = saved_io;
-    char *result = sb_take(&s_cap_buf);
+    ctx->io = saved;
+    char *result = sb_take(&cap);
     if (result) {
         char *end = result + strlen(result);
         while (end > result && (end[-1] == '\n' || end[-1] == '\r')) end--;
@@ -333,7 +329,6 @@ char *expand_string(ShellContext *ctx, const char *s) {
             if (*p == '(') {
                 p++; const char *start = p; int depth = 2;
                 while (*p && depth > 0) { if (*p=='(')depth++; if (*p==')')depth--; if(depth>0)p++; else p++; }
-                if (*p == ')') p++;
                 char *expr = str_ndup(start, (size_t)(p - start - 2));
                 char *xexpr = expand_string(ctx, expr); str_free(expr);
                 long val = expand_arith(ctx, xexpr); str_free(xexpr);

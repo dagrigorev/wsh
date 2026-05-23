@@ -47,19 +47,20 @@ TEST(Lexer, Operators) {
 }
 
 TEST(Lexer, Keywords) {
+    /* Keywords are now promoted by the parser, not the lexer (BUG-005). */
     Arena *a = arena_create(4096);
     Lexer l; lex_init(&l, "if then else elif fi while do done for in", a);
 
-    ASSERT_EQ(next_tok(&l).kind, TOK_IF);
-    ASSERT_EQ(next_tok(&l).kind, TOK_THEN);
-    ASSERT_EQ(next_tok(&l).kind, TOK_ELSE);
-    ASSERT_EQ(next_tok(&l).kind, TOK_ELIF);
-    ASSERT_EQ(next_tok(&l).kind, TOK_FI);
-    ASSERT_EQ(next_tok(&l).kind, TOK_WHILE);
-    ASSERT_EQ(next_tok(&l).kind, TOK_DO);
-    ASSERT_EQ(next_tok(&l).kind, TOK_DONE);
-    ASSERT_EQ(next_tok(&l).kind, TOK_FOR);
-    ASSERT_EQ(next_tok(&l).kind, TOK_IN);
+    ASSERT_EQ(next_tok(&l).kind, TOK_WORD);
+    ASSERT_EQ(next_tok(&l).kind, TOK_WORD);
+    ASSERT_EQ(next_tok(&l).kind, TOK_WORD);
+    ASSERT_EQ(next_tok(&l).kind, TOK_WORD);
+    ASSERT_EQ(next_tok(&l).kind, TOK_WORD);
+    ASSERT_EQ(next_tok(&l).kind, TOK_WORD);
+    ASSERT_EQ(next_tok(&l).kind, TOK_WORD);
+    ASSERT_EQ(next_tok(&l).kind, TOK_WORD);
+    ASSERT_EQ(next_tok(&l).kind, TOK_WORD);
+    ASSERT_EQ(next_tok(&l).kind, TOK_WORD);
 
     arena_destroy(a);
 }

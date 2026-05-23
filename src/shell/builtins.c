@@ -216,15 +216,32 @@ int builtin_echo(int argc, char **argv, ShellContext *ctx) {
 
 int builtin_printf_cmd(int argc, char **argv, ShellContext *ctx) {
     if (argc < 2) { outln(ctx, "printf: missing format"); return 1; }
-    char buf[4096]; const char *fmt = argv[1];
-    switch (argc-2) {
-        case 0: _snprintf(buf,sizeof(buf),fmt); break;
-        case 1: _snprintf(buf,sizeof(buf),fmt,argv[2]); break;
-        case 2: _snprintf(buf,sizeof(buf),fmt,argv[2],argv[3]); break;
-        case 3: _snprintf(buf,sizeof(buf),fmt,argv[2],argv[3],argv[4]); break;
-        default:_snprintf(buf,sizeof(buf),fmt,argv[2],argv[3],argv[4],argv[5]); break;
+    const char *fmt = argv[1];
+    int nargs = argc - 2;
+
+    /* Count format specifiers (excluding %%) to enable format-string recycling */
+    int nspec = 0;
+    for (const char *p = fmt; *p; p++) {
+        if (*p == '%' && p[1] && p[1] != '%') nspec++;
     }
-    buf[sizeof(buf)-1]='\0'; out(ctx,buf); return 0;
+    if (nspec == 0 && nargs > 0) nspec = 1;
+
+    int arg_off = 2; /* first value argument index */
+    while (arg_off < argc) {
+        char buf[4096];
+        int remaining = argc - arg_off;
+        switch (remaining) {
+            case 0: _snprintf(buf, sizeof(buf), "%s", fmt); break;
+            case 1: _snprintf(buf, sizeof(buf), fmt, argv[arg_off]); break;
+            case 2: _snprintf(buf, sizeof(buf), fmt, argv[arg_off], argv[arg_off+1]); break;
+            case 3: _snprintf(buf, sizeof(buf), fmt, argv[arg_off], argv[arg_off+1], argv[arg_off+2]); break;
+            default: _snprintf(buf, sizeof(buf), fmt, argv[arg_off], argv[arg_off+1], argv[arg_off+2], argv[arg_off+3]); break;
+        }
+        buf[sizeof(buf)-1] = '\0';
+        out(ctx, buf);
+        arg_off += nspec;
+    }
+    return 0;
 }
 
 /* ── print (zsh-compatible practical subset) ───────────────────────────────── */
@@ -332,7 +349,8 @@ int builtin_exit(int argc, char **argv, ShellContext *ctx) {
     ctx->exit_requested=true; ctx->exit_code=code; return code;
 }
 int builtin_return_cmd(int argc, char **argv, ShellContext *ctx) {
-    int code=argc>1?atoi(argv[1]):ctx->last_status; ctx->last_status=code; return code;
+    int code=argc>1?atoi(argv[1]):ctx->last_status;
+    ctx->return_requested=true; ctx->return_code=code; ctx->last_status=code; return code;
 }
 
 /* ── true / false ────────────────────────────────────────────────────────────── */
@@ -342,12 +360,28 @@ int builtin_false_cmd(int argc, char **argv, ShellContext *ctx) { (void)argc;(vo
 
 /* ── test / [ ────────────────────────────────────────────────────────────────── */
 
-int builtin_test(int argc, char **argv, ShellContext *ctx) {
-    (void)ctx;
-    int n=argc; if (n>1&&!strcmp(argv[n-1],"]")) n--;
-    if (n<2) return 1;
-    if (n==3&&argv[1][0]=='-'&&argv[1][2]=='\0') {
-        const char *f=argv[2]; switch(argv[1][1]) {
+/* Forward declaration for recursive test evaluator */
+static int test_eval(char **argv, int n, int *pos, ShellContext *ctx);
+
+/* Evaluate a primary test expression: unary flag, binary comparison, or string */
+static int test_primary(char **argv, int n, int *pos, ShellContext *ctx) {
+    if (*pos >= n) return 1;
+    /* Handle '(' grouping */
+    if (!strcmp(argv[*pos], "(")) {
+        (*pos)++;
+        int ret = test_eval(argv, n, pos, ctx);
+        if (*pos < n && !strcmp(argv[*pos], ")")) (*pos)++;
+        return ret;
+    }
+    /* Handle '!' negation */
+    if (!strcmp(argv[*pos], "!")) {
+        (*pos)++;
+        return !test_primary(argv, n, pos, ctx);
+    }
+    /* Unary operator: -flag arg */
+    if (*pos + 2 <= n && argv[*pos][0] == '-' && argv[*pos][2] == '\0') {
+        const char *f = argv[*pos + 1]; *pos += 2;
+        switch (argv[*pos - 2][1]) {
             case 'z': return strlen(f)==0?0:1;
             case 'n': return strlen(f)!=0?0:1;
             case 'f': return (path_exists(f)&&!path_is_dir(f))?0:1;
@@ -360,36 +394,93 @@ int builtin_test(int argc, char **argv, ShellContext *ctx) {
             default: return 1;
         }
     }
-    if (n==4) {
-        const char *a=argv[1],*op=argv[2],*b=argv[3];
-        if (!strcmp(op,"=")||!strcmp(op,"==")) return strcmp(a,b)==0?0:1;
-        if (!strcmp(op,"!="))                  return strcmp(a,b)!=0?0:1;
-        if (!strcmp(op,"<"))                   return strcmp(a,b)<0?0:1;
-        if (!strcmp(op,">"))                   return strcmp(a,b)>0?0:1;
-        if (!strcmp(op,"-eq")) return atoi(a)==atoi(b)?0:1;
-        if (!strcmp(op,"-ne")) return atoi(a)!=atoi(b)?0:1;
-        if (!strcmp(op,"-lt")) return atoi(a)< atoi(b)?0:1;
-        if (!strcmp(op,"-le")) return atoi(a)<=atoi(b)?0:1;
-        if (!strcmp(op,"-gt")) return atoi(a)> atoi(b)?0:1;
-        if (!strcmp(op,"-ge")) return atoi(a)>=atoi(b)?0:1;
+    /* Binary comparison: a op b */
+    if (*pos + 3 <= n) {
+        const char *a = argv[*pos], *op = argv[*pos + 1], *b = argv[*pos + 2];
+        if (!strcmp(op,"=")||!strcmp(op,"==")) { *pos+=3; return strcmp(a,b)==0?0:1; }
+        if (!strcmp(op,"!="))                  { *pos+=3; return strcmp(a,b)!=0?0:1; }
+        if (!strcmp(op,"<"))                   { *pos+=3; return strcmp(a,b)<0?0:1; }
+        if (!strcmp(op,">"))                   { *pos+=3; return strcmp(a,b)>0?0:1; }
+        if (!strcmp(op,"-eq")) { *pos+=3; return atoi(a)==atoi(b)?0:1; }
+        if (!strcmp(op,"-ne")) { *pos+=3; return atoi(a)!=atoi(b)?0:1; }
+        if (!strcmp(op,"-lt")) { *pos+=3; return atoi(a)< atoi(b)?0:1; }
+        if (!strcmp(op,"-le")) { *pos+=3; return atoi(a)<=atoi(b)?0:1; }
+        if (!strcmp(op,"-gt")) { *pos+=3; return atoi(a)> atoi(b)?0:1; }
+        if (!strcmp(op,"-ge")) { *pos+=3; return atoi(a)>=atoi(b)?0:1; }
     }
-    if (n==2) return argv[1][0]!='\0'?0:1;
-    return 1;
+    /* Simple string test */
+    const char *s = argv[*pos]; (*pos)++;
+    return s[0]!='\0'?0:1;
+}
+
+/* Recursive test expression: handles -a (AND) with higher precedence than -o (OR) */
+static int test_eval(char **argv, int n, int *pos, ShellContext *ctx) {
+    /* Term: primary ( -a primary )* */
+    int left = test_primary(argv, n, pos, ctx);
+    while (*pos < n && !strcmp(argv[*pos], "-a")) { (*pos)++; int r = test_primary(argv, n, pos, ctx); left = (left==0||r==0)?1:0; }
+    return left;
+}
+
+int builtin_test(int argc, char **argv, ShellContext *ctx) {
+    (void)ctx;
+    int n=argc; if (n>1&&!strcmp(argv[n-1],"]")) n--;
+    if (n<2) return 1;
+    int pos = 1;
+    /* Top-level uses -o (OR) */
+    int left = test_eval(argv, n, &pos, ctx);
+    while (pos < n && !strcmp(argv[pos], "-o")) { pos++; int r = test_eval(argv, n, &pos, ctx); left = (left==0&&r==0)?1:0; }
+    return left;
 }
 
 /* ── read ────────────────────────────────────────────────────────────────────── */
 
 int builtin_read(int argc, char **argv, ShellContext *ctx) {
-    int raw=0; const char *prompt=NULL, *varname="REPLY";
+    int raw=0; const char *prompt=NULL;
+    const char *varnames[64]; int nvar = 0;
     for (int i=1; i<argc; i++) {
         if (!strcmp(argv[i],"-r")) raw=1;
         else if (!strcmp(argv[i],"-p")&&i+1<argc) prompt=argv[++i];
-        else varname=argv[i];
+        else if (nvar < 63) varnames[nvar++] = argv[i];
     }
+    if (nvar == 0) varnames[nvar++] = "REPLY";
     if (prompt) out(ctx,prompt);
     char buf[4096]={0}; (void)raw;
-    ctx->io->read_line(ctx->io, buf, (int)sizeof(buf)-1);
-    str_trim(buf); shell_setenv(ctx,varname,buf,false); return 0;
+    int nread = ctx->io->read_line(ctx->io, buf, (int)sizeof(buf)-1);
+    if (nread <= 0) return 1;
+    buf[nread] = '\0';
+    str_trim(buf);
+    /* Split by IFS and assign fields */
+    const char *ifs = shell_getenv(ctx, "IFS");
+    if (!ifs) ifs = " \t\n";
+    char *fields[64]; int nfield = 0;
+    char *p = buf;
+    while (*p && nfield < 63) {
+        while (*p && strchr(ifs, *p)) p++;
+        if (!*p) break;
+        fields[nfield++] = p;
+        while (*p && !strchr(ifs, *p)) p++;
+        if (*p) { *p = '\0'; p++; }
+    }
+    for (int i = 0; i < nvar; i++) {
+        if (i < nvar - 1 && i < nfield)
+            shell_setenv(ctx, varnames[i], fields[i], false);
+        else if (i == nvar - 1) {
+            /* Last variable gets the remainder (re-join remaining fields) */
+            if (i < nfield) {
+                char *rem = fields[i];
+                for (int j = i + 1; j < nfield; j++) {
+                    size_t rlen = strlen(rem);
+                    char *joined = (char *)HeapAlloc(GetProcessHeap(), 0, rlen + strlen(fields[j]) + 2);
+                    if (joined) { memcpy(joined, rem, rlen); joined[rlen] = ' '; memcpy(joined+rlen+1, fields[j], strlen(fields[j])+1); }
+                    shell_setenv(ctx, varnames[i], joined, false);
+                    HeapFree(GetProcessHeap(), 0, joined);
+                }
+            } else {
+                shell_setenv(ctx, varnames[i], "", false);
+            }
+        }
+    }
+    return 0;
 }
 
 /* ── set ─────────────────────────────────────────────────────────────────────── */
@@ -460,18 +551,18 @@ int builtin_unsetopt(int argc, char **argv, ShellContext *ctx) {
 /* ── jobs / fg / bg ──────────────────────────────────────────────────────────── */
 
 int builtin_jobs(int argc, char **argv, ShellContext *ctx) {
-    (void)argc;(void)argv; job_poll_all(&ctx->jobs); job_print_all(&ctx->jobs); return 0;
+    (void)argc;(void)argv; job_poll_all(&ctx->jobs); job_print_all(&ctx->jobs, ctx->io); return 0;
 }
 int builtin_fg(int argc, char **argv, ShellContext *ctx) {
     int id=0;
     if (argc>1) id=atoi(argv[1][0]=='%'?argv[1]+1:argv[1]);
     if (!id) for (int i=JOBS_MAX-1;i>=0;i--) if (ctx->jobs.jobs[i].id){id=ctx->jobs.jobs[i].id;break;}
     if (!id) { outln(ctx,"fg: no current job"); return 1; }
-    return job_fg(&ctx->jobs,id);
+    return job_fg(&ctx->jobs,id,ctx->io);
 }
 int builtin_bg(int argc, char **argv, ShellContext *ctx) {
     int id=argc>1?atoi(argv[1][0]=='%'?argv[1]+1:argv[1]):1;
-    return job_bg(&ctx->jobs,id)?0:1;
+    return job_bg(&ctx->jobs,id,ctx->io)?0:1;
 }
 
 /* ── kill ────────────────────────────────────────────────────────────────────── */

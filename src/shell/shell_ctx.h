@@ -130,14 +130,16 @@ typedef struct ShellContext {
     /* Trap handlers: NULL = default, "" = ignore, else command string */
     char         *traps[TRAP_COUNT];
 
-    /* Exit request: set by 'exit' built-in */
+    /* Exit / return requests */
+    bool          exit_requested;
+    int           exit_code;
+    bool          return_requested;  /* set by 'return' builtin */
+    int           return_code;
+
     /* Win32 I/O handles for child processes (managed by executor) */
     HANDLE       h_stdin;
     HANDLE       h_stdout;
     HANDLE       h_stderr;
-
-    bool          exit_requested;
-    int           exit_code;
 
     /* Depth counters / execution guards.
      * call_depth tracks function/source nesting.

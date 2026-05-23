@@ -3,6 +3,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "jobs.h"
+#include "shell_ctx.h"
 #include "../core/str_util.h"
 #include "../core/path_util.h"
 #include "../core/log.h"
@@ -77,27 +78,28 @@ void job_poll_all(JobTable *jt) {
     }
 }
 
-void job_print_all(JobTable *jt) {
+void job_print_all(JobTable *jt, struct IShellIO *io) {
     for (int i = 0; i < JOBS_MAX; i++) {
         Job *j = &jt->jobs[i];
         if (!j->id) continue;
         const char *status_str = "Running";
         if (j->status == JOB_STOPPED) status_str = "Stopped";
         if (j->status == JOB_DONE)    status_str = "Done";
-        printf("[%d] %s\t%s\n", j->id, status_str, j->cmdline ? j->cmdline : "");
+        char line[4096];
+        _snprintf(line, sizeof(line), "[%d] %s\t%s", j->id, status_str, j->cmdline ? j->cmdline : "");
+        io_writeln(io, line);
     }
 }
 
-int job_fg(JobTable *jt, int id) {
+int job_fg(JobTable *jt, int id, struct IShellIO *io) {
     Job *j = job_find(jt, id);
     if (!j || !j->hprocess) return -1;
     j->is_fg = true;
     jt->fg_job_id = id;
     if (j->status == JOB_STOPPED) {
-        /* Resume — no true SIGCONT on Windows, but we can resume threads */
         j->status = JOB_RUNNING;
     }
-    printf("%s\n", j->cmdline ? j->cmdline : "");
+    if (j->cmdline) io_writeln(io, j->cmdline);
     DWORD code = 0;
     WaitForSingleObject(j->hprocess, INFINITE);
     GetExitCodeProcess(j->hprocess, &code);
@@ -108,12 +110,14 @@ int job_fg(JobTable *jt, int id) {
     return j->exit_code;
 }
 
-bool job_bg(JobTable *jt, int id) {
+bool job_bg(JobTable *jt, int id, struct IShellIO *io) {
     Job *j = job_find(jt, id);
     if (!j) return false;
     j->is_fg  = false;
     j->status = JOB_RUNNING;
-    printf("[%d] %s &\n", j->id, j->cmdline ? j->cmdline : "");
+    char line[256];
+    _snprintf(line, sizeof(line), "[%d] %s &", j->id, j->cmdline ? j->cmdline : "");
+    io_writeln(io, line);
     return true;
 }
 

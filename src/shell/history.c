@@ -77,6 +77,7 @@ void history_push(History *h, const char *cmd) {
     h->entries[h->head] = dup;
     h->head = (h->head + 1) % h->capacity;
     if (h->count < h->capacity) h->count++;
+    h->total_commands++;
 
     history_reset_cursor(h);
 
@@ -157,11 +158,10 @@ bool history_expand(History *h, const char *input, char *buf, int buf_size) {
         strncpy(buf, sp ? sp + 1 : "", buf_size - 1);
         return true;
     }
-    /* !n — nth history entry */
+    /* !n — nth history entry (absolute command number, 1 = oldest) */
     if (*p >= '0' && *p <= '9') {
         int idx = atoi(p);
-        /* Map to 0-based offset from most recent */
-        int offset = h->count - idx;
+        int offset = h->total_commands - idx;
         const char *e = entry_at(h, offset);
         if (!e) return false;
         strncpy(buf, e, buf_size - 1);
