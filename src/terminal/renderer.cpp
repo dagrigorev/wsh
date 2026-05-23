@@ -213,6 +213,21 @@ void renderer_paint_region(Renderer *r, const ScreenBuffer *sb, const RECT *rect
                 r->bg_brush->SetColor(hc);
                 r->render_target->FillRectangle(cr, r->bg_brush);
             }
+            bool in_sel = false;
+            if (r->sel_valid) {
+                int sr = r->sel_start_row, sc = r->sel_start_col;
+                int er = r->sel_end_row,   ec = r->sel_end_col;
+                if (sr > er || (sr == er && sc > ec)) { int tr=sr,tc=sc; sr=er;sc=ec; er=tr;ec=tc; }
+                if (row > sr && row < er) in_sel = true;
+                else if (row == sr && row == er) in_sel = (col >= sc && col <= ec);
+                else if (row == sr) in_sel = (col >= sc);
+                else if (row == er) in_sel = (col <= ec);
+            }
+            if (in_sel) {
+                D2D1_COLOR_F selc = to_d2d(r->selection_color);
+                r->bg_brush->SetColor(selc);
+                r->render_target->FillRectangle(cr, r->bg_brush);
+            }
             bool cursor_here = cursor_shown && active && r->cursor_blink_state &&
                                col == cursor_x && row == cursor_y && sb->cursor_visible;
             if (cursor_here && r->cursor_style == CURSOR_BLOCK) {

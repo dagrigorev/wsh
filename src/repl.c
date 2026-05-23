@@ -556,6 +556,23 @@ bool repl_handle_input(Repl *r, const char *bytes, int len) {
         return true;
     }
 
+    /* Paste of multi-character ASCII (Ctrl+Shift+V, right-click) */
+    for (int i = 0; i < len; ) {
+        unsigned char c = (unsigned char)bytes[i];
+        if (c == '\r' || c == '\n') {
+            i++;
+            if (c == '\r' && i < len && (unsigned char)bytes[i] == '\n') i++;
+            bool launched = execute_line(r);
+            if (r->ctx->exit_requested) return false;
+            if (!launched) repl_show_prompt(r);
+        } else if (c >= 0x20) {
+            int seg = i;
+            while (i < len && (unsigned char)bytes[i] >= 0x20 && bytes[i] != '\r' && bytes[i] != '\n') i++;
+            if (i > seg) insert_bytes(r, bytes + seg, i - seg);
+        } else {
+            i++;
+        }
+    }
     return true;
 }
 

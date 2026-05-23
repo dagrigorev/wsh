@@ -1121,8 +1121,46 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             g_suppress_char = input_suppress_char(wParam, lParam);
 
             switch (ev.action) {
-                case INPUT_COPY:
+                case INPUT_COPY: {
+                    TerminalPane *cp = active_pane();
+                    if (cp && g_renderer.sel_valid && OpenClipboard(hwnd)) {
+                        int sr = g_renderer.sel_start_row, sc = g_renderer.sel_start_col;
+                        int er = g_renderer.sel_end_row,   ec = g_renderer.sel_end_col;
+                        if (sr > er || (sr == er && sc > ec)) { int tr=sr,tc=sc; sr=er;sc=ec; er=tr;ec=tc; }
+                        char text[65536]; int ti = 0;
+                        EnterCriticalSection(&g_lock);
+                        for (int r = sr; r <= er && ti < 65520; r++) {
+                            int c0 = (r == sr) ? sc : 0;
+                            int c1 = (r == er) ? ec : cp->screen.cols - 1;
+                            int last_ns = c0 - 1;
+                            for (int c = c0; c <= c1; c++) {
+                                const ScreenCell *cell = screen_visible_cell(&cp->screen, r, c);
+                                if (cell && !cell->wide_cont && cell->ch > ' ') last_ns = c;
+                            }
+                            for (int c = c0; c <= last_ns && ti < 65512; c++) {
+                                const ScreenCell *cell = screen_visible_cell(&cp->screen, r, c);
+                                if (cell && cell->wide_cont) continue;
+                                uint32_t ch = cell ? cell->ch : ' '; if (!ch) ch = ' ';
+                                char enc[4]; int n = utf8_encode(ch, enc);
+                                if (ti + n >= 65512) break;
+                                memcpy(text + ti, enc, (size_t)n); ti += n;
+                            }
+                            if (r < er) { text[ti++] = '\r'; text[ti++] = '\n'; }
+                        }
+                        text[ti] = '\0';
+                        LeaveCriticalSection(&g_lock);
+                        int wchars = 0; wchar_t *wtext = wsh_utf8_to_utf16_clipboard(text, ti, &wchars);
+                        if (wtext) {
+                            HGLOBAL hg = GlobalAlloc(GMEM_MOVEABLE, ((size_t)wchars + 1) * sizeof(wchar_t));
+                            if (hg) { memcpy(GlobalLock(hg), wtext, ((size_t)wchars + 1) * sizeof(wchar_t)); GlobalUnlock(hg); EmptyClipboard(); SetClipboardData(CF_UNICODETEXT, hg); }
+                            str_free(wtext);
+                        }
+                        CloseClipboard();
+                        g_renderer.sel_valid = false;
+                        InvalidateRect(hwnd, NULL, FALSE);
+                    }
                     break;
+                }
                 case INPUT_PASTE:
                     if (OpenClipboard(hwnd)) {
                         HANDLE hd = GetClipboardData(CF_UNICODETEXT);
