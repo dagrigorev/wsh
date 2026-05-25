@@ -433,12 +433,15 @@ extern "C" bool wsh_ai_commentary_test(ShellContext *ctx, const char *command) {
     auto *s = static_cast<WshAiState *>(ctx->ai_state);
     if (!ctx->ai_enabled || !s->commentary_enabled) return false;
 
-    /* Try fallback commentary synchronously for test */
+    /* Generate fallback commentary synchronously for test purposes */
     wsh::FallbackCommentaryProvider fallback;
     std::string result = fallback.Generate(command);
 
     if (!result.empty()) {
-        s->commentary_cache = result;
+        /* Inject directly into the provider cache so wsh_ai_try_get_commentary()
+         * finds it on the same call — previously stored only in commentary_cache
+         * which wsh_ai_try_get_commentary() never reads. */
+        s->commentary_provider.InjectResult(command, result);
         return true;
     }
     return false;

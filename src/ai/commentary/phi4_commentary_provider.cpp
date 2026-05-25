@@ -23,7 +23,11 @@ static std::string trim(const std::string& s) {
 Phi4CommentaryProvider::Phi4CommentaryProvider() {}
 
 Phi4CommentaryProvider::~Phi4CommentaryProvider() {
-    worker_stop_.store(true);
+    {
+        std::lock_guard<std::mutex> lock(queue_mutex_);
+        worker_stop_.store(true);
+    }
+    queue_cv_.notify_all();
     if (worker_.joinable()) {
         worker_.join();
     }
@@ -74,10 +78,12 @@ void Phi4CommentaryProvider::QueueCommentary(const std::string& command) {
         }
         pending_requests_.push(req);
     }
+    /* Wake the worker immediately instead of waiting for the next poll tick */
+    queue_cv_.notify_one();
 }
 
 std::string Phi4CommentaryProvider::TryGetCommentary(const std::string& forCommand) {
-    /* Check if Phi-4 has a result ready */
+    /* Check if Phi-4/fallback has a result ready */
     std::lock_guard<std::mutex> lock(result_mutex_);
     if (!latest_commentary_.empty() && latest_commentary_command_ == forCommand) {
         std::string result = latest_commentary_;
@@ -86,6 +92,12 @@ std::string Phi4CommentaryProvider::TryGetCommentary(const std::string& forComma
         return result;
     }
     return "";
+}
+
+void Phi4CommentaryProvider::InjectResult(const std::string& command, const std::string& text) {
+    std::lock_guard<std::mutex> lock(result_mutex_);
+    latest_commentary_ = text;
+    latest_commentary_command_ = command;
 }
 
 bool Phi4CommentaryProvider::IsAvailable() const {
@@ -140,12 +152,21 @@ bool Phi4CommentaryProvider::Reload() {
 }
 
 void Phi4CommentaryProvider::WorkerThread() {
-    while (!worker_stop_.load()) {
+    while (true) {
         CommentaryRequest req;
         bool has_work = false;
 
         {
-            std::lock_guard<std::mutex> lock(queue_mutex_);
+            std::unique_lock<std::mutex> lock(queue_mutex_);
+            /* Wait until there's work or we're asked to stop.
+             * condition_variable replaces the old Sleep(50) polling loop,
+             * so commentary is generated the moment a command is queued. */
+            queue_cv_.wait(lock, [this]() {
+                return !pending_requests_.empty() || worker_stop_.load();
+            });
+
+            if (worker_stop_.load()) break;
+
             if (!pending_requests_.empty()) {
                 req = pending_requests_.front();
                 pending_requests_.pop();
@@ -186,9 +207,6 @@ void Phi4CommentaryProvider::WorkerThread() {
                     latest_commentary_command_ = req.command;
                 }
             }
-        } else {
-            /* No work — sleep a bit */
-            Sleep(50);
         }
     }
 

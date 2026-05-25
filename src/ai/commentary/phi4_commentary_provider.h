@@ -9,6 +9,7 @@
 #include <string>
 #include <memory>
 #include <mutex>
+#include <condition_variable>
 #include <atomic>
 #include <thread>
 #include <queue>
@@ -39,6 +40,9 @@ public:
     /* Get the latest ready commentary (non-blocking, may return empty).
      * Pass the command to check staleness. */
     std::string TryGetCommentary(const std::string& forCommand);
+
+    /* Inject a pre-generated result directly (used by test path). */
+    void InjectResult(const std::string& command, const std::string& text);
 
     /* Check if commentary is available. */
     bool IsAvailable() const;
@@ -73,8 +77,9 @@ private:
     bool initialized_ = false;
     bool phi4_available_ = false;
 
-    /* Async queue state */
+    /* Async queue — protected by queue_mutex_ + woken via queue_cv_ */
     std::mutex queue_mutex_;
+    std::condition_variable queue_cv_;
     std::mutex result_mutex_;
     std::queue<CommentaryRequest> pending_requests_;
     std::string latest_commentary_;

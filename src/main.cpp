@@ -1485,10 +1485,15 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                                     g_renderer.reasoning_line1[255] = L'\0';
                                     str_free(wreason);
                                 }
+                                /* Only show the overlay when there is actual text to display.
+                                 * Previously this was set unconditionally, causing an empty
+                                 * dimmed row to appear below the cursor on every keystroke
+                                 * before the reasoning model had produced a result. */
+                                g_renderer.reasoning_active = true;
                             } else {
                                 g_renderer.reasoning_line1[0] = L'\0';
+                                g_renderer.reasoning_active = false;
                             }
-                            g_renderer.reasoning_active = true;
                         } else {
                             g_renderer.reasoning_active = false;
                         }
