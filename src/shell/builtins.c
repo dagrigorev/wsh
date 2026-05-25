@@ -842,21 +842,27 @@ int builtin_history(int argc, char **argv, ShellContext *ctx) {
     (void)argv;
 
     int count = history_count(&ctx->history);
-    int start = 0;
+    int display_count = count;
+    int start_offset = 0;
 
     if (argc >= 2) {
         int n = atoi(argv[1]);
         if (n > 0 && n < count) {
-            start = count - n;
+            start_offset = count - n;
+            display_count = n;
         }
     }
 
-    for (int i = start; i < count; ++i) {
-        const char *item = history_at(&ctx->history, i);
+    /* history_at(0) = most recent, history_at(count-1) = oldest.
+       We print oldest first with smallest number. */
+    for (int i = 0; i < display_count; ++i) {
+        int idx = count - 1 - start_offset - i;
+        if (idx < 0 || idx >= count) continue;
+        const char *item = history_at(&ctx->history, idx);
         if (!item) continue;
 
         char line[4096];
-        _snprintf(line, sizeof(line), "%5d  %s", i + 1, item);
+        _snprintf(line, sizeof(line), "%5d  %s", start_offset + i + 1, item);
         outln(ctx, line);
     }
 

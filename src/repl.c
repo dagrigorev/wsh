@@ -141,7 +141,7 @@ void repl_show_prompt(Repl *r) {
         strncpy(r->prompt, prompt, sizeof(r->prompt) - 1);
         r->prompt[sizeof(r->prompt) - 1] = '\0';
         r->prompt_len = (int)strlen(r->prompt);
-        r->prompt_cols = wsh_utf8_display_width_n(r->prompt, r->prompt_len);
+        r->prompt_cols = wsh_utf8_display_width_skip_ansi(r->prompt, r->prompt_len);
         emit(r, prompt);
     } else {
         r->prompt[0] = '\0';
@@ -175,7 +175,7 @@ void repl_redraw_line(Repl *r) {
     memcpy(seq + n, r->line, (size_t)r->len); n += r->len;
     seq[n++] = '\x1B'; seq[n++] = '['; seq[n++] = 'K'; /* erase EOL */
 
-    int move_left = wsh_utf8_display_width_n(r->line + r->cursor, r->len - r->cursor);
+    int move_left = wsh_utf8_display_width_skip_ansi(r->line + r->cursor, r->len - r->cursor);
     if (move_left > 0) {
         char mv[24];
         int ml = _snprintf(mv, sizeof(mv), "\x1B[%dD", move_left);
@@ -360,10 +360,17 @@ static bool execute_line(Repl *r) {
     return launched;
 }
 
+/* ── Ctrl+R incremental history search handler (defined below) ────────────── */
+static bool handle_hist_search(Repl *r, const char *bytes, int len);
+
 /* ── Main input handler ───────────────────────────────────────────────────── */
 
 bool repl_handle_input(Repl *r, const char *bytes, int len) {
     if (!bytes || len == 0) return true;
+
+    if (r->hist_search) {
+        return handle_hist_search(r, bytes, len);
+    }
 
     if (r->executing) {
         if (len == 1 && bytes[0] == 0x03) {
@@ -411,11 +418,16 @@ bool repl_handle_input(Repl *r, const char *bytes, int len) {
                 return true;
 
             /* Ctrl+R — reverse history search */
-            case 0x12:
+            case 0x12: {
+                strncpy(r->hist_save, r->line, REPL_LINE_MAX - 1);
+                r->hist_save[REPL_LINE_MAX - 1] = '\0';
                 r->hist_search = true;
                 r->hist_pat[0] = '\0';
+                r->line[0] = '\0'; r->len = 0; r->cursor = 0;
+                history_reset_cursor(&r->ctx->history);
                 emit(r, "\r\n(reverse-i-search)`': ");
                 return true;
+            }
 
             /* Enter */
             case '\r': case '\n': {
@@ -580,6 +592,111 @@ bool repl_handle_input(Repl *r, const char *bytes, int len) {
             i++;
         }
     }
+    return true;
+}
+
+/* ── Ctrl+R incremental history search handler ──────────────────────────────── */
+
+static void hist_search_update_display(Repl *r) {
+    char seq[REPL_LINE_MAX + 128];
+    int n = 0;
+    seq[n++] = '\r';
+
+    const char *pat = r->hist_pat;
+    const char *mode = pat[0] ? "reverse-i-search" : "reverse-i-search";
+    bool failing = pat[0] && !r->line[0];
+
+    n += _snprintf(seq + n, sizeof(seq) - n, "(%s)`%s': ", failing ? "failing-reverse-i-search" : mode, pat);
+    memcpy(seq + n, r->line, (size_t)r->len); n += r->len;
+    seq[n++] = '\x1B'; seq[n++] = '['; seq[n++] = 'K';
+    if (r->cursor < r->len) {
+        int move_left = wsh_utf8_display_width_n(r->line + r->cursor, r->len - r->cursor);
+        if (move_left > 0) n += _snprintf(seq + n, sizeof(seq) - n, "\x1B[%dD", move_left);
+    }
+    r->ctx->io->write(r->ctx->io, seq, n);
+}
+
+static void hist_search_update(Repl *r, bool next_match) {
+    if (!r->hist_pat[0]) {
+        r->line[0] = '\0'; r->len = 0; r->cursor = 0;
+    } else {
+        if (!next_match) r->ctx->history.search_idx = 0;
+        const char *match = history_search_prev(&r->ctx->history, r->hist_pat);
+        if (match) {
+            strncpy(r->line, match, REPL_LINE_MAX - 1);
+            r->line[REPL_LINE_MAX - 1] = '\0';
+        } else {
+            r->line[0] = '\0';
+        }
+        r->len = (int)strlen(r->line);
+        r->cursor = r->len;
+    }
+    hist_search_update_display(r);
+}
+
+static bool handle_hist_search(Repl *r, const char *bytes, int len) {
+    if (len == 1) {
+        unsigned char c = (unsigned char)bytes[0];
+
+        /* Escape or Ctrl+G/Ctrl+C — cancel */
+        if (c == 0x1B || c == 0x07 || c == 0x03) {
+            r->hist_search = false;
+            strncpy(r->line, r->hist_save, REPL_LINE_MAX - 1);
+            r->line[REPL_LINE_MAX - 1] = '\0';
+            r->len = (int)strlen(r->line);
+            r->cursor = r->len;
+            history_reset_cursor(&r->ctx->history);
+            repl_redraw_line(r);
+            return true;
+        }
+
+        /* Enter — accept match */
+        if (c == '\r' || c == '\n') {
+            r->hist_search = false;
+            history_reset_cursor(&r->ctx->history);
+            r->cursor = r->len;
+            bool launched = execute_line(r);
+            if (r->ctx->exit_requested) return false;
+            if (!launched) repl_show_prompt(r);
+            return true;
+        }
+
+        /* Backspace — remove last char from pattern */
+        if (c == 0x7F || c == '\b') {
+            int pat_len = (int)strlen(r->hist_pat);
+            if (pat_len > 0) {
+                r->hist_pat[pat_len - 1] = '\0';
+                hist_search_update(r, false);
+            }
+            return true;
+        }
+
+        /* Ctrl+R again — next older match */
+        if (c == 0x12) {
+            hist_search_update(r, true);
+            return true;
+        }
+
+        /* Ctrl+L — clear screen (don't cancel search) */
+        if (c == 0x0C) {
+            emit(r, "\x1B[2J\x1B[H");
+            hist_search_update_display(r);
+            return true;
+        }
+    }
+
+    /* Printable characters — append to pattern and search */
+    if (len == 1 && bytes[0] >= 0x20 && (unsigned char)bytes[0] < 0x80) {
+        int pat_len = (int)strlen(r->hist_pat);
+        if (pat_len < (int)sizeof(r->hist_pat) - 1) {
+            r->hist_pat[pat_len] = bytes[0];
+            r->hist_pat[pat_len + 1] = '\0';
+            hist_search_update(r, false);
+        }
+        return true;
+    }
+
+    /* Ignore other control sequences during search */
     return true;
 }
 

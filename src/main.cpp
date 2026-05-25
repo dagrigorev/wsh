@@ -157,6 +157,10 @@ static GitStatusModel    g_git = {0};
 static UiHitTargets      g_hits = {0};
 static SearchState       g_search = {0};
 
+template<typename T> static T dpi_scale(T v) {
+    return (T)(v * g_renderer.dpi / 96.0f + 0.5f);
+}
+
 static void update_native_scrollbar(HWND hwnd);
 static void layout_panes(HWND hwnd);
 static void refresh_runtime_status(bool force);
@@ -190,16 +194,23 @@ static TerminalPane *active_pane(void) {
     if (!tab) return NULL;
     if (tab->active_pane < 0) tab->active_pane = 0;
     if (tab->active_pane >= tab->pane_count) tab->active_pane = tab->pane_count - 1;
-    return tab->pane_count > 0 ? &tab->panes[tab->active_pane] : NULL;
+    if (tab->pane_count <= 0) return NULL;
+    if (tab->active_pane < 0 || tab->active_pane >= tab->pane_count) return NULL;
+    TerminalPane *p = &tab->panes[tab->active_pane];
+    if (!p->initialized) return NULL;
+    return p;
 }
 
 static void terminal_write(IShellIO *self, const char *buf, int len) {
     TerminalIO *t = (TerminalIO *)self;
+    if (!t || !t->lock || !t->vt) return;
     EnterCriticalSection(t->lock);
     vt_parser_feed(t->vt, buf, len);
     LeaveCriticalSection(t->lock);
-    update_native_scrollbar(t->hwnd);
-    InvalidateRect(t->hwnd, NULL, FALSE);
+    if (t->hwnd) {
+        update_native_scrollbar(t->hwnd);
+        InvalidateRect(t->hwnd, NULL, FALSE);
+    }
 }
 
 static int terminal_read_line(IShellIO *self, char *buf, int size) {
@@ -241,18 +252,22 @@ static void apply_default_gui_prompt(ShellContext *shell) {
 static void repl_exec_done_cb(Repl *r, int exec_result) {
     (void)exec_result;
     /* Find the pane that owns this REPL and post a message to the main window.
-     * We walk the tabs/panes to find the matching Repl pointer. */
-    for (int ti = 0; ti < g_tab_count; ++ti) {
+     * We walk the tabs/panes to find the matching Repl pointer.
+     * Acquire g_lock so we do not race with pane_stop/tab_stop on the main thread. */
+    EnterCriticalSection(&g_lock);
+    for (int ti = 0; ti < g_tab_count && ti < WSH_MAX_TABS; ++ti) {
         TerminalTab *tab = &g_tabs[ti];
         if (!tab->initialized) continue;
-        for (int pi = 0; pi < tab->pane_count; ++pi) {
+        for (int pi = 0; pi < tab->pane_count && pi < WSH_MAX_PANES; ++pi) {
             TerminalPane *pane = &tab->panes[pi];
-            if (&pane->repl == r) {
+            if (pane->initialized && &pane->repl == r) {
+                LeaveCriticalSection(&g_lock);
                 PostMessageW(g_hwnd, WM_WSH_EXEC_DONE, (WPARAM)ti, (LPARAM)pi);
                 return;
             }
         }
     }
+    LeaveCriticalSection(&g_lock);
 }
 
 static void pane_grid_from_rect(const RECT *rc, int *cols, int *rows) {
@@ -274,8 +289,9 @@ static void on_title(const char *title, void *ud) {
 
 static void on_pty_data(const char *buf, int len, void *ud) {
     TerminalPane *pane = (TerminalPane *)ud;
-    if (!pane || !pane->initialized) return;
+    if (!pane) return;
     EnterCriticalSection(&g_lock);
+    if (!pane->initialized) { LeaveCriticalSection(&g_lock); return; }
     vt_parser_feed(&pane->vt, buf, len);
     LeaveCriticalSection(&g_lock);
     update_native_scrollbar(g_hwnd);
@@ -377,6 +393,8 @@ static bool pane_start(TerminalPane *pane) {
 
 static void pane_stop(TerminalPane *pane) {
     if (!pane || !pane->initialized) return;
+    EnterCriticalSection(&g_lock);
+    pane->initialized = false;
     if (pane->use_pty) {
         pane->last_exit_code = pty_exit_code(&pane->pty);
         pane->has_exit_code = true;
@@ -386,6 +404,7 @@ static void pane_stop(TerminalPane *pane) {
     shell_ctx_free(&pane->shell);
     screen_free(&pane->screen);
     memset(pane, 0, sizeof(*pane));
+    LeaveCriticalSection(&g_lock);
 }
 
 static void pane_resize(TerminalPane *pane) {
@@ -399,9 +418,9 @@ static void pane_resize(TerminalPane *pane) {
 static void terminal_view_rect(HWND hwnd, RECT *out) {
     if (!out) return;
     GetClientRect(hwnd, out);
-    out->left += g_sidebar_visible ? WSH_UI_SIDEBAR_W : 0;
-    out->top += WSH_UI_TITLE_H + WSH_UI_TOOLBAR_H + WSH_UI_TERM_HEADER_H;
-    out->bottom -= WSH_UI_STATUS_H;
+    out->left += g_sidebar_visible ? dpi_scale(WSH_UI_SIDEBAR_W) : 0;
+    out->top += dpi_scale(WSH_UI_TITLE_H + WSH_UI_TOOLBAR_H + WSH_UI_TERM_HEADER_H);
+    out->bottom -= dpi_scale(WSH_UI_STATUS_H);
     if (out->right <= out->left) out->right = out->left + 1;
     if (out->bottom <= out->top) out->bottom = out->top + 1;
 }
@@ -409,9 +428,9 @@ static void terminal_view_rect(HWND hwnd, RECT *out) {
 static void layout_panes(HWND hwnd) {
     TerminalTab *tab = active_tab();
     if (!hwnd || !tab || tab->pane_count <= 0) return;
-    g_renderer.reserved_left_px = g_sidebar_visible ? WSH_UI_SIDEBAR_W : 0;
-    g_renderer.reserved_top_px = WSH_UI_TITLE_H + WSH_UI_TOOLBAR_H + WSH_UI_TERM_HEADER_H;
-    g_renderer.reserved_bottom_px = WSH_UI_STATUS_H;
+    g_renderer.reserved_left_px = g_sidebar_visible ? dpi_scale(WSH_UI_SIDEBAR_W) : 0;
+    g_renderer.reserved_top_px = dpi_scale(WSH_UI_TITLE_H + WSH_UI_TOOLBAR_H + WSH_UI_TERM_HEADER_H);
+    g_renderer.reserved_bottom_px = dpi_scale(WSH_UI_STATUS_H);
     RECT rc; terminal_view_rect(hwnd, &rc);
     int w = rc.right - rc.left;
     int h = rc.bottom - rc.top;
@@ -453,9 +472,10 @@ static int pane_hit_test(int x, int y) {
     if (!tab) return 0;
     POINT pt = {x, y};
     for (int i = 0; i < tab->pane_count; ++i) {
-        if (PtInRect(&tab->panes[i].rect, pt)) return i;
+        if (tab->panes[i].initialized && PtInRect(&tab->panes[i].rect, pt)) return i;
     }
-    return tab->active_pane;
+    if (tab->active_pane >= 0 && tab->active_pane < tab->pane_count) return tab->active_pane;
+    return 0;
 }
 
 static bool pane_add(void) {
@@ -487,13 +507,13 @@ static void pane_close_active(void) {
        the last physical pane; when the focused pane is not last, focus is moved
        to the last pane before closing. */
     int idx = tab->active_pane;
+    if (idx < 0 || idx >= tab->pane_count) idx = tab->pane_count - 1;
     if (idx != tab->pane_count - 1) {
         tab->active_pane = tab->pane_count - 1;
         idx = tab->active_pane;
     }
 
     pane_stop(&tab->panes[idx]);
-    memset(&tab->panes[idx], 0, sizeof(tab->panes[idx]));
     tab->pane_count--;
     if (tab->active_pane >= tab->pane_count) tab->active_pane = tab->pane_count - 1;
     layout_panes(g_hwnd);
@@ -696,7 +716,7 @@ static const char *pane_cwd(const TerminalPane *p) {
 }
 
 static void pane_sync_cwd(TerminalPane *p) {
-    if (!p) return;
+    if (!p || !p->initialized) return;
     if (!p->use_pty && p->shell.cwd[0]) strncpy(p->display_cwd, p->shell.cwd, MAX_PATH - 1);
 }
 
@@ -838,7 +858,7 @@ static void screen_line_to_ascii(const ScreenBuffer *sb, int logical_row, char *
 static void update_search_matches(void) {
     g_search.match_count = 0;
     TerminalPane *p = active_pane();
-    if (!p || !g_search.query[0]) {
+    if (!p || !p->initialized || !g_search.query[0]) {
         g_search.active_match = 0;
         return;
     }
@@ -892,11 +912,16 @@ static void draw_chrome(Renderer *r) {
     TerminalPane *pane = active_pane();
     refresh_runtime_status(false);
 
-    RECT title = {client.left, client.top, client.right, client.top + WSH_UI_TITLE_H};
-    RECT toolbar = {client.left, title.bottom, client.right, title.bottom + WSH_UI_TOOLBAR_H};
-    RECT sidebar = {client.left, toolbar.bottom, client.left + (g_sidebar_visible ? WSH_UI_SIDEBAR_W : 0), client.bottom - WSH_UI_STATUS_H};
-    RECT term_header = {sidebar.right, toolbar.bottom, client.right, toolbar.bottom + WSH_UI_TERM_HEADER_H};
-    RECT status = {client.left, client.bottom - WSH_UI_STATUS_H, client.right, client.bottom};
+    int title_h = dpi_scale(WSH_UI_TITLE_H);
+    int toolbar_h = dpi_scale(WSH_UI_TOOLBAR_H);
+    int theader_h = dpi_scale(WSH_UI_TERM_HEADER_H);
+    int status_h = dpi_scale(WSH_UI_STATUS_H);
+    int sidebar_w = g_sidebar_visible ? dpi_scale(WSH_UI_SIDEBAR_W) : 0;
+    RECT title = {client.left, client.top, client.right, client.top + title_h};
+    RECT toolbar = {client.left, title.bottom, client.right, title.bottom + toolbar_h};
+    RECT sidebar = {client.left, toolbar.bottom, client.left + sidebar_w, client.bottom - status_h};
+    RECT term_header = {sidebar.right, toolbar.bottom, client.right, toolbar.bottom + theader_h};
+    RECT status = {client.left, client.bottom - status_h, client.right, client.bottom};
     RECT body = {sidebar.right, term_header.bottom, client.right, status.top};
 
     draw_rect(r, &title, g_theme.bg_card);
@@ -909,121 +934,122 @@ static void draw_chrome(Renderer *r) {
     if (g_sidebar_visible) draw_line(r, (float)sidebar.right - 0.5f, (float)sidebar.top, (float)sidebar.right - 0.5f, (float)sidebar.bottom, g_theme.border);
     draw_line(r, (float)term_header.left, (float)term_header.bottom - 0.5f, (float)term_header.right, (float)term_header.bottom - 0.5f, g_theme.border);
 
-    RECT brand = {16, 10, 56, 32};
+    RECT brand = {dpi_scale(16), dpi_scale(10), dpi_scale(56), dpi_scale(32)};
     draw_text_u8(r, "Wsh", &brand, g_theme.text_primary);
 
-    int actions_w = 150;
-    int tx = 68;
-    int tab_w = WSH_UI_TAB_W;
-    int max_tab_right = client.right - actions_w - 12;
+    int actions_w = dpi_scale(150);
+    int tx = dpi_scale(68);
+    int tab_w = dpi_scale(WSH_UI_TAB_W);
+    int max_tab_right = client.right - actions_w - dpi_scale(12);
     if (g_tab_count > 1) {
-        int available = max_tab_right - tx - (g_tab_count - 1) * 6;
+        int available = max_tab_right - tx - (g_tab_count - 1) * dpi_scale(6);
         if (available > 0) {
             int fit = available / g_tab_count;
-            if (fit < tab_w) tab_w = fit < 116 ? 116 : fit;
+            if (fit < tab_w) tab_w = fit < dpi_scale(116) ? dpi_scale(116) : fit;
         }
     }
     g_hits.tab_count = g_tab_count;
     for (int i = 0; i < g_tab_count && i < WSH_MAX_TABS; ++i) {
         if (!g_tabs[i].initialized) continue;
-        RECT tr = {tx, 7, tx + tab_w, WSH_UI_TITLE_H - 4};
+        RECT tr = {tx, dpi_scale(7), tx + tab_w, dpi_scale(WSH_UI_TITLE_H - 4)};
         g_hits.tabs[i].rect = tr;
         g_hits.tabs[i].tab_index = i;
-        draw_round_rect(r, &tr, 7.0f, (i == g_active_tab) ? g_theme.bg_surface : g_theme.bg_card);
-        draw_round_border(r, &tr, 7.0f, (i == g_active_tab) ? g_theme.border_mid : g_theme.border);
-        TerminalPane *tp = (g_tabs[i].pane_count > 0) ? &g_tabs[i].panes[g_tabs[i].active_pane] : NULL;
-        draw_status_dot(r, (float)tr.left + 14.0f, (float)tr.top + 17.0f, pane_status_color(tp));
+        draw_round_rect(r, &tr, dpi_scale(7.0f), (i == g_active_tab) ? g_theme.bg_surface : g_theme.bg_card);
+        draw_round_border(r, &tr, dpi_scale(7.0f), (i == g_active_tab) ? g_theme.border_mid : g_theme.border);
+        int ap = g_tabs[i].active_pane;
+        TerminalPane *tp = (g_tabs[i].pane_count > 0 && ap >= 0 && ap < g_tabs[i].pane_count) ? &g_tabs[i].panes[ap] : NULL;
+        draw_status_dot(r, (float)tr.left + dpi_scale(14.0f), (float)tr.top + dpi_scale(17.0f), pane_status_color(tp));
         char label[160]; format_pane_label(tp, label, sizeof(label));
-        RECT lr = {tr.left + 24, tr.top + 7, tr.right - 28, tr.bottom - 4};
+        RECT lr = {tr.left + dpi_scale(24), tr.top + dpi_scale(7), tr.right - dpi_scale(28), tr.bottom - dpi_scale(4)};
         draw_text_u8(r, label, &lr, (i == g_active_tab) ? g_theme.text_primary : g_theme.text_secondary);
-        RECT cr = {tr.right - 25, tr.top + 7, tr.right - 7, tr.top + 25};
+        RECT cr = {tr.right - dpi_scale(25), tr.top + dpi_scale(7), tr.right - dpi_scale(7), tr.top + dpi_scale(25)};
         g_hits.tab_close[i] = cr;
         float cx = ((float)cr.left + (float)cr.right) * 0.5f;
         float cy = ((float)cr.top + (float)cr.bottom) * 0.5f;
         draw_line(r, cx - 4.0f, cy - 4.0f, cx + 4.0f, cy + 4.0f, g_theme.text_faint);
         draw_line(r, cx + 4.0f, cy - 4.0f, cx - 4.0f, cy + 4.0f, g_theme.text_faint);
-        tx += tab_w + 6;
+        tx += tab_w + dpi_scale(6);
     }
-    g_hits.add_tab = {tx + 4, 10, tx + 30, 36};
-    draw_round_rect(r, &g_hits.add_tab, 7.0f, g_theme.bg_hover);
-    draw_round_border(r, &g_hits.add_tab, 7.0f, g_theme.border_mid);
-    RECT add_text = {g_hits.add_tab.left + 8, g_hits.add_tab.top + 4, g_hits.add_tab.right, g_hits.add_tab.bottom};
+    g_hits.add_tab = {tx + dpi_scale(4), dpi_scale(10), tx + dpi_scale(30), dpi_scale(36)};
+    draw_round_rect(r, &g_hits.add_tab, dpi_scale(7.0f), g_theme.bg_hover);
+    draw_round_border(r, &g_hits.add_tab, dpi_scale(7.0f), g_theme.border_mid);
+    RECT add_text = {g_hits.add_tab.left + dpi_scale(8), g_hits.add_tab.top + dpi_scale(4), g_hits.add_tab.right, g_hits.add_tab.bottom};
     draw_text_u8(r, "+", &add_text, g_theme.text_primary);
 
-    int bx = client.right - 148;
-    g_hits.split = {bx, 8, bx + 28, 36}; draw_round_rect(r, &g_hits.split, 7.0f, g_theme.bg_card); RECT split_text = {bx + 9, 13, bx + 28, 34}; draw_text_u8(r, "S", &split_text, g_theme.text_secondary); bx += 32;
-    g_hits.search = {bx, 8, bx + 28, 36}; draw_round_rect(r, &g_hits.search, 7.0f, g_theme.bg_card); RECT search_text = {bx + 9, 13, bx + 28, 34}; draw_text_u8(r, "F", &search_text, g_theme.text_secondary); bx += 32;
-    g_hits.settings = {bx, 8, bx + 28, 36}; draw_round_rect(r, &g_hits.settings, 7.0f, g_theme.bg_card); RECT settings_text = {bx + 9, 13, bx + 28, 34}; draw_text_u8(r, "*", &settings_text, g_theme.text_secondary); bx += 32;
-    g_hits.sidebar_toggle = {bx, 8, bx + 28, 36}; draw_round_rect(r, &g_hits.sidebar_toggle, 7.0f, g_theme.bg_card); RECT side_text = {bx + 9, 13, bx + 28, 34}; draw_text_u8(r, g_sidebar_visible ? "<" : ">", &side_text, g_theme.text_secondary);
+    int bx = client.right - dpi_scale(148);
+    g_hits.split = {bx, dpi_scale(8), bx + dpi_scale(28), dpi_scale(36)}; draw_round_rect(r, &g_hits.split, dpi_scale(7.0f), g_theme.bg_card); RECT split_text = {bx + dpi_scale(9), dpi_scale(13), bx + dpi_scale(28), dpi_scale(34)}; draw_text_u8(r, "S", &split_text, g_theme.text_secondary); bx += dpi_scale(32);
+    g_hits.search = {bx, dpi_scale(8), bx + dpi_scale(28), dpi_scale(36)}; draw_round_rect(r, &g_hits.search, dpi_scale(7.0f), g_theme.bg_card); RECT search_text = {bx + dpi_scale(9), dpi_scale(13), bx + dpi_scale(28), dpi_scale(34)}; draw_text_u8(r, "F", &search_text, g_theme.text_secondary); bx += dpi_scale(32);
+    g_hits.settings = {bx, dpi_scale(8), bx + dpi_scale(28), dpi_scale(36)}; draw_round_rect(r, &g_hits.settings, dpi_scale(7.0f), g_theme.bg_card); RECT settings_text = {bx + dpi_scale(9), dpi_scale(13), bx + dpi_scale(28), dpi_scale(34)}; draw_text_u8(r, "*", &settings_text, g_theme.text_secondary); bx += dpi_scale(32);
+    g_hits.sidebar_toggle = {bx, dpi_scale(8), bx + dpi_scale(28), dpi_scale(36)}; draw_round_rect(r, &g_hits.sidebar_toggle, dpi_scale(7.0f), g_theme.bg_card); RECT side_text = {bx + dpi_scale(9), dpi_scale(13), bx + dpi_scale(28), dpi_scale(34)}; draw_text_u8(r, g_sidebar_visible ? "<" : ">", &side_text, g_theme.text_secondary);
 
     char path[256]; compact_path(pane_cwd(pane), path, sizeof(path));
-    RECT path_box = {toolbar.left + 14, toolbar.top + 7, toolbar.right - 132, toolbar.bottom - 7};
-    draw_round_rect(r, &path_box, 10.0f, g_theme.bg_base);
-    draw_round_border(r, &path_box, 10.0f, g_theme.border_mid);
-    draw_ui_dot(r, (float)path_box.left + 13.0f, (float)path_box.top + 13.0f, 3.5f, g_theme.accent);
-    RECT path_text = {path_box.left + 24, path_box.top + 5, path_box.right - 10, path_box.bottom};
+    RECT path_box = {toolbar.left + dpi_scale(14), toolbar.top + dpi_scale(7), toolbar.right - dpi_scale(132), toolbar.bottom - dpi_scale(7)};
+    draw_round_rect(r, &path_box, dpi_scale(10.0f), g_theme.bg_base);
+    draw_round_border(r, &path_box, dpi_scale(10.0f), g_theme.border_mid);
+    draw_ui_dot(r, (float)path_box.left + dpi_scale(13.0f), (float)path_box.top + dpi_scale(13.0f), dpi_scale(3.5f), g_theme.accent);
+    RECT path_text = {path_box.left + dpi_scale(24), path_box.top + dpi_scale(5), path_box.right - dpi_scale(10), path_box.bottom};
     draw_text_u8(r, path, &path_text, g_theme.text_secondary);
-    RECT badge = {toolbar.right - 116, toolbar.top + 9, toolbar.right - 16, toolbar.bottom - 9};
-    draw_round_rect(r, &badge, 10.0f, g_theme.bg_base);
-    draw_round_border(r, &badge, 10.0f, g_theme.border_mid);
-    RECT badge_text = {badge.left + 13, badge.top + 3, badge.right - 10, badge.bottom};
+    RECT badge = {toolbar.right - dpi_scale(116), toolbar.top + dpi_scale(9), toolbar.right - dpi_scale(16), toolbar.bottom - dpi_scale(9)};
+    draw_round_rect(r, &badge, dpi_scale(10.0f), g_theme.bg_base);
+    draw_round_border(r, &badge, dpi_scale(10.0f), g_theme.border_mid);
+    RECT badge_text = {badge.left + dpi_scale(13), badge.top + dpi_scale(3), badge.right - dpi_scale(10), badge.bottom};
     draw_text_u8(r, is_process_elevated() ? "elevated" : "local", &badge_text, g_theme.green);
 
     char header[512];
-    DWORD pid = pane && pane->use_pty ? pane->pty.pid : GetCurrentProcessId();
-    const char *state = (pane && pane->use_pty && !pty_is_alive(&pane->pty)) ? "closed" : "idle";
+    DWORD pid = pane && pane->initialized && pane->use_pty ? pane->pty.pid : GetCurrentProcessId();
+    const char *state = (pane && pane->initialized && pane->use_pty && !pty_is_alive(&pane->pty)) ? "closed" : "idle";
     _snprintf(header, sizeof(header), "%s · PID %lu · %s · %s", shell_label(), (unsigned long)pid, path[0] ? path : "-", state);
-    RECT hr = {term_header.left + 14, term_header.top + 7, term_header.right - 14, term_header.bottom};
+    RECT hr = {term_header.left + dpi_scale(14), term_header.top + dpi_scale(7), term_header.right - dpi_scale(14), term_header.bottom};
     draw_text_u8(r, header, &hr, g_theme.text_secondary);
 
     if (g_sidebar_visible) {
-        RECT sr = {sidebar.left + 14, sidebar.top + 12, sidebar.right - 10, sidebar.top + 30};
+        RECT sr = {sidebar.left + dpi_scale(14), sidebar.top + dpi_scale(12), sidebar.right - dpi_scale(10), sidebar.top + dpi_scale(30)};
         draw_text_u8(r, "SESSIONS", &sr, g_theme.text_faint);
-        int y = sidebar.top + 36;
+        int y = sidebar.top + dpi_scale(36);
         if (tab) {
             for (int i = 0; i < tab->pane_count; ++i) {
-                RECT item = {sidebar.left + 8, y, sidebar.right - 8, y + 26};
+                RECT item = {sidebar.left + dpi_scale(8), y, sidebar.right - dpi_scale(8), y + dpi_scale(26)};
                 if (i == tab->active_pane) {
-                    draw_round_rect(r, &item, 7.0f, g_theme.bg_hover);
-                    RECT rail = {item.left, item.top + 5, item.left + 3, item.bottom - 5};
+                    draw_round_rect(r, &item, dpi_scale(7.0f), g_theme.bg_hover);
+                    RECT rail = {item.left, item.top + dpi_scale(5), item.left + dpi_scale(3), item.bottom - dpi_scale(5)};
                     draw_round_rect(r, &rail, 2.0f, g_theme.accent);
                 }
-                draw_status_dot(r, (float)item.left + 12.0f, (float)item.top + 13.0f, pane_status_color(&tab->panes[i]));
+                draw_status_dot(r, (float)item.left + dpi_scale(12.0f), (float)item.top + dpi_scale(13.0f), pane_status_color(&tab->panes[i]));
                 char label[160]; format_pane_label(&tab->panes[i], label, sizeof(label));
-                RECT ir = {item.left + 24, item.top + 5, item.right - 6, item.bottom};
+                RECT ir = {item.left + dpi_scale(24), item.top + dpi_scale(5), item.right - dpi_scale(6), item.bottom};
                 draw_text_u8(r, label, &ir, i == tab->active_pane ? g_theme.text_primary : g_theme.text_secondary);
-                y += 28;
+                y += dpi_scale(28);
             }
         }
-        y += 10;
-        RECT rr = {sidebar.left + 14, y, sidebar.right - 10, y + 18};
-        draw_text_u8(r, "RESOURCES", &rr, g_theme.text_faint); y += 24;
+        y += dpi_scale(10);
+        RECT rr = {sidebar.left + dpi_scale(14), y, sidebar.right - dpi_scale(10), y + dpi_scale(18)};
+        draw_text_u8(r, "RESOURCES", &rr, g_theme.text_faint); y += dpi_scale(24);
         char metric[128];
-        if (g_resources.cpu_available) { _snprintf(metric, sizeof(metric), "CPU %.0f%%", g_resources.cpu_percent); RECT mr={sidebar.left+14,y,sidebar.right-10,y+18}; draw_text_u8(r, metric, &mr, g_theme.text_secondary); y+=20; }
-        if (g_resources.memory_available) { _snprintf(metric, sizeof(metric), "RAM %lu%%", (unsigned long)g_resources.memory_load); RECT mr={sidebar.left+14,y,sidebar.right-10,y+18}; draw_text_u8(r, metric, &mr, g_theme.text_secondary); y+=20; }
-        if (g_resources.disk_available) { double used = 100.0 * (double)(g_resources.disk_total - g_resources.disk_free) / (double)g_resources.disk_total; _snprintf(metric, sizeof(metric), "Disk %.0f%%", used); RECT mr={sidebar.left+14,y,sidebar.right-10,y+18}; draw_text_u8(r, metric, &mr, g_theme.text_secondary); y+=20; }
-        y += 10;
-        RECT ar = {sidebar.left + 14, y, sidebar.right - 10, y + 18};
-        draw_text_u8(r, "ACTIONS", &ar, g_theme.text_faint); y += 24;
-        g_hits.duplicate = {sidebar.left + 14, y, sidebar.right - 14, y + 22};
-        draw_round_rect(r, &g_hits.duplicate, 6.0f, g_theme.bg_card);
-        RECT dup_text = {g_hits.duplicate.left + 10, g_hits.duplicate.top + 3, g_hits.duplicate.right - 8, g_hits.duplicate.bottom};
-        draw_text_u8(r, "Duplicate pane", &dup_text, g_theme.text_secondary); y += 26;
-        g_hits.kill = {sidebar.left + 14, y, sidebar.right - 14, y + 22};
-        draw_round_rect(r, &g_hits.kill, 6.0f, g_theme.bg_card);
-        RECT kill_text = {g_hits.kill.left + 10, g_hits.kill.top + 3, g_hits.kill.right - 8, g_hits.kill.bottom};
+        if (g_resources.cpu_available) { _snprintf(metric, sizeof(metric), "CPU %.0f%%", g_resources.cpu_percent); RECT mr={sidebar.left+dpi_scale(14),y,sidebar.right-dpi_scale(10),y+dpi_scale(18)}; draw_text_u8(r, metric, &mr, g_theme.text_secondary); y+=dpi_scale(20); }
+        if (g_resources.memory_available) { _snprintf(metric, sizeof(metric), "RAM %lu%%", (unsigned long)g_resources.memory_load); RECT mr={sidebar.left+dpi_scale(14),y,sidebar.right-dpi_scale(10),y+dpi_scale(18)}; draw_text_u8(r, metric, &mr, g_theme.text_secondary); y+=dpi_scale(20); }
+        if (g_resources.disk_available) { double used = 100.0 * (double)(g_resources.disk_total - g_resources.disk_free) / (double)g_resources.disk_total; _snprintf(metric, sizeof(metric), "Disk %.0f%%", used); RECT mr={sidebar.left+dpi_scale(14),y,sidebar.right-dpi_scale(10),y+dpi_scale(18)}; draw_text_u8(r, metric, &mr, g_theme.text_secondary); y+=dpi_scale(20); }
+        y += dpi_scale(10);
+        RECT ar = {sidebar.left + dpi_scale(14), y, sidebar.right - dpi_scale(10), y + dpi_scale(18)};
+        draw_text_u8(r, "ACTIONS", &ar, g_theme.text_faint); y += dpi_scale(24);
+        g_hits.duplicate = {sidebar.left + dpi_scale(14), y, sidebar.right - dpi_scale(14), y + dpi_scale(22)};
+        draw_round_rect(r, &g_hits.duplicate, dpi_scale(6.0f), g_theme.bg_card);
+        RECT dup_text = {g_hits.duplicate.left + dpi_scale(10), g_hits.duplicate.top + dpi_scale(3), g_hits.duplicate.right - dpi_scale(8), g_hits.duplicate.bottom};
+        draw_text_u8(r, "Duplicate pane", &dup_text, g_theme.text_secondary); y += dpi_scale(26);
+        g_hits.kill = {sidebar.left + dpi_scale(14), y, sidebar.right - dpi_scale(14), y + dpi_scale(22)};
+        draw_round_rect(r, &g_hits.kill, dpi_scale(6.0f), g_theme.bg_card);
+        RECT kill_text = {g_hits.kill.left + dpi_scale(10), g_hits.kill.top + dpi_scale(3), g_hits.kill.right - dpi_scale(8), g_hits.kill.bottom};
         draw_text_u8(r, "Kill process", &kill_text, pane_has_running_process(pane) ? g_theme.red : g_theme.text_faint);
     }
 
     if (g_search.open) {
-        RECT overlay = {body.right - 320, body.top + 10, body.right - 18, body.top + 42};
-        draw_round_rect(r, &overlay, 10.0f, g_theme.bg_card);
-        draw_round_border(r, &overlay, 10.0f, g_theme.border_mid);
-        draw_ui_dot(r, (float)overlay.left + 14.0f, (float)overlay.top + 16.0f, 3.5f, g_theme.accent);
+        RECT overlay = {body.right - dpi_scale(320), body.top + dpi_scale(10), body.right - dpi_scale(18), body.top + dpi_scale(42)};
+        draw_round_rect(r, &overlay, dpi_scale(10.0f), g_theme.bg_card);
+        draw_round_border(r, &overlay, dpi_scale(10.0f), g_theme.border_mid);
+        draw_ui_dot(r, (float)overlay.left + dpi_scale(14.0f), (float)overlay.top + dpi_scale(16.0f), dpi_scale(3.5f), g_theme.accent);
         char q[220];
         if (g_search.query[0]) _snprintf(q, sizeof(q), "Search: %s  %d match%s", g_search.query, g_search.match_count, g_search.match_count == 1 ? "" : "es");
         else _snprintf(q, sizeof(q), "Search:");
-        RECT qr = {overlay.left + 26, overlay.top + 8, overlay.right - 10, overlay.bottom};
+        RECT qr = {overlay.left + dpi_scale(26), overlay.top + dpi_scale(8), overlay.right - dpi_scale(10), overlay.bottom};
         draw_text_u8(r, q, &qr, g_theme.text_primary);
     }
 
@@ -1037,7 +1063,7 @@ static void draw_chrome(Renderer *r) {
               branch, g_git.project[0] ? g_git.project : basename_const(pane_cwd(pane)),
               shell_label(), pane ? pane->screen.cols : 0, pane ? pane->screen.rows : 0,
               tab ? tab->active_pane + 1 : 0, tab ? tab->pane_count : 0, clock_buf);
-    RECT str = {status.left + 14, status.top + 4, status.right - 12, status.bottom};
+    RECT str = {status.left + dpi_scale(14), status.top + dpi_scale(4), status.right - dpi_scale(12), status.bottom};
     draw_text_u8(r, stbuf, &str, 0xffffff);
 }
 
@@ -1117,6 +1143,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             if (tab) {
                 for (int i = 0; i < tab->pane_count; ++i) {
                     TerminalPane *p = &tab->panes[i];
+                    if (!p->initialized) continue;
                     bool active = (i == tab->active_pane);
                     bool cursor_visible_in_view = (p->screen.viewport_offset == 0);
                     renderer_paint_region(&g_renderer, &p->screen, &p->rect, active,
@@ -1328,10 +1355,12 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         case WM_MOUSEMOVE: {
             if (g_renderer.sel_active) {
                 TerminalPane *p = active_pane();
-                int mx = (short)LOWORD(lParam), my = (short)HIWORD(lParam);
-                int col, row; pane_pixel_to_cell(p, mx, my, &col, &row);
-                g_renderer.sel_end_col = col; g_renderer.sel_end_row = row;
-                g_renderer.sel_valid = (col != g_renderer.sel_start_col || row != g_renderer.sel_start_row);
+                if (p && p->initialized) {
+                    int mx = (short)LOWORD(lParam), my = (short)HIWORD(lParam);
+                    int col, row; pane_pixel_to_cell(p, mx, my, &col, &row);
+                    g_renderer.sel_end_col = col; g_renderer.sel_end_row = row;
+                    g_renderer.sel_valid = (col != g_renderer.sel_start_col || row != g_renderer.sel_start_row);
+                }
                 InvalidateRect(hwnd, NULL, FALSE);
             }
             return 0;
@@ -1413,7 +1442,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         }
 
         case WM_VSCROLL: {
-            TerminalPane *p = active_pane(); if (!p) return 0;
+            TerminalPane *p = active_pane(); if (!p || !p->initialized) return 0;
             EnterCriticalSection(&g_lock);
             int max_offset = screen_max_viewport_offset(&p->screen);
             int pos = max_offset - p->screen.viewport_offset;
@@ -1500,9 +1529,9 @@ static int wsh_run(HINSTANCE hInst, HINSTANCE hPrev, LPSTR lpCmd, int nShow) {
     g_renderer.fg_color = renderer_rgb_to_color(g_theme.text_primary);
     g_renderer.cursor_color = renderer_rgb_to_color(g_theme.accent);
     g_renderer.selection_color = renderer_rgb_to_color(0x27324a);
-    g_renderer.reserved_left_px = g_sidebar_visible ? WSH_UI_SIDEBAR_W : 0;
-    g_renderer.reserved_top_px = WSH_UI_TITLE_H + WSH_UI_TOOLBAR_H + WSH_UI_TERM_HEADER_H;
-    g_renderer.reserved_bottom_px = WSH_UI_STATUS_H;
+    g_renderer.reserved_left_px = g_sidebar_visible ? dpi_scale(WSH_UI_SIDEBAR_W) : 0;
+    g_renderer.reserved_top_px = dpi_scale(WSH_UI_TITLE_H + WSH_UI_TOOLBAR_H + WSH_UI_TERM_HEADER_H);
+    g_renderer.reserved_bottom_px = dpi_scale(WSH_UI_STATUS_H);
 
     RECT rc; terminal_view_rect(g_hwnd, &rc);
     g_tabs[0].panes[0].rect = rc;

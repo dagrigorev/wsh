@@ -56,6 +56,7 @@ struct Repl {
     bool            completing;   /* true = second Tab press pending */
     bool            hist_search;  /* Ctrl+R incremental search active */
     char            hist_pat[256];
+    char            hist_save[REPL_LINE_MAX]; /* saved line buffer for cancel */
     volatile LONG   executing;    /* non-zero while command thread is running */
     HANDLE          exec_thread;  /* handle to the executing thread */
     char           *execute_line; /* owned copy of the line being executed */
