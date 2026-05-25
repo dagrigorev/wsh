@@ -68,6 +68,10 @@ function Find-VisualStudio {
         if ($installPath) { return $installPath }
     }
     $roots = @(
+        "${env:ProgramFiles}\Microsoft Visual Studio\2026\Professional",
+        "${env:ProgramFiles}\Microsoft Visual Studio\2026\Enterprise",
+        "${env:ProgramFiles}\Microsoft Visual Studio\2026\Community",
+        "${env:ProgramFiles}\Microsoft Visual Studio\2026\BuildTools",
         "${env:ProgramFiles}\Microsoft Visual Studio\2022\Professional",
         "${env:ProgramFiles}\Microsoft Visual Studio\2022\Enterprise",
         "${env:ProgramFiles}\Microsoft Visual Studio\2022\Community",
@@ -148,6 +152,7 @@ function Find-DistDirectory {
     param([string]$ScriptRoot)
 
     $candidates = @(
+        (Join-Path $ScriptRoot "build-release\dist"),
         (Join-Path $ScriptRoot "build-run\dist"),
         (Join-Path $ScriptRoot "build\dist"),
         (Join-Path $ScriptRoot "dist")
