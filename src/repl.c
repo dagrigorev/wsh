@@ -433,10 +433,28 @@ bool repl_handle_input(Repl *r, const char *bytes, int len) {
 
             /* Enter */
             case '\r': case '\n': {
+                /* Capture command before clear for commentary */
+                char cmd_buf[REPL_LINE_MAX];
+                strncpy(cmd_buf, r->line, REPL_LINE_MAX - 1);
+                cmd_buf[REPL_LINE_MAX - 1] = '\0';
+
                 wsh_ai_clear_reasoning(r->ctx);
                 bool launched = execute_line(r);
+
+                /* Queue AI commentary for the submitted command (non-blocking) */
+                if (cmd_buf[0] != '\0' && r->ctx->ai_enabled) {
+                    wsh_ai_trigger_command_commentary(r->ctx, cmd_buf);
+                }
+
                 if (r->ctx->exit_requested) return false;
-                if (!launched) repl_show_prompt(r);
+                if (!launched) {
+                    /* If command wasn't launched (empty line), try to show commentary immediately */
+                    const char *cc = wsh_ai_try_get_commentary(r->ctx, cmd_buf);
+                    if (cc && cc[0]) {
+                        emit_fmt(r, "%s\r\n", cc);
+                    }
+                    repl_show_prompt(r);
+                }
                 return true;
             }
 

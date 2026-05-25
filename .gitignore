@@ -125,3 +125,7 @@ vcpkg_installed/
 .tmp-tools-unicode
 .opencode/
 .opencode-tmp/
+
+# ── Large model files (do not commit) ─────────────────────────────────────────
+models/phi-4/*.gguf
+dist/models/phi-4/*.gguf

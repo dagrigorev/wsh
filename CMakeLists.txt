@@ -36,6 +36,7 @@ add_compile_definitions(
     UNICODE
     _UNICODE
     _CRT_SECURE_NO_WARNINGS
+    _DISABLE_VECTORIZED_ALGORITHMS
     NOMINMAX
     # Expose version to source code
     WSH_VERSION_MAJOR=${PROJECT_VERSION_MAJOR}
@@ -86,8 +87,35 @@ add_custom_target(wsh_runtime_resources ALL
     COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_SOURCE_DIR}/config" "${WSH_DIST_DIR}/config"
     COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_SOURCE_DIR}/themes" "${WSH_DIST_DIR}/themes"
     COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_SOURCE_DIR}/man" "${WSH_DIST_DIR}/man"
+    COMMAND ${CMAKE_COMMAND} -E make_directory "${WSH_DIST_DIR}/models"
+    COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_SOURCE_DIR}/models" "${WSH_DIST_DIR}/models"
     COMMENT "Copying Wsh runtime resources to dist"
 )
+
+# ── Phi-4 local model support (requires vendored llama.cpp) ─────────────────
+option(WSH_ENABLE_PHI4 "Enable Phi-4 local model support (requires llama.cpp)" OFF)
+
+# ── Auto-download Phi-4 GGUF model ──────────────────────────────────────────
+option(WSH_DOWNLOAD_PHI4_MODEL "Download Phi-4 GGUF model during build (~4-14 GB)" OFF)
+set(WSH_PHI4_MODEL_URL "https://huggingface.co/bartowski/phi-4-GGUF/resolve/main/phi-4-Q4_K_M.gguf"
+    CACHE STRING "URL for Phi-4 GGUF model file (~14 GB)")
+set(WSH_PHI4_MODEL_DIR "${WSH_DIST_DIR}/models/phi-4" CACHE PATH "Output directory for Phi-4 model")
+set(WSH_PHI4_MODEL_FILE "${WSH_PHI4_MODEL_DIR}/model.gguf")
+
+if(WSH_DOWNLOAD_PHI4_MODEL)
+    add_custom_target(wsh_download_phi4
+        COMMAND ${CMAKE_COMMAND} -E make_directory "${WSH_PHI4_MODEL_DIR}"
+        COMMAND if not exist "${WSH_PHI4_MODEL_FILE}" (
+            curl.exe -L -o "${WSH_PHI4_MODEL_FILE}"
+                --progress-bar
+                --user-agent Mozilla/5.0
+                "${WSH_PHI4_MODEL_URL}" )
+        BYPRODUCTS "${WSH_PHI4_MODEL_FILE}"
+        USES_TERMINAL
+        COMMENT "Downloading Phi-4 model (live progress shows %%, speed, ETA)..."
+    )
+    add_dependencies(wsh_runtime_resources wsh_download_phi4)
+endif()
 
 # ── Tests ────────────────────────────────────────────────────────────────────
 option(WSH_BUILD_TESTS "Build unit tests" ON)

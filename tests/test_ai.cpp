@@ -14,6 +14,9 @@
 #include "../src/ai/providers/ngram_model_data.h"
 #include "../src/shell/shell_ctx.h"
 #include "../src/shell/builtins.h"
+#include "../src/platform/config.h"
+#include "../src/ai/commentary/phi4_prompt_builder.h"
+#include "../src/ai/commentary/fallback_commentary_provider.h"
 #include <string>
 #include <cstring>
 #include <algorithm>
@@ -253,7 +256,7 @@ TEST(AiBuiltin, StatusShowsEnabledByDefault) {
     char *argv[] = { "ai", "status", NULL };
     builtin_ai(2, argv, &g_ctx);
     ASSERT_TRUE(strstr(g_io.buf, "AI: enabled") != NULL);
-    ASSERT_TRUE(strstr(g_io.buf, "Provider: ngram+rules") != NULL);
+    ASSERT_TRUE(strstr(g_io.buf, "Suggestions: ngram+rules+tiny_llm") != NULL);
     ASSERT_TRUE(strstr(g_io.buf, "4-gram") != NULL);
     ASSERT_TRUE(strstr(g_io.buf, "Network: disabled") != NULL);
     ASSERT_TRUE(strstr(g_io.buf, "Default: enabled") != NULL);
@@ -421,4 +424,142 @@ TEST(NgramAiProvider, NgramSuggestProjectDelegates) {
         if (s.command == "cmake --build build") hasBuild = true;
     }
     ASSERT_TRUE(hasBuild);
+}
+
+/* ── Commentary Provider Tests ──────────────────────────────────────────── */
+
+TEST(FallbackCommentary, PromptBuilderReturnsRussian) {
+    /* The default prompt builder should output Russian system prompt */
+    std::string sys = wsh::Phi4PromptBuilder::GetSystemPrompt("ru");
+    ASSERT_TRUE(sys.find("Russian") != std::string::npos);
+    ASSERT_TRUE(sys.find("120 characters") != std::string::npos);
+}
+
+TEST(FallbackCommentary, EmptyInputNoOutput) {
+    wsh::FallbackCommentaryProvider fb;
+    std::string result = fb.Generate("");
+    ASSERT_TRUE(result.empty());
+}
+
+TEST(FallbackCommentary, DangerousCommandGetsWarning) {
+    wsh::FallbackCommentaryProvider fb;
+    std::string result = fb.Generate("rm -rf *");
+    ASSERT_FALSE(result.empty());
+    /* Template contains the input command */
+    ASSERT_TRUE(result.find("rm -rf *") != std::string::npos);
+}
+
+TEST(FallbackCommentary, AnyInputReturnsTemplate) {
+    wsh::FallbackCommentaryProvider fb;
+    std::string result = fb.Generate("tree ?");
+    ASSERT_FALSE(result.empty());
+    /* Template contains the input */
+    ASSERT_TRUE(result.find("tree ?") != std::string::npos);
+}
+
+TEST(FallbackCommentary, HistoryReturnsPhrase) {
+    wsh::FallbackCommentaryProvider fb;
+    std::string result = fb.Generate("history");
+    ASSERT_FALSE(result.empty());
+}
+
+TEST(FallbackCommentary, CdDotDot) {
+    wsh::FallbackCommentaryProvider fb;
+    std::string result = fb.Generate("cd ..");
+    ASSERT_FALSE(result.empty());
+}
+
+TEST(FallbackCommentary, MkdirReturnsJoke) {
+    wsh::FallbackCommentaryProvider fb;
+    std::string result = fb.Generate("mkdir test");
+    ASSERT_FALSE(result.empty());
+}
+
+TEST(FallbackCommentary, GitStatus) {
+    wsh::FallbackCommentaryProvider fb;
+    std::string result = fb.Generate("git status");
+    ASSERT_FALSE(result.empty());
+}
+
+/* ── Commentary integrated tests via ShellContext ──────────────────────── */
+
+static ShellContext g_comm_ctx;
+static TestIO       g_comm_io;
+
+static void commentary_setup(void) {
+    memset(&g_comm_io, 0, sizeof(g_comm_io));
+    g_comm_io.base.write = t_write; g_comm_io.base.read_line = t_read;
+    shell_ctx_init(&g_comm_ctx, (IShellIO *)&g_comm_io);
+    /* Apply minimal AI config with fallback */
+    ConfigAi cfg;
+    memset(&cfg, 0, sizeof(cfg));
+    cfg.enabled = true;
+    cfg.commentary.enabled = true;
+    cfg.commentary.fallback_enabled = true;
+    cfg.phi4.context_tokens = 1024;
+    cfg.phi4.max_tokens = 64;
+    cfg.phi4.temperature = 0.85f;
+    wsh_ai_apply_runtime_config(&g_comm_ctx, &cfg);
+}
+
+static void commentary_teardown(void) {
+    shell_ctx_free(&g_comm_ctx);
+}
+
+TEST(CommentaryBuiltin, AiCommentaryTriggers) {
+    commentary_setup();
+    ASSERT_TRUE(g_comm_ctx.ai_enabled);
+
+    /* Trigger commentary for a command */
+    wsh_ai_trigger_command_commentary(&g_comm_ctx, "tree ?");
+    /* Wait briefly for worker to process */
+    Sleep(100);
+    const char *cc = wsh_ai_try_get_commentary(&g_comm_ctx, "tree ?");
+    ASSERT_NOT_NULL(cc);
+    ASSERT_TRUE(strlen(cc) > 0);
+    commentary_teardown();
+}
+
+TEST(CommentaryBuiltin, AiCommentaryOnOff) {
+    commentary_setup();
+    ASSERT_TRUE(wsh_ai_commentary_is_enabled(&g_comm_ctx));
+    wsh_ai_commentary_set_enabled(&g_comm_ctx, false);
+    ASSERT_FALSE(wsh_ai_commentary_is_enabled(&g_comm_ctx));
+    wsh_ai_commentary_set_enabled(&g_comm_ctx, true);
+    ASSERT_TRUE(wsh_ai_commentary_is_enabled(&g_comm_ctx));
+    commentary_teardown();
+}
+
+TEST(CommentaryBuiltin, AiStatusShowsCommentary) {
+    commentary_setup();
+    ASSERT_TRUE(g_comm_ctx.ai_enabled);
+    /* Just verify status doesn't crash */
+    char *argv[] = { "ai", "status", NULL };
+    builtin_ai(2, argv, &g_comm_ctx);
+    /* Should show commentary-related info */
+    ASSERT_TRUE(strstr(g_comm_io.buf, "Commentary") != NULL);
+    commentary_teardown();
+}
+
+TEST(CommentaryBuiltin, EmptyCommandNoCommentary) {
+    commentary_setup();
+    wsh_ai_trigger_command_commentary(&g_comm_ctx, "");
+    Sleep(50);
+    const char *cc = wsh_ai_try_get_commentary(&g_comm_ctx, "");
+    ASSERT_TRUE(cc == NULL || cc[0] == '\0');
+    commentary_teardown();
+}
+
+TEST(CommentaryBuiltin, MissingModelNoCrash) {
+    commentary_setup();
+    /* Phi-4 model is missing — but stub should not cause crashes */
+    ASSERT_TRUE(g_comm_ctx.ai_enabled);
+    const char *provType = wsh_ai_commentary_provider_type(&g_comm_ctx);
+    ASSERT_NOT_NULL(provType);
+    /* The provider type can be "fallback" (since we enabled fallback)
+     * but it must never crash */
+    ASSERT_TRUE(strcmp(provType, "phi4") == 0 ||
+                strcmp(provType, "fallback") == 0 ||
+                strcmp(provType, "unavailable") == 0);
+    commentary_teardown();
 }

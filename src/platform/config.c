@@ -73,6 +73,20 @@ void config_defaults(Config *cfg) {
     /* Scrollbar */
     cfg->scrollbar.enabled  = true;
     cfg->scrollbar.width_px = 8;
+
+    /* AI */
+    cfg->ai.enabled = true;
+    cfg->ai.commentary.enabled = true;
+    strcpy(cfg->ai.commentary.provider, "phi4");
+    strcpy(cfg->ai.commentary.prefix, "[ai]");
+    cfg->ai.commentary.max_chars = 120;
+    cfg->ai.commentary.timeout_ms = 250;
+    cfg->ai.commentary.fallback_enabled = true;
+    strcpy(cfg->ai.commentary.language, "ru");
+    cfg->ai.phi4.model_path[0] = '\0';
+    cfg->ai.phi4.context_tokens = 1024;
+    cfg->ai.phi4.max_tokens = 64;
+    cfg->ai.phi4.temperature = 0.85f;
 }
 
 /* ─── Color parsing ──────────────────────────────────────────────────────── */
@@ -207,6 +221,21 @@ static void apply_kv(ParseCtx *ctx, const char *key, char *val) {
     } else if (strcmp(sec, "scrollbar") == 0) {
         if      (!strcmp(key,"enabled"))   c->scrollbar.enabled  = !strcmp(v,"true");
         else if (!strcmp(key,"width_px"))  c->scrollbar.width_px = atoi(v);
+    } else if (strcmp(sec, "ai") == 0) {
+        if (!strcmp(key,"enabled")) c->ai.enabled = !strcmp(v,"true");
+    } else if (strcmp(sec, "ai.commentary") == 0) {
+        if      (!strcmp(key,"enabled"))         c->ai.commentary.enabled = !strcmp(v,"true");
+        else if (!strcmp(key,"provider"))        strncpy(c->ai.commentary.provider, v, sizeof(c->ai.commentary.provider)-1);
+        else if (!strcmp(key,"prefix"))          strncpy(c->ai.commentary.prefix, v, sizeof(c->ai.commentary.prefix)-1);
+        else if (!strcmp(key,"max_chars"))       c->ai.commentary.max_chars = atoi(v);
+        else if (!strcmp(key,"timeout_ms"))      c->ai.commentary.timeout_ms = atoi(v);
+        else if (!strcmp(key,"fallback_enabled")) c->ai.commentary.fallback_enabled = !strcmp(v,"true");
+        else if (!strcmp(key,"language"))        strncpy(c->ai.commentary.language, v, sizeof(c->ai.commentary.language)-1);
+    } else if (strcmp(sec, "ai.phi4") == 0) {
+        if      (!strcmp(key,"model_path"))      strncpy(c->ai.phi4.model_path, v, sizeof(c->ai.phi4.model_path)-1);
+        else if (!strcmp(key,"context_tokens"))  c->ai.phi4.context_tokens = atoi(v);
+        else if (!strcmp(key,"max_tokens"))      c->ai.phi4.max_tokens = atoi(v);
+        else if (!strcmp(key,"temperature"))     c->ai.phi4.temperature = (float)atof(v);
     }
 }
 

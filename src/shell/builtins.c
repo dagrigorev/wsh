@@ -1009,16 +1009,10 @@ int builtin_atrm(int argc, char **argv, ShellContext *ctx) {
 int builtin_ai(int argc, char **argv, ShellContext *ctx) {
     if (argc < 2) {
         outln(ctx, "ai: expected subcommand: status, suggest, explain, fix, on, off");
-        outln(ctx, "Usage:");
-        outln(ctx, "  ai status              show AI status");
-        outln(ctx, "  ai suggest             show project-aware suggestions");
-        outln(ctx, "  ai suggest build       show build suggestions");
-        outln(ctx, "  ai suggest test        show test suggestions");
-        outln(ctx, "  ai suggest git         show Git suggestions");
-        outln(ctx, "  ai explain             explain last command failure");
-        outln(ctx, "  ai fix                 suggest a command fix");
-        outln(ctx, "  ai on                  enable AI assistance");
-        outln(ctx, "  ai off                 disable AI assistance");
+        outln(ctx, "  ai commentary on/off              toggle command commentary");
+        outln(ctx, "  ai commentary test <cmd...>       test commentary with a command");
+        outln(ctx, "  ai phi4 status                    show Phi-4 model status");
+        outln(ctx, "  ai phi4 reload                    reload Phi-4 runtime");
         return 1;
     }
 
@@ -1036,6 +1030,62 @@ int builtin_ai(int argc, char **argv, ShellContext *ctx) {
     } else if (strcmp(argv[1], "off") == 0) {
         ctx->ai_enabled = false;
         outln(ctx, "AI: disabled");
+    } else if (strcmp(argv[1], "commentary") == 0) {
+        if (argc < 3) {
+            outfmt(ctx, "Commentary: %s\r\n",
+                   wsh_ai_commentary_is_enabled(ctx) ? "enabled" : "disabled");
+            outfmt(ctx, "Provider: %s\r\n", wsh_ai_commentary_provider_type(ctx));
+            return 0;
+        }
+        if (strcmp(argv[2], "on") == 0) {
+            wsh_ai_commentary_set_enabled(ctx, true);
+            outln(ctx, "AI commentary: enabled");
+        } else if (strcmp(argv[2], "off") == 0) {
+            wsh_ai_commentary_set_enabled(ctx, false);
+            outln(ctx, "AI commentary: disabled");
+        } else if (strcmp(argv[2], "test") == 0 && argc >= 4) {
+            /* Reconstruct command from remaining args */
+            char cmd_buf[4096] = {0};
+            for (int i = 3; i < argc; i++) {
+                if (i > 3) strncat(cmd_buf, " ", sizeof(cmd_buf) - strlen(cmd_buf) - 1);
+                strncat(cmd_buf, argv[i], sizeof(cmd_buf) - strlen(cmd_buf) - 1);
+            }
+            if (wsh_ai_commentary_test(ctx, cmd_buf)) {
+                const char *cc = wsh_ai_try_get_commentary(ctx, cmd_buf);
+                if (cc && cc[0]) {
+                    outfmt(ctx, "%s\r\n", cc);
+                } else {
+                    outln(ctx, "No commentary generated.");
+                }
+            } else {
+                outln(ctx, "No commentary generated.");
+            }
+        } else {
+            outln(ctx, "Usage: ai commentary on|off|test <cmd...>");
+            return 1;
+        }
+    } else if (strcmp(argv[1], "phi4") == 0) {
+        if (argc < 3) {
+            outln(ctx, "Usage: ai phi4 status|reload");
+            return 1;
+        }
+        if (strcmp(argv[2], "status") == 0) {
+            outfmt(ctx, "Phi-4 model: %s\r\n",
+                   wsh_ai_phi4_model_loaded(ctx) ? "loaded" : "missing");
+            const char *mp = wsh_ai_phi4_model_path(ctx);
+            if (mp && mp[0]) {
+                outfmt(ctx, "Model path: %s\r\n", mp);
+            }
+        } else if (strcmp(argv[2], "reload") == 0) {
+            if (wsh_ai_phi4_reload(ctx)) {
+                outln(ctx, "Phi-4 runtime reloaded.");
+            } else {
+                outln(ctx, "Phi-4 runtime reload failed.");
+            }
+        } else {
+            outfmt(ctx, "ai: unknown phi4 subcommand: %s\r\n", argv[2]);
+            return 1;
+        }
     } else {
         outfmt(ctx, "ai: unknown subcommand: %s\r\n", argv[1]);
         return 1;

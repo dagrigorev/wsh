@@ -29,6 +29,7 @@
 #include "shell/shell_ctx.h"
 #include "shell/history.h"
 #include "shell/completion.h"
+#include "ai/wsh_ai.h"
 #include "window.h"
 #include "repl.h"
 #include "ai/wsh_ai.h"
@@ -357,6 +358,8 @@ static bool pane_start(TerminalPane *pane) {
         SetCurrentDirectoryW(old_cwd);
         HeapFree(GetProcessHeap(), 0, old_cwd);
     }
+    /* Apply AI runtime config from TOML settings */
+    wsh_ai_apply_runtime_config(&pane->shell, &g_cfg.ai);
     /* Initialize proactive AI reasoning micro-model */
     if (pane->shell.ai_enabled) {
         wsh_ai_init_reasoning(&pane->shell);
@@ -1435,20 +1438,15 @@ static void draw_chrome(Renderer *r) {
 
 /* ── Trigger AI reasoning update after input changes ───────────────────────── */
 
-static DWORD g_last_ai_tick = 0;
+#define AI_DEBOUNCE_TIMER_ID 4
+#define AI_DEBOUNCE_DELAY_MS 400
 
 static void trigger_ai_reasoning(TerminalPane *p) {
     if (!p || p->use_pty) return;
     if (!p->shell.ai_enabled) return;
     if (repl_is_reasoning_dirty(&p->repl)) {
-        const char *line = repl_get_line(&p->repl);
-        if (line && line[0]) {
-            DWORD now = GetTickCount();
-            if (now - g_last_ai_tick > 200) {
-                g_last_ai_tick = now;
-                wsh_ai_trigger_analysis(&p->shell, line);
-            }
-        }
+        KillTimer(g_hwnd, AI_DEBOUNCE_TIMER_ID);
+        SetTimer(g_hwnd, AI_DEBOUNCE_TIMER_ID, AI_DEBOUNCE_DELAY_MS, NULL);
         InvalidateRect(g_hwnd, NULL, FALSE);
     }
 }
@@ -1546,6 +1544,16 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 InvalidateRect(hwnd, NULL, FALSE);
             }
             if (wParam == 3) { session_save_now(); }
+            if (wParam == AI_DEBOUNCE_TIMER_ID) {
+                KillTimer(hwnd, AI_DEBOUNCE_TIMER_ID);
+                TerminalPane *ap = active_pane();
+                if (ap && !ap->use_pty && ap->shell.ai_enabled) {
+                    const char *line = repl_get_line(&ap->repl);
+                    if (line && line[0])
+                        wsh_ai_trigger_analysis(&ap->shell, line);
+                }
+                InvalidateRect(hwnd, NULL, FALSE);
+            }
             return 0;
 
         case WM_SETFOCUS: { TerminalPane *p = active_pane(); if (p) p->screen.cursor_visible = true; InvalidateRect(hwnd, NULL, FALSE); return 0; }
@@ -1835,6 +1843,17 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 if (tab->initialized && pi < tab->pane_count) {
                     TerminalPane *pane = &tab->panes[pi];
                     if (pane->initialized && !pane->shell.exit_requested) {
+                        /* Try to get AI commentary for the executed command */
+                        if (pane->shell.ai_enabled && pane->shell.last_command[0]) {
+                            const char *cc = wsh_ai_try_get_commentary(
+                                &pane->shell, pane->shell.last_command);
+                            if (cc && cc[0]) {
+                                char cc_line[512];
+                                _snprintf(cc_line, sizeof(cc_line),
+                                    "\x1b[2m[ai]\x1b[0m %s\r\n", cc);
+                                io_write(pane->shell.io, cc_line);
+                            }
+                        }
                         repl_show_prompt(&pane->repl);
                         update_native_scrollbar(hwnd);
                         InvalidateRect(hwnd, NULL, FALSE);

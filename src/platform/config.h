@@ -79,6 +79,29 @@ typedef struct {
     bool prompt_on_restore;
 } ConfigSession;
 
+typedef struct ConfigAiCommentary {
+    bool enabled;
+    char provider[32];       /* "phi4" or "fallback" */
+    char prefix[32];         /* "[ai]" */
+    int  max_chars;
+    int  timeout_ms;
+    bool fallback_enabled;
+    char language[8];        /* "ru" */
+} ConfigAiCommentary;
+
+typedef struct ConfigAiPhi4 {
+    char  model_path[512];
+    int   context_tokens;
+    int   max_tokens;
+    float temperature;
+} ConfigAiPhi4;
+
+typedef struct ConfigAi {
+    bool enabled;
+    ConfigAiCommentary commentary;
+    ConfigAiPhi4 phi4;
+} ConfigAi;
+
 typedef struct {
     ConfigGeneral  general;
     ConfigFont     font;
@@ -88,6 +111,7 @@ typedef struct {
     ConfigTabs     tabs;
     ConfigScrollbar scrollbar;
     ConfigSession  session;
+    ConfigAi       ai;
 } Config;
 
 /* ─── API ────────────────────────────────────────────────────────────────── */
