@@ -1,0 +1,67 @@
+AI(1)                           Wsh Manual                           AI(1)
+
+NAME
+    ai - built-in AI assistant with proactive reasoning
+
+SYNOPSIS
+    ai status
+    ai suggest [build|test|git]
+    ai explain
+    ai fix
+    ai on
+    ai off
+
+DESCRIPTION
+    Wsh includes a local AI assistant that helps you work more efficiently
+    in the terminal. All AI processing runs entirely on your machine with
+    no network access.
+
+    Proactive reasoning (enabled by default):
+      As you type, Wsh detects typos, suggests completions, and provides
+      friendly hints. Suggestions appear as an overlay below the current
+      line. The assistant recognises common tools: git, npm, cmake, docker,
+      dotnet, python, and many more.
+
+SUBCOMMANDS
+    ai status
+        Show current AI state, loaded provider info, and n-gram model
+        statistics.
+
+    ai suggest
+        Show project-aware suggestions based on detected project files
+        (CMakeLists.txt, *.sln, *.csproj, package.json, .git/).
+
+    ai suggest build
+        Filter suggestions to build-related commands.
+
+    ai suggest test
+        Filter suggestions to test-related commands.
+
+    ai suggest git
+        Filter suggestions to Git-related commands.
+
+    ai explain
+        Analyse the last command and explain its exit code or error.
+
+    ai fix
+        Suggest a correction for a mistyped command.
+
+    ai on
+        Enable proactive AI assistance (default).
+
+    ai off
+        Disable proactive AI assistance.
+
+EXAMPLES
+    ai status
+    ai suggest
+    ai suggest git
+    ai explain
+    ai fix
+
+FILES
+    The n-gram language model is embedded in the binary. No external model
+    files are required.
+
+SEE ALSO
+    man wsh, man history, man help

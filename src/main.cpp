@@ -1069,14 +1069,19 @@ static void draw_chrome(Renderer *r) {
 
 /* ── Trigger AI reasoning update after input changes ───────────────────────── */
 
+static DWORD g_last_ai_tick = 0;
+
 static void trigger_ai_reasoning(TerminalPane *p) {
     if (!p || p->use_pty) return;
     if (!p->shell.ai_enabled) return;
-    /* Check if REPL's line changed and trigger async analysis */
     if (repl_is_reasoning_dirty(&p->repl)) {
         const char *line = repl_get_line(&p->repl);
         if (line && line[0]) {
-            wsh_ai_trigger_analysis(&p->shell, line);
+            DWORD now = GetTickCount();
+            if (now - g_last_ai_tick > 200) {
+                g_last_ai_tick = now;
+                wsh_ai_trigger_analysis(&p->shell, line);
+            }
         }
         InvalidateRect(g_hwnd, NULL, FALSE);
     }
@@ -1106,28 +1111,18 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     if (sh->ai_enabled && sh->ai_state) {
                         const char *input = repl_get_line(&ap->repl);
                         if (input && input[0]) {
-                            /* Line 1: show what the user typed */
-                            char line_buf[260];
-                            _snprintf(line_buf, sizeof(line_buf), "user input: %s", input);
-                            wchar_t *winput = u8_to_u16(line_buf, NULL);
-                            if (winput) {
-                                wcsncpy(g_renderer.reasoning_line1, winput, 255);
-                                g_renderer.reasoning_line1[255] = L'\0';
-                                str_free(winput);
-                            }
-                            /* Line 2: friendly AI reasoning (may lag by one keystroke) */
                             const char *reason = wsh_ai_get_reasoning(sh);
                             if (reason && reason[0]) {
                                 char reason_buf[260];
-                                _snprintf(reason_buf, sizeof(reason_buf), "reason: %s", reason);
+                                _snprintf(reason_buf, sizeof(reason_buf), "%s", reason);
                                 wchar_t *wreason = u8_to_u16(reason_buf, NULL);
                                 if (wreason) {
-                                    wcsncpy(g_renderer.reasoning_line2, wreason, 255);
-                                    g_renderer.reasoning_line2[255] = L'\0';
+                                    wcsncpy(g_renderer.reasoning_line1, wreason, 255);
+                                    g_renderer.reasoning_line1[255] = L'\0';
                                     str_free(wreason);
                                 }
                             } else {
-                                g_renderer.reasoning_line2[0] = L'\0';
+                                g_renderer.reasoning_line1[0] = L'\0';
                             }
                             g_renderer.reasoning_active = true;
                         } else {

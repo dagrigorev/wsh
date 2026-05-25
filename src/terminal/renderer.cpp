@@ -311,41 +311,44 @@ void renderer_paint_region(Renderer *r, const ScreenBuffer *sb, const RECT *rect
     }
 
     /* ── Reasoning overlay (proactive AI subtitles) ────────────────────────── */
-    if (active && r->reasoning_active) {
-        float overlay_y = oy + (float)(cursor_y + 1) * r->cell_h + 2.0f;
+    if (active && r->reasoning_active && r->reasoning_line1[0]) {
+        float line_h = r->cell_h * 0.80f;
+        float overlay_h = line_h + 4.0f;
+        float overlay_y;
+        float below = oy + (float)(cursor_y + 1) * r->cell_h + 2.0f;
+        float above = oy + (float)cursor_y * r->cell_h - overlay_h - 2.0f;
+        float pane_bottom = (float)rect->bottom - (float)r->padding_y;
+        if (below + overlay_h <= pane_bottom) {
+            overlay_y = below;
+        } else if (above >= (float)rect->top + (float)r->padding_y) {
+            overlay_y = above;
+        } else {
+            overlay_y = below;
+        }
+
         D2D1_COLOR_F overlay_bg = to_d2d(r->bg_color);
         overlay_bg.a = 0.65f;
         D2D1_COLOR_F overlay_fg = to_d2d(r->fg_color);
         overlay_fg.a = 0.80f;
 
         float max_w = cols * r->cell_w;
-        float line_h = r->cell_h * 0.80f; /* slightly smaller than cell */
 
-        for (int line = 0; line < 2; line++) {
-            const wchar_t* text = (line == 0) ? r->reasoning_line1 : r->reasoning_line2;
-            if (!text || text[0] == L'\0') continue;
+        D2D1_ROUNDED_RECT bg_rect;
+        bg_rect.rect.left   = ox;
+        bg_rect.rect.top    = overlay_y;
+        bg_rect.rect.right  = ox + max_w;
+        bg_rect.rect.bottom = overlay_y + line_h;
+        bg_rect.radiusX = 4.0f;
+        bg_rect.radiusY = 4.0f;
+        r->bg_brush->SetColor(overlay_bg);
+        r->render_target->FillRoundedRectangle(bg_rect, r->bg_brush);
 
-            /* Background pill */
-            D2D1_ROUNDED_RECT bg_rect;
-            bg_rect.rect.left   = ox;
-            bg_rect.rect.top    = overlay_y;
-            bg_rect.rect.right  = ox + max_w;
-            bg_rect.rect.bottom = overlay_y + line_h;
-            bg_rect.radiusX = 4.0f;
-            bg_rect.radiusY = 4.0f;
-            r->bg_brush->SetColor(overlay_bg);
-            r->render_target->FillRoundedRectangle(bg_rect, r->bg_brush);
-
-            /* Text */
-            D2D1_RECT_F text_rect = { ox + 4.0f, overlay_y + 1.0f,
-                                      ox + max_w - 4.0f, overlay_y + line_h };
-            r->fg_brush->SetColor(overlay_fg);
-            r->render_target->DrawTextW(text, (UINT32)wcslen(text),
-                r->font.fmt_normal, text_rect, r->fg_brush,
-                D2D1_DRAW_TEXT_OPTIONS_CLIP);
-
-            overlay_y += line_h + 2.0f;
-        }
+        D2D1_RECT_F text_rect = { ox + 4.0f, overlay_y + 1.0f,
+                                  ox + max_w - 4.0f, overlay_y + line_h };
+        r->fg_brush->SetColor(overlay_fg);
+        r->render_target->DrawTextW(r->reasoning_line1, (UINT32)wcslen(r->reasoning_line1),
+            r->font.fmt_normal, text_rect, r->fg_brush,
+            D2D1_DRAW_TEXT_OPTIONS_CLIP);
     }
 
     r->render_target->PopAxisAlignedClip();
