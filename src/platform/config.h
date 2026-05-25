@@ -5,6 +5,7 @@
 #include <windows.h>
 #include "wsh_bool.h"
 #include <stdint.h>
+#include "../core/session.h"
 
 
 #ifdef __cplusplus
@@ -72,6 +73,13 @@ typedef struct {
 } ConfigScrollbar;
 
 typedef struct {
+    bool enabled;
+    int  autosave_interval;
+    int  max_scrollback_lines;
+    bool prompt_on_restore;
+} ConfigSession;
+
+typedef struct {
     ConfigGeneral  general;
     ConfigFont     font;
     ConfigCursor   cursor;
@@ -79,6 +87,7 @@ typedef struct {
     ConfigKeybinds keybinds;
     ConfigTabs     tabs;
     ConfigScrollbar scrollbar;
+    ConfigSession  session;
 } Config;
 
 /* ─── API ────────────────────────────────────────────────────────────────── */

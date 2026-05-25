@@ -151,6 +151,14 @@ extern "C" const char *wsh_ai_get_reasoning(ShellContext *ctx) {
     return s->reason_result.c_str();
 }
 
+extern "C" void wsh_ai_clear_reasoning(ShellContext *ctx) {
+    if (!ctx || !ctx->ai_state) return;
+    auto *s = static_cast<WshAiState *>(ctx->ai_state);
+    std::lock_guard<std::mutex> lock(s->reason_mutex);
+    s->reason_result.clear();
+    s->reason_input.clear();
+}
+
 extern "C" const char *wsh_ai_get_reasoning_input(ShellContext *ctx) {
     if (!ctx || !ctx->ai_state) return "";
     auto *s = static_cast<WshAiState *>(ctx->ai_state);

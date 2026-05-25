@@ -187,10 +187,8 @@ static void ml_sort_dedup(MatchList *m) {
     for (int i = 1; i < m->count; i++) {
         if (strcmp(m->items[i], m->items[out-1]) != 0) {
             m->items[out++] = m->items[i];
-            m->items[i] = NULL;
         } else {
             HeapFree(GetProcessHeap(), 0, m->items[i]);
-            m->items[i] = NULL;
         }
     }
     m->count = out;

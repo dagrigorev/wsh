@@ -32,6 +32,7 @@
 #include "shell/expand.h"
 #include "core/str_util.h"
 #include "core/log.h"
+#include "ai/wsh_ai.h"
 #include "core/unicode.h"
 
 /* ── Internal helpers ─────────────────────────────────────────────────────── */
@@ -395,6 +396,7 @@ bool repl_handle_input(Repl *r, const char *bytes, int len) {
         switch (c) {
             /* Ctrl+C — cancel line */
             case 0x03:
+                wsh_ai_clear_reasoning(r->ctx);
                 emit(r, "^C\r\n");
                 r->len = r->cursor = 0;
                 r->reasoning_dirty = true;
@@ -431,17 +433,16 @@ bool repl_handle_input(Repl *r, const char *bytes, int len) {
 
             /* Enter */
             case '\r': case '\n': {
+                wsh_ai_clear_reasoning(r->ctx);
                 bool launched = execute_line(r);
                 if (r->ctx->exit_requested) return false;
-                /* If we didn't launch a thread (empty line, failure), show
-                 * the prompt now.  Otherwise the completion callback handles
-                 * prompt display on the main thread. */
                 if (!launched) repl_show_prompt(r);
                 return true;
             }
 
             /* Tab */
             case '\t':
+                wsh_ai_clear_reasoning(r->ctx);
                 handle_tab(r);
                 return true;
 

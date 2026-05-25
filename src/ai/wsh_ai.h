@@ -28,6 +28,9 @@ void wsh_ai_init_reasoning(ShellContext *ctx);
 /* Trigger async analysis of current input. Non-blocking, called from REPL. */
 void wsh_ai_trigger_analysis(ShellContext *ctx, const char *input);
 
+/* Clear the current reasoning result (called on Enter/Tab/Ctrl+C to hide suggestions). */
+void wsh_ai_clear_reasoning(ShellContext *ctx);
+
 /* Get the latest reasoning result text. Returns "" if no result yet. 
  * The result is cached; this is safe to call from the UI paint thread. */
 const char *wsh_ai_get_reasoning(ShellContext *ctx);

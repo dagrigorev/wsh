@@ -19,6 +19,7 @@
 #include "core/log.h"
 #include "core/path_util.h"
 #include "core/unicode.h"
+#include "core/session.h"
 #include "platform/config.h"
 #include "platform/pty.h"
 #include "platform/input.h"
@@ -855,6 +856,371 @@ static void screen_line_to_ascii(const ScreenBuffer *sb, int logical_row, char *
     out[oi] = '\0';
 }
 
+/* ── Session Persistence ─────────────────────────────────────────────────── */
+
+struct WriteBuf { uint8_t *data; size_t cap; size_t off; };
+
+static void wb_init(struct WriteBuf *wb, void *buf, size_t cap) {
+    wb->data = (uint8_t*)buf; wb->cap = cap; wb->off = 0;
+}
+
+static bool wb_write(struct WriteBuf *wb, const void *src, size_t n) {
+    if (wb->off + n > wb->cap) return false;
+    memcpy(wb->data + wb->off, src, n);
+    wb->off += n;
+    return true;
+}
+
+struct ReadBuf { const uint8_t *data; size_t size; size_t off; };
+
+static void rb_init(struct ReadBuf *rb, const void *data, size_t size) {
+    rb->data = (const uint8_t*)data; rb->size = size; rb->off = 0;
+}
+
+static bool rb_read(struct ReadBuf *rb, void *dst, size_t n) {
+    if (rb->off + n > rb->size) return false;
+    memcpy(dst, rb->data + rb->off, n);
+    rb->off += n;
+    return true;
+}
+
+static void session_save_now(void) {
+    if (!g_cfg.session.enabled) return;
+    size_t buf_size = 64ULL * 1024ULL * 1024ULL;
+    uint8_t *buf = (uint8_t*)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, buf_size);
+    if (!buf) return;
+
+    struct WriteBuf wb;
+    wb_init(&wb, buf, buf_size);
+
+    /* Header */
+    uint32_t magic = WSH_SESSION_MAGIC, version = WSH_SESSION_VERSION;
+    uint32_t tab_count_u32 = (uint32_t)g_tab_count;
+    uint32_t active_tab_u32 = (uint32_t)g_active_tab;
+    uint8_t sidebar = g_sidebar_visible ? 1 : 0;
+    wb_write(&wb, &magic, sizeof(magic));
+    wb_write(&wb, &version, sizeof(version));
+    wb_write(&wb, &tab_count_u32, sizeof(tab_count_u32));
+    wb_write(&wb, &active_tab_u32, sizeof(active_tab_u32));
+    wb_write(&wb, &sidebar, sizeof(sidebar));
+
+    EnterCriticalSection(&g_lock);
+    for (int ti = 0; ti < g_tab_count && ti < WSH_MAX_TABS; ++ti) {
+        TerminalTab *tab = &g_tabs[ti];
+        if (!tab->initialized) continue;
+
+        uint32_t pc = (uint32_t)tab->pane_count;
+        uint32_t ap = (uint32_t)tab->active_pane;
+        wb_write(&wb, &pc, sizeof(pc));
+        wb_write(&wb, &ap, sizeof(ap));
+
+        for (int pi = 0; pi < tab->pane_count && pi < WSH_MAX_PANES; ++pi) {
+            TerminalPane *pane = &tab->panes[pi];
+            if (!pane->initialized) continue;
+
+            uint8_t init = 1;
+            wb_write(&wb, &init, 1);
+
+            uint16_t slen;
+            slen = (uint16_t)strlen(pane->startup_cwd);
+            wb_write(&wb, &slen, sizeof(slen));
+            wb_write(&wb, pane->startup_cwd, slen);
+
+            slen = (uint16_t)strlen(pane->display_cwd);
+            wb_write(&wb, &slen, sizeof(slen));
+            wb_write(&wb, pane->display_cwd, slen);
+
+            slen = (uint16_t)strlen(pane->screen.title);
+            wb_write(&wb, &slen, sizeof(slen));
+            wb_write(&wb, pane->screen.title, slen);
+
+            uint32_t cols = (uint32_t)pane->screen.cols;
+            uint32_t rows = (uint32_t)pane->screen.rows;
+            uint32_t cx = (uint32_t)pane->screen.cursor_x;
+            uint32_t cy = (uint32_t)pane->screen.cursor_y;
+            uint8_t cv = pane->screen.cursor_visible ? 1 : 0;
+            uint8_t alt = pane->screen.alt_screen_active ? 1 : 0;
+            uint8_t has_exit = pane->has_exit_code ? 1 : 0;
+
+            wb_write(&wb, &cols, sizeof(cols));
+            wb_write(&wb, &rows, sizeof(rows));
+            wb_write(&wb, &cx, sizeof(cx));
+            wb_write(&wb, &cy, sizeof(cy));
+            wb_write(&wb, &cv, 1);
+            wb_write(&wb, &alt, 1);
+            wb_write(&wb, &has_exit, 1);
+            if (has_exit) wb_write(&wb, &pane->last_exit_code, sizeof(pane->last_exit_code));
+
+            int total_cells = (int)(cols * rows);
+            uint32_t cell_bytes = (uint32_t)((size_t)total_cells * sizeof(ScreenCell));
+            wb_write(&wb, &cell_bytes, sizeof(cell_bytes));
+            wb_write(&wb, pane->screen.cells, cell_bytes);
+
+            uint32_t alt_bytes = 0;
+            if (alt && pane->screen.alt_cells) {
+                alt_bytes = (uint32_t)((size_t)total_cells * sizeof(ScreenCell));
+                wb_write(&wb, &alt_bytes, sizeof(alt_bytes));
+                wb_write(&wb, pane->screen.alt_cells, alt_bytes);
+            } else {
+                wb_write(&wb, &alt_bytes, sizeof(alt_bytes));
+            }
+
+            int max_sb = g_cfg.session.max_scrollback_lines > 0
+                ? g_cfg.session.max_scrollback_lines : WSH_SESSION_MAX_SCROLLBACK;
+            int sb_lines = pane->screen.scrollback_count;
+            int save_sb = sb_lines < max_sb ? sb_lines : max_sb;
+
+            uint32_t sb_line_count = (uint32_t)save_sb;
+            uint32_t sb_bytes = (uint32_t)((size_t)save_sb * cols * sizeof(ScreenCell));
+            wb_write(&wb, &sb_line_count, sizeof(sb_line_count));
+            wb_write(&wb, &sb_bytes, sizeof(sb_bytes));
+
+            if (save_sb > 0) {
+                int skip = sb_lines - save_sb;
+                for (int sl = skip; sl < sb_lines; ++sl) {
+                    ScreenCell *cell = screen_scrollback_line_from_oldest(&pane->screen, sl, 0);
+                    if (cell) wb_write(&wb, cell, (size_t)cols * sizeof(ScreenCell));
+                }
+            }
+        }
+    }
+    LeaveCriticalSection(&g_lock);
+
+    session_save_file(buf, wb.off);
+    HeapFree(GetProcessHeap(), 0, buf);
+    WSH_LOG_INFO("session saved (%zu bytes)", wb.off);
+}
+
+static bool session_restore_now(void) {
+    if (!g_cfg.session.enabled || !session_exists()) return false;
+
+    size_t buf_size = 64ULL * 1024ULL * 1024ULL;
+    uint8_t *buf = (uint8_t*)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, buf_size);
+    if (!buf) return false;
+
+    size_t actual = buf_size;
+    if (!session_read_file(buf, &actual)) {
+        HeapFree(GetProcessHeap(), 0, buf);
+        WSH_LOG_WARN("session_restore: read failed");
+        return false;
+    }
+
+    struct ReadBuf rb;
+    rb_init(&rb, buf, actual);
+
+    uint32_t magic, version, tab_count_u32, active_tab_u32;
+    uint8_t sidebar;
+    if (!rb_read(&rb, &magic, sizeof(magic)) || magic != WSH_SESSION_MAGIC ||
+        !rb_read(&rb, &version, sizeof(version)) || version != WSH_SESSION_VERSION ||
+        !rb_read(&rb, &tab_count_u32, sizeof(tab_count_u32)) ||
+        !rb_read(&rb, &active_tab_u32, sizeof(active_tab_u32)) ||
+        !rb_read(&rb, &sidebar, sizeof(sidebar))) {
+        HeapFree(GetProcessHeap(), 0, buf);
+        WSH_LOG_WARN("session_restore: bad header");
+        return false;
+    }
+
+    WSH_LOG_INFO("session_restore: %lu tabs, active=%lu", tab_count_u32, active_tab_u32);
+
+    if (g_cfg.session.prompt_on_restore) {
+        wchar_t msg[128];
+        wsprintfW(msg, L"Restore previous session (%lu tab%s)?",
+                  tab_count_u32, tab_count_u32 == 1 ? L"" : L"s");
+        if (MessageBoxW(g_hwnd, msg, L"Wsh", MB_YESNO | MB_ICONQUESTION) != IDYES) {
+            HeapFree(GetProcessHeap(), 0, buf);
+            session_delete();
+            return false;
+        }
+    }
+
+    /* First pass: read metadata and create panes */
+    /* We need to store cell data offsets for a second pass */
+    struct PaneCellOffsets {
+        size_t cell_bytes_off;
+        size_t cell_data_off;
+        size_t cell_data_size;
+        size_t alt_bytes_off;
+        size_t alt_data_off;
+        size_t alt_data_size;
+        size_t sb_count_off;
+        size_t sb_bytes_off;
+        size_t sb_data_off;
+        size_t sb_data_size;
+    };
+
+    struct RestorePane {
+        char  startup_cwd[MAX_PATH];
+        char  display_cwd[MAX_PATH];
+        char  title[256];
+        int   cols, rows;
+        int   cursor_x, cursor_y;
+        bool  cursor_visible;
+        bool  alt_screen_active;
+        DWORD last_exit_code;
+        bool  has_exit_code;
+        struct PaneCellOffsets offs;
+    };
+
+    struct RestoreTab {
+        int pane_count;
+        int active_pane;
+        struct RestorePane panes[WSH_MAX_PANES];
+    };
+
+    struct RestoreTab rtabs[WSH_MAX_TABS];
+    int restore_tab_count = 0;
+
+    for (uint32_t ti = 0; ti < tab_count_u32 && ti < WSH_MAX_TABS; ++ti) {
+        uint32_t pc, ap;
+        if (!rb_read(&rb, &pc, sizeof(pc)) || !rb_read(&rb, &ap, sizeof(ap))) break;
+        if (pc == 0 || pc > WSH_MAX_PANES) {
+            for (uint32_t si = 0; si < pc; ++si) {
+                uint8_t sinit; rb_read(&rb, &sinit, 1);
+                if (!sinit) continue;
+                uint16_t slen;
+                rb_read(&rb, &slen, sizeof(slen)); rb.off += slen;
+                rb_read(&rb, &slen, sizeof(slen)); rb.off += slen;
+                rb_read(&rb, &slen, sizeof(slen)); rb.off += slen;
+                rb.off += 4*5 + 3;
+                uint8_t has_exit2; memcpy(&has_exit2, rb.data + rb.off - 1, 1);
+                if (has_exit2) rb.off += 4;
+                uint32_t cb, ab;
+                rb_read(&rb, &cb, sizeof(cb)); rb.off += cb;
+                rb_read(&rb, &ab, sizeof(ab)); rb.off += ab;
+                uint32_t sbc, sbb;
+                rb_read(&rb, &sbc, sizeof(sbc)); rb_read(&rb, &sbb, sizeof(sbb)); rb.off += sbb;
+            }
+            continue;
+        }
+
+        struct RestoreTab *rt = &rtabs[restore_tab_count++];
+        rt->pane_count = (int)pc;
+        rt->active_pane = (int)ap;
+
+        for (uint32_t pi = 0; pi < pc; ++pi) {
+            struct RestorePane *rp = &rt->panes[pi];
+            memset(rp, 0, sizeof(*rp));
+
+            uint8_t init;
+            rb_read(&rb, &init, 1);
+            if (!init) continue;
+
+            uint16_t slen;
+            rb_read(&rb, &slen, sizeof(slen));
+            if (slen > 0 && slen < MAX_PATH) { rb_read(&rb, rp->startup_cwd, slen); rp->startup_cwd[slen] = '\0'; }
+
+            rb_read(&rb, &slen, sizeof(slen));
+            if (slen > 0 && slen < MAX_PATH) { rb_read(&rb, rp->display_cwd, slen); rp->display_cwd[slen] = '\0'; }
+
+            rb_read(&rb, &slen, sizeof(slen));
+            if (slen > 0 && slen < 256) { rb_read(&rb, rp->title, slen); rp->title[slen] = '\0'; }
+
+            uint32_t cols, rows, cx, cy;
+            uint8_t cv, alt, has_exit;
+            rb_read(&rb, &cols, sizeof(cols));
+            rb_read(&rb, &rows, sizeof(rows));
+            rb_read(&rb, &cx, sizeof(cx));
+            rb_read(&rb, &cy, sizeof(cy));
+            rb_read(&rb, &cv, 1);
+            rb_read(&rb, &alt, 1);
+            rb_read(&rb, &has_exit, 1);
+
+            rp->cols = (int)cols;
+            rp->rows = (int)rows;
+            rp->cursor_x = (int)cx;
+            rp->cursor_y = (int)cy;
+            rp->cursor_visible = cv != 0;
+            rp->alt_screen_active = alt != 0;
+            rp->has_exit_code = has_exit != 0;
+            if (has_exit) rb_read(&rb, &rp->last_exit_code, sizeof(rp->last_exit_code));
+
+            /* Record cell data offsets */
+            rp->offs.cell_bytes_off = rb.off;
+            uint32_t cell_bytes;
+            rb_read(&rb, &cell_bytes, sizeof(cell_bytes));
+            rp->offs.cell_data_off = rb.off;
+            rp->offs.cell_data_size = cell_bytes;
+            rb.off += cell_bytes;
+
+            rp->offs.alt_bytes_off = rb.off;
+            uint32_t alt_bytes;
+            rb_read(&rb, &alt_bytes, sizeof(alt_bytes));
+            rp->offs.alt_data_off = rb.off;
+            rp->offs.alt_data_size = alt_bytes;
+            rb.off += alt_bytes;
+
+            rp->offs.sb_count_off = rb.off;
+            uint32_t sb_line_count, sb_bytes;
+            rb_read(&rb, &sb_line_count, sizeof(sb_line_count));
+            rp->offs.sb_bytes_off = rb.off;
+            rb_read(&rb, &sb_bytes, sizeof(sb_bytes));
+            rp->offs.sb_data_off = rb.off;
+            rp->offs.sb_data_size = sb_bytes;
+            rb.off += sb_bytes;
+        }
+    }
+
+    /* Create tabs and panes */
+    g_tab_count = 0;
+    g_active_tab = 0;
+    g_sidebar_visible = sidebar != 0;
+
+    for (int ti = 0; ti < restore_tab_count; ++ti) {
+        struct RestoreTab *rt = &rtabs[ti];
+        TerminalTab *tab = &g_tabs[ti];
+        memset(tab, 0, sizeof(*tab));
+        tab->pane_count = rt->pane_count;
+        tab->active_pane = rt->active_pane;
+        g_tab_count = ti + 1;
+
+        for (int pi = 0; pi < rt->pane_count; ++pi) {
+            struct RestorePane *rp = &rt->panes[pi];
+            TerminalPane *pane = &tab->panes[pi];
+            memset(pane, 0, sizeof(*pane));
+
+            if (rp->startup_cwd[0]) strncpy(pane->startup_cwd, rp->startup_cwd, MAX_PATH - 1);
+            if (rp->display_cwd[0]) strncpy(pane->display_cwd, rp->display_cwd, MAX_PATH - 1);
+
+            /* Store restore data in a temp pointer so pane_start can use it */
+            /* pane_start will call screen_init; we then overwrite the screen */
+            if (!pane_start(pane)) continue;
+
+            /* Restore scrollback history (the valuable part) */
+            ScreenBuffer *sb = &pane->screen;
+            if (rp->offs.sb_data_size > 0 && sb->scrollback) {
+                int saved_cols = rp->cols;
+                int copy_lines = (int)(rp->offs.sb_data_size / (sizeof(ScreenCell) * (size_t)saved_cols));
+                if (copy_lines > sb->scrollback_capacity) copy_lines = sb->scrollback_capacity;
+
+                ScreenCell *sb_src = (ScreenCell*)(buf + rp->offs.sb_data_off);
+                for (int sl = 0; sl < copy_lines; ++sl) {
+                    ScreenCell *dst = sb->scrollback + sl * sb->cols;
+                    ScreenCell *src = sb_src + sl * saved_cols;
+                    int copy_cols = saved_cols < sb->cols ? saved_cols : sb->cols;
+                    memcpy(dst, src, (size_t)copy_cols * sizeof(ScreenCell));
+                }
+                sb->scrollback_count = copy_lines;
+                sb->scrollback_head = copy_lines % sb->scrollback_capacity;
+            }
+
+            /* Restore display_cwd from saved session */
+            if (rp->display_cwd[0]) strncpy(pane->display_cwd, rp->display_cwd, MAX_PATH - 1);
+
+            pane->initialized = true;
+        }
+
+        tab->initialized = true;
+    }
+
+    g_active_tab = (int)active_tab_u32;
+    if (g_active_tab >= g_tab_count) g_active_tab = 0;
+
+    HeapFree(GetProcessHeap(), 0, buf);
+    session_delete();
+    WSH_LOG_INFO("session restored: %d tabs", g_tab_count);
+    return true;
+}
+
 static void update_search_matches(void) {
     g_search.match_count = 0;
     TerminalPane *p = active_pane();
@@ -1179,6 +1545,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     shell_scheduler_tick(&tp->shell);
                 InvalidateRect(hwnd, NULL, FALSE);
             }
+            if (wParam == 3) { session_save_now(); }
             return 0;
 
         case WM_SETFOCUS: { TerminalPane *p = active_pane(); if (p) p->screen.cursor_visible = true; InvalidateRect(hwnd, NULL, FALSE); return 0; }
@@ -1481,6 +1848,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             if (g_cfg.general.confirm_exit) {
                 if (MessageBoxW(hwnd, L"Close Wsh?", L"Wsh", MB_YESNO | MB_ICONQUESTION) != IDYES) return 0;
             }
+            session_save_now();
             DestroyWindow(hwnd); return 0;
 
         case WM_DESTROY:
@@ -1528,17 +1896,24 @@ static int wsh_run(HINSTANCE hInst, HINSTANCE hPrev, LPSTR lpCmd, int nShow) {
     g_renderer.reserved_top_px = dpi_scale(WSH_UI_TITLE_H + WSH_UI_TOOLBAR_H + WSH_UI_TERM_HEADER_H);
     g_renderer.reserved_bottom_px = dpi_scale(WSH_UI_STATUS_H);
 
-    RECT rc; terminal_view_rect(g_hwnd, &rc);
-    g_tabs[0].panes[0].rect = rc;
-    g_tab_count = 1;
-    g_active_tab = 0;
-    WSH_LOG_DEBUG("starting initial tab");
-    tab_start(&g_tabs[0], NULL);
-    WSH_LOG_DEBUG("initial tab started");
+    bool restored = session_restore_now();
+
+    if (!restored) {
+        RECT rc; terminal_view_rect(g_hwnd, &rc);
+        g_tabs[0].panes[0].rect = rc;
+        g_tab_count = 1;
+        g_active_tab = 0;
+        WSH_LOG_DEBUG("starting initial tab");
+        tab_start(&g_tabs[0], NULL);
+        WSH_LOG_DEBUG("initial tab started");
+    }
     layout_panes(g_hwnd);
     update_native_scrollbar(g_hwnd);
     refresh_runtime_status(true);
     SetTimer(g_hwnd, 2, 1000, NULL);
+    if (g_cfg.session.enabled && g_cfg.session.autosave_interval > 0) {
+        SetTimer(g_hwnd, 3, (UINT)g_cfg.session.autosave_interval * 1000, NULL);
+    }
     ShowWindow(g_hwnd, nShow == 0 ? SW_SHOWNORMAL : nShow);
     SetWindowPos(g_hwnd, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
     UpdateWindow(g_hwnd);
