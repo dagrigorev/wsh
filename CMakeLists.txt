@@ -67,6 +67,31 @@ add_link_options(
     $<$<CONFIG:Release>:/LTCG>
 )
 
+# ── Phi-4 local model support ─────────────────────────────────────────────────
+# MUST come before add_subdirectory(src/ai) so llamacpp_POPULATED is set when
+# ai/CMakeLists.txt runs its if(llamacpp_POPULATED) guard.
+option(WSH_ENABLE_PHI4 "Enable Phi-4 local model — fetch llama.cpp and link directly" OFF)
+
+if(WSH_ENABLE_PHI4)
+    message(STATUS "WSH: Fetching llama.cpp source for in-process inference...")
+    include(FetchContent)
+    FetchContent_Declare(llamacpp
+        URL      https://github.com/ggml-org/llama.cpp/archive/refs/tags/b9318.tar.gz
+        GIT_PROGRESS TRUE
+    )
+    # Suppress examples/tests/server — only build the core llama library
+    set(LLAMA_BUILD_TESTS    OFF CACHE BOOL "" FORCE)
+    set(LLAMA_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+    set(LLAMA_BUILD_SERVER   OFF CACHE BOOL "" FORCE)
+    FetchContent_MakeAvailable(llamacpp)
+    if(llamacpp_POPULATED)
+        add_compile_definitions(WSH_HAVE_LLAMA)
+        message(STATUS "WSH: llama.cpp fetched, direct inference enabled")
+    else()
+        message(WARNING "WSH: llama.cpp fetch failed — falling back to subprocess Phi-4")
+    endif()
+endif()
+
 # ── Sub-libraries (each a static lib — SOLID: one reason to change) ──────────
 add_subdirectory(src/core)
 add_subdirectory(src/ai)
@@ -93,39 +118,26 @@ add_custom_target(wsh_runtime_resources ALL
     COMMENT "Copying Wsh runtime resources to dist"
 )
 
-# ── Phi-4 local model support ──────────────────────────────────────────────
-option(WSH_ENABLE_PHI4 "Enable Phi-4 local model — fetch llama.cpp and link directly" OFF)
-
-if(WSH_ENABLE_PHI4)
-    message(STATUS "WSH: Fetching llama.cpp source for in-process inference...")
-    include(FetchContent)
-    FetchContent_Declare(llamacpp
-        URL      https://github.com/ggml-org/llama.cpp/archive/refs/tags/b9318.tar.gz
-        GIT_PROGRESS TRUE
-    )
-    # Suppress examples/tests/server — only build the core llama library
-    set(LLAMA_BUILD_TESTS   OFF CACHE BOOL "" FORCE)
-    set(LLAMA_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
-    set(LLAMA_BUILD_SERVER  OFF CACHE BOOL "" FORCE)
-    FetchContent_MakeAvailable(llamacpp)
-    if(llamacpp_POPULATED)
-        add_compile_definitions(WSH_HAVE_LLAMA)
-        # Copy llama.dll to dist directory alongside Wsh.exe.
-        # The llama target's TARGET_FILE generator expression resolves to the
-        # actual DLL location at build time.
-        if(NOT TARGET copy_llama_dll)
-            add_custom_target(copy_llama_dll ALL
-                COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                    "$<TARGET_FILE:llama>"
-                    "${WSH_DIST_DIR}/$<TARGET_FILE_NAME:llama>"
-                DEPENDS llama
-                COMMENT "Copying llama.dll to dist/"
-            )
-            add_dependencies(wsh_runtime_resources copy_llama_dll)
-        endif()
-        message(STATUS "WSH: llama.cpp fetched, direct inference enabled")
-    else()
-        message(WARNING "WSH: llama.cpp fetch failed — falling back to subprocess Phi-4")
+# Copy llama.dll + ggml DLLs after wsh_runtime_resources target exists
+if(WSH_ENABLE_PHI4 AND llamacpp_POPULATED)
+    if(NOT TARGET copy_llama_dll)
+        add_custom_target(copy_llama_dll ALL
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "$<TARGET_FILE:llama>"
+                "${WSH_DIST_DIR}/$<TARGET_FILE_NAME:llama>"
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "$<TARGET_FILE:ggml>"
+                "${WSH_DIST_DIR}/$<TARGET_FILE_NAME:ggml>"
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "$<TARGET_FILE:ggml-base>"
+                "${WSH_DIST_DIR}/$<TARGET_FILE_NAME:ggml-base>"
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "$<TARGET_FILE:ggml-cpu>"
+                "${WSH_DIST_DIR}/$<TARGET_FILE_NAME:ggml-cpu>"
+            DEPENDS llama ggml ggml-base ggml-cpu
+            COMMENT "Copying llama.dll and ggml DLLs to dist/"
+        )
+        add_dependencies(wsh_runtime_resources copy_llama_dll)
     endif()
 endif()
 
