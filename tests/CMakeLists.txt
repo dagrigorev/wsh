@@ -2,7 +2,11 @@
 # Each test is a standalone console executable that returns 0 on pass.
 
 function(add_wsh_test name src)
-    add_executable(${name} ${src} test_helpers.c)
+    add_executable(${name} ${src} test_helpers.c man_viewer_stub.c)
+    # Force C++ for both source and helpers so the auto-registration struct trick works.
+    # set_source_files_properties + LANGUAGE CXX is the correct way for VS generator;
+    # target_compile_options(/TP) is silently dropped by the VS project generator.
+    set_source_files_properties(${src} test_helpers.c PROPERTIES LANGUAGE CXX)
     target_include_directories(${name} PRIVATE
         ${CMAKE_SOURCE_DIR}/src/core
         ${CMAKE_SOURCE_DIR}/src/shell
@@ -11,8 +15,6 @@ function(add_wsh_test name src)
     )
     target_link_libraries(${name} PRIVATE wsh_core wsh_shell wsh_platform wsh_terminal)
     if(MSVC)
-        # Compile as C++ so the auto-registration struct trick in test_helpers.h works
-        target_compile_options(${name} PRIVATE /TP)
         # Console subsystem — tests use main(), not WinMain
         set_target_properties(${name} PROPERTIES
             LINK_FLAGS "/SUBSYSTEM:CONSOLE /MANIFEST:NO")
@@ -38,7 +40,12 @@ add_wsh_test(test_screen       test_screen.c)
 add_wsh_test(test_vt_parser    test_vt_parser.c)
 add_wsh_test(test_layout       test_layout.c)
 
-add_executable(test_repl test_repl.c test_helpers.c ${CMAKE_SOURCE_DIR}/src/repl.c)
+add_executable(test_repl test_repl.c test_helpers.c man_viewer_stub.c ${CMAKE_SOURCE_DIR}/src/repl.c)
+set_source_files_properties(test_repl.c test_helpers.c PROPERTIES LANGUAGE CXX)
+# Scope repl.c LANGUAGE CXX to this target only (TARGET_DIRECTORY, CMake 3.18+)
+# so the main wsh_shell library still compiles repl.c as C.
+set_source_files_properties(${CMAKE_SOURCE_DIR}/src/repl.c
+    TARGET_DIRECTORY test_repl PROPERTIES LANGUAGE CXX)
 target_include_directories(test_repl PRIVATE
     ${CMAKE_SOURCE_DIR}/src
     ${CMAKE_SOURCE_DIR}/src/core
@@ -48,7 +55,6 @@ target_include_directories(test_repl PRIVATE
 )
 target_link_libraries(test_repl PRIVATE wsh_core wsh_shell wsh_platform wsh_terminal)
 if(MSVC)
-    target_compile_options(test_repl PRIVATE /TP)
     set_target_properties(test_repl PROPERTIES LINK_FLAGS "/SUBSYSTEM:CONSOLE /MANIFEST:NO")
 endif()
 add_test(NAME test_repl COMMAND test_repl)
@@ -107,7 +113,8 @@ add_test(NAME test_tool_false_runs COMMAND false)
 set_tests_properties(test_tool_false_runs PROPERTIES WILL_FAIL TRUE)
 
 # ── AI tests ──────────────────────────────────────────────────────────────────
-add_executable(test_ai test_ai.cpp test_helpers.c)
+add_executable(test_ai test_ai.cpp test_helpers.c man_viewer_stub.c)
+set_source_files_properties(test_helpers.c PROPERTIES LANGUAGE CXX)  # test_ai.cpp is already C++
 target_include_directories(test_ai PRIVATE
     ${CMAKE_SOURCE_DIR}/src
     ${CMAKE_SOURCE_DIR}/src/core
@@ -118,7 +125,6 @@ target_include_directories(test_ai PRIVATE
 )
 target_link_libraries(test_ai PRIVATE wsh_ai wsh_core wsh_shell wsh_platform wsh_terminal)
 if(MSVC)
-    target_compile_options(test_ai PRIVATE /TP)
     set_target_properties(test_ai PROPERTIES
         LINK_FLAGS "/SUBSYSTEM:CONSOLE /MANIFEST:NO")
 endif()

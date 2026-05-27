@@ -20,6 +20,14 @@ static std::string ExtractFirstWord(const std::string& cmd) {
     return word;
 }
 
+/* Detect dangerous rm -r/-rf patterns. */
+static bool IsDangerous(const std::string& cmd) {
+    if (cmd.find("rm") == std::string::npos) return false;
+    return cmd.find("-rf") != std::string::npos
+        || cmd.find("-fr") != std::string::npos
+        || cmd.find("-r") != std::string::npos;
+}
+
 /* Detect Russian Cyrillic in command string. */
 static bool HasCyrillic(const std::string& s) {
     for (unsigned char c : s) {
@@ -154,6 +162,16 @@ std::string FallbackCommentaryProvider::Generate(const std::string& command) {
     bool ru = HasCyrillic(command);
     std::string first = ExtractFirstWord(command);
 
+    /* Dangerous patterns override table lookup so the full command is visible */
+    if (IsDangerous(command)) {
+        return ru
+            ? "\xd0\x9e\xd0\xa1\xd0\x9e\xd0\x91\xd0\x95\xd0\x9d\xd0\x9d\xd0\x9e! `"
+              + command
+              + "` \xe2\x80\x94 \xd0\xbd\xd0\xb5\xd0\xbe\xd0\xb1\xd1\x80\xd0\xb0\xd1\x82\xd0\xb8\xd0\xbc\xd0\xb0\xd1\x8f \xd0\xbe\xd0\xbf\xd0\xb5\xd1\x80\xd0\xb0\xd1\x86\xd0\xb8\xd1\x8f. \xd0\x91\xd1\x8d\xd0\xba\xd0\xb0\xd0\xbf \xd0\xb5\xd1\x81\xd1\x82\xd1\x8c?"
+            : "WARNING: `" + command + "` is irreversible. Do you have a backup?";
+        /* ru: "ОСОБЕННО! `<cmd>` — необратимая операция. Бэкап есть?" */
+    }
+
     /* Look up command in table */
     for (int i = 0; kComments[i].cmd != NULL; i++) {
         if (first == kComments[i].cmd) {
@@ -161,14 +179,14 @@ std::string FallbackCommentaryProvider::Generate(const std::string& command) {
         }
     }
 
-    /* Generic fallback based on first word */
+    /* Generic fallback — include the full command so callers can display it */
     if (!first.empty()) {
         if (ru) {
             return "\xd0\x97\xd0\xb0\xd0\xbf\xd1\x83\xd1\x81\xd0\xba\xd0\xb0\xd0\xb5\xd0\xbc `"
-                   + first + "`. \xd0\x9f\xd0\xbe\xd1\x81\xd0\xbc\xd0\xbe\xd1\x82\xd1\x80\xd0\xb8\xd0\xbc, \xd1\x87\xd1\x82\xd0\xbe \xd0\xb2\xd1\x8b\xd0\xb9\xd0\xb4\xd0\xb5\xd1\x82.";
-            /* "Запускаем `%s`. Посмотрим, что выйдет." */
+                   + command + "`. \xd0\x9f\xd0\xbe\xd1\x81\xd0\xbc\xd0\xbe\xd1\x82\xd1\x80\xd0\xb8\xd0\xbc, \xd1\x87\xd1\x82\xd0\xbe \xd0\xb2\xd1\x8b\xd0\xb9\xd0\xb4\xd0\xb5\xd1\x82.";
+            /* "Запускаем `<full command>`. Посмотрим, что выйдет." */
         } else {
-            return "Running `" + first + "`. Let's see what happens.";
+            return "Running `" + command + "`. Let's see what happens.";
         }
     }
 
