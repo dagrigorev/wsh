@@ -16,6 +16,7 @@ public:
 
     virtual bool Initialize(const Phi4Config& config) = 0;
     virtual bool IsAvailable() const = 0;
+    virtual bool IsLoading() const { return false; }
     virtual bool IsModelLoaded() const = 0;
     virtual std::string Generate(const std::string& prompt, int maxTokens, int timeoutMs) = 0;
     virtual std::string GetModelPath() const = 0;

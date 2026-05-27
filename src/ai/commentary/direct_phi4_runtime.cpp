@@ -20,7 +20,10 @@ static void model_load_abort_callback(const char* msg) {
 }
 
 DirectPhi4Runtime::DirectPhi4Runtime() {}
-DirectPhi4Runtime::~DirectPhi4Runtime() { Shutdown(); }
+
+DirectPhi4Runtime::~DirectPhi4Runtime() {
+    Shutdown();
+}
 
 bool DirectPhi4Runtime::Initialize(const Phi4Config& config) {
     config_ = config;
@@ -37,105 +40,104 @@ bool DirectPhi4Runtime::Initialize(const Phi4Config& config) {
         return true;
     }
 
-    WSH_LOG_INFO("DirectPhi4Runtime: loading model from %s", config_.model_path.c_str());
+    WSH_LOG_INFO("DirectPhi4Runtime: starting async model load from %s", config_.model_path.c_str());
+    loading_.store(true);
+    load_thread_ = std::thread([this]() { LoadModel(); });
+    return true;
+}
 
+void DirectPhi4Runtime::LoadModel() {
     llama_backend_init();
 
     llama_model_params mparams = llama_model_default_params();
     mparams.n_gpu_layers = 0;
-    mparams.use_mmap = false;
+    mparams.use_mmap    = true;  /* mmap avoids loading the full 8+ GB into RAM */
 
-    /* Install ggml abort callback to survive GGML_ASSERT/GGML_ABORT crashes */
     ggml_abort_callback_t old_cb = ggml_set_abort_callback(model_load_abort_callback);
     bool aborted = false;
 
     if (setjmp(g_abort_jmp) == 0) {
         model_ = llama_load_model_from_file(config_.model_path.c_str(), mparams);
     } else {
-        WSH_LOG_WARN("DirectPhi4Runtime: model loading aborted (GGML_ASSERT), falling back");
+        WSH_LOG_WARN("DirectPhi4Runtime: model loading aborted (GGML_ASSERT/GGML_ABORT)");
         aborted = true;
         model_ = nullptr;
     }
 
     ggml_set_abort_callback(old_cb);
-    if (aborted) {
-        llama_backend_free();
-        return true;
-    }
-    if (!model_) {
-        WSH_LOG_WARN("DirectPhi4Runtime: failed to load model");
-        llama_backend_free();
-        return true;
+
+    if (aborted || !model_) {
+        if (!aborted) WSH_LOG_WARN("DirectPhi4Runtime: llama_load_model_from_file returned NULL");
+        if (!aborted) llama_backend_free();
+        loading_.store(false);
+        return;
     }
 
     llama_context_params cparams = llama_context_default_params();
-    cparams.n_ctx = (uint32_t)config_.context_tokens;
+    cparams.n_ctx   = (uint32_t)config_.context_tokens;
     cparams.n_batch = 512;
     ctx_ = llama_new_context_with_model((llama_model*)model_, cparams);
     if (!ctx_) {
-        WSH_LOG_WARN("DirectPhi4Runtime: failed to create context");
+        WSH_LOG_WARN("DirectPhi4Runtime: failed to create llama context");
         llama_free_model((llama_model*)model_);
         model_ = nullptr;
         llama_backend_free();
-        return true;
+        loading_.store(false);
+        return;
     }
 
-    model_available_ = true;
+    model_available_.store(true);
+    loading_.store(false);
     WSH_LOG_INFO("DirectPhi4Runtime: model loaded successfully");
-    return true;
 }
 
 std::string DirectPhi4Runtime::GenerateInternal(const std::string& prompt, int maxTokens) {
-    llama_model* model = (llama_model*)model_;
-    llama_context* ctx = (llama_context*)ctx_;
+    llama_model*   model = (llama_model*)model_;
+    llama_context* ctx   = (llama_context*)ctx_;
     if (!model || !ctx) return "";
 
-    /* Format prompt using phi-4 chat template */
-    std::string formatted = "<|im_start|>user<|im_sep|>" + prompt + "<|im_end|>\n<|im_start|>assistant<|im_sep|>";
+    /* Phi-4 chat template */
+    std::string formatted =
+        "<|im_start|>user<|im_sep|>" + prompt + "<|im_end|>\n<|im_start|>assistant<|im_sep|>";
 
-    const llama_vocab* vocab = llama_model_get_vocab(model);
-    int n_vocab = llama_vocab_n_tokens(vocab);
+    const llama_vocab* vocab  = llama_model_get_vocab(model);
+    int                n_vocab = llama_vocab_n_tokens(vocab);
 
     /* Tokenize */
-    int n_tokens = formatted.size() + 4;
+    int n_tokens = (int)formatted.size() + 4;
     std::vector<llama_token> tokens(n_tokens);
     n_tokens = llama_tokenize(vocab, formatted.data(), (int)formatted.size(),
                               tokens.data(), n_tokens, true, false);
     if (n_tokens <= 0) return "";
     tokens.resize(n_tokens);
 
-    /* Generation loop */
     std::vector<llama_token> output;
+    output.reserve(maxTokens);
 
     for (int i = 0; i < maxTokens; ++i) {
         llama_batch batch = llama_batch_get_one(tokens.data(), (int)tokens.size());
         if (llama_decode(ctx, batch)) break;
 
-        /* Read logits for last token */
-        float* logits = llama_get_logits(ctx);
+        /* Use llama_get_logits_ith(ctx, 0) — the one enabled output per batch */
+        float* logits = llama_get_logits_ith(ctx, 0);
         if (!logits) break;
 
-        /* Apply temperature and sample */
         float temp = config_.temperature;
         llama_token next_token = 0;
 
         if (temp <= 0.0f) {
-            /* Greedy */
+            /* Greedy decoding */
             float max_val = logits[0];
-            next_token = 0;
             for (int j = 1; j < n_vocab; ++j) {
-                if (logits[j] > max_val) {
-                    max_val = logits[j];
-                    next_token = (llama_token)j;
-                }
+                if (logits[j] > max_val) { max_val = logits[j]; next_token = (llama_token)j; }
             }
         } else {
-            /* Temperature-scaled softmax sampling */
+            /* Temperature-scaled sampling */
             float inv_temp = 1.0f / temp;
             float max_logit = logits[0];
-            for (int j = 1; j < n_vocab; ++j) {
+            for (int j = 1; j < n_vocab; ++j)
                 if (logits[j] > max_logit) max_logit = logits[j];
-            }
+
             std::vector<double> probs(n_vocab);
             double sum = 0.0;
             for (int j = 0; j < n_vocab; ++j) {
@@ -147,23 +149,18 @@ std::string DirectPhi4Runtime::GenerateInternal(const std::string& prompt, int m
             double cum = 0.0;
             for (int j = 0; j < n_vocab; ++j) {
                 cum += probs[j];
-                if (cum >= r) {
-                    next_token = (llama_token)j;
-                    break;
-                }
+                if (cum >= r) { next_token = (llama_token)j; break; }
             }
         }
 
-        /* Check EOS */
-        if (next_token == llama_token_eos(vocab)) break;
+        if (next_token == llama_vocab_eos(vocab)) break;
 
         output.push_back(next_token);
 
-        /* Prepare next input: single token */
+        /* Next iteration: single generated token */
         tokens.resize(1);
         tokens[0] = next_token;
 
-        /* Check context size */
         if ((int)output.size() >= maxTokens) break;
     }
 
@@ -179,17 +176,21 @@ std::string DirectPhi4Runtime::GenerateInternal(const std::string& prompt, int m
 }
 
 std::string DirectPhi4Runtime::Generate(const std::string& prompt, int maxTokens, int timeoutMs) {
-    if (!model_available_ || prompt.empty()) return "";
+    if (!model_available_.load() || prompt.empty()) return "";
     std::lock_guard<std::mutex> lock(gen_mutex_);
     return GenerateInternal(prompt, maxTokens);
 }
 
 bool DirectPhi4Runtime::IsAvailable() const {
-    return initialized_ && model_available_;
+    return model_available_.load();
+}
+
+bool DirectPhi4Runtime::IsLoading() const {
+    return loading_.load();
 }
 
 bool DirectPhi4Runtime::IsModelLoaded() const {
-    return model_available_;
+    return model_available_.load();
 }
 
 std::string DirectPhi4Runtime::GetModelPath() const {
@@ -197,6 +198,10 @@ std::string DirectPhi4Runtime::GetModelPath() const {
 }
 
 void DirectPhi4Runtime::Shutdown() {
+    /* Wait for background load to finish before freeing resources */
+    if (load_thread_.joinable()) {
+        load_thread_.join();
+    }
     if (ctx_) {
         llama_free((llama_context*)ctx_);
         ctx_ = nullptr;
@@ -205,8 +210,11 @@ void DirectPhi4Runtime::Shutdown() {
         llama_free_model((llama_model*)model_);
         model_ = nullptr;
     }
-    llama_backend_free();
-    model_available_ = false;
+    if (initialized_) {
+        llama_backend_free();
+    }
+    model_available_.store(false);
+    loading_.store(false);
     initialized_ = false;
 }
 

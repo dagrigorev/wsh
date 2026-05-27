@@ -80,7 +80,7 @@ private:
     Phi4Config config_;
     bool fallback_enabled_ = true;
     bool initialized_ = false;
-    bool phi4_available_ = false;
+    std::atomic<bool> phi4_available_{false};
 
     /* Async queue — protected by queue_mutex_ + woken via queue_cv_ */
     std::mutex queue_mutex_;

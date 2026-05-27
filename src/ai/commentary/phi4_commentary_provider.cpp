@@ -38,43 +38,46 @@ Phi4CommentaryProvider::~Phi4CommentaryProvider() {
 }
 
 bool Phi4CommentaryProvider::Initialize(const Phi4Config& config, bool fallbackEnabled) {
+    /* Guard against double-initialization */
+    if (initialized_) return true;
+
     config_ = config;
     fallback_enabled_ = fallbackEnabled;
     initialized_ = true;
 
-    /* Try direct in-process runtime first (requires vendored llama.cpp) */
 #ifdef WSH_HAVE_LLAMA
     {
         auto direct = std::make_unique<DirectPhi4Runtime>();
-        if (direct->Initialize(config_) && direct->IsAvailable()) {
+        if (direct->Initialize(config_)) {
+            /* Runtime accepted the config (model path exists). Model may still
+             * be loading on its background thread — the worker will detect when
+             * IsAvailable() becomes true and set phi4_available_ accordingly. */
             runtime_ = std::move(direct);
-            phi4_available_ = true;
-            WSH_LOG_INFO("Direct in-process Phi-4 runtime available");
+            WSH_LOG_INFO("Phi4CommentaryProvider: direct runtime loading async");
         }
     }
 #endif
-    if (!phi4_available_) {
-        /* Fall back to subprocess runtime (llama-completion.exe) */
+
+    if (!runtime_) {
+        /* No direct runtime — try subprocess (llama-completion.exe) */
         auto sub = std::make_unique<SubprocessPhi4Runtime>();
         if (sub->Initialize(config_) && sub->IsAvailable()) {
             runtime_ = std::move(sub);
-            phi4_available_ = true;
-            WSH_LOG_INFO("Subprocess Phi-4 runtime available (llama-completion.exe)");
+            phi4_available_.store(true);
+            WSH_LOG_INFO("Phi4CommentaryProvider: subprocess runtime available");
         } else {
-            /* Fall back to stub */
-            WSH_LOG_INFO("Phi-4 runtime unavailable, trying stub");
+            /* Last resort: stub (always reports unavailable) */
+            WSH_LOG_INFO("Phi4CommentaryProvider: no runtime available, using stub");
             runtime_.reset(new StubPhi4Runtime());
-            if (!runtime_->Initialize(config_)) {
-                WSH_LOG_WARN("Phi-4 runtime initialization failed");
-            }
-            phi4_available_ = runtime_->IsAvailable();
+            runtime_->Initialize(config_);
+            phi4_available_.store(runtime_->IsAvailable());
         }
     }
 
-    if (phi4_available_) {
+    if (phi4_available_.load()) {
         WSH_LOG_INFO("Phi-4 runtime available, commentary ready");
     } else if (fallback_enabled_) {
-        WSH_LOG_INFO("Phi-4 runtime not available, using fallback commentary");
+        WSH_LOG_INFO("Phi-4 runtime loading or absent, fallback commentary active");
     } else {
         WSH_LOG_WARN("Phi-4 runtime not available and fallback disabled");
     }
@@ -91,24 +94,21 @@ void Phi4CommentaryProvider::QueueCommentary(const std::string& command) {
     if (command.empty()) return;
 
     CommentaryRequest req;
-    req.command = command;
+    req.command   = command;
     req.timestamp = now_ms();
-    req.seq_id = next_seq_id_++;
+    req.seq_id    = next_seq_id_++;
 
     {
         std::lock_guard<std::mutex> lock(queue_mutex_);
-        /* Keep queue small — discard old requests */
         while (pending_requests_.size() >= 5) {
             pending_requests_.pop();
         }
         pending_requests_.push(req);
     }
-    /* Wake the worker immediately instead of waiting for the next poll tick */
     queue_cv_.notify_one();
 }
 
 std::string Phi4CommentaryProvider::TryGetCommentary(const std::string& forCommand) {
-    /* Check if Phi-4/fallback has a result ready */
     std::lock_guard<std::mutex> lock(result_mutex_);
     if (!latest_commentary_.empty() && latest_commentary_command_ == forCommand) {
         std::string result = latest_commentary_;
@@ -121,7 +121,23 @@ std::string Phi4CommentaryProvider::TryGetCommentary(const std::string& forComma
 
 std::string Phi4CommentaryProvider::Query(const std::string& prompt) {
     if (prompt.empty()) return "";
-    if (phi4_available_ && runtime_) {
+
+    /* If model is still loading, wait up to 15 s for it to become available */
+    if (!phi4_available_.load() && runtime_ && runtime_->IsLoading()) {
+        WSH_LOG_INFO("Phi-4 model still loading — waiting up to 15s...");
+        const int max_wait_ms = 15000;
+        int waited = 0;
+        while (waited < max_wait_ms && runtime_->IsLoading()) {
+            Sleep(100);
+            waited += 100;
+        }
+        if (runtime_->IsAvailable()) {
+            phi4_available_.store(true);
+            WSH_LOG_INFO("Phi-4 model load completed during query wait");
+        }
+    }
+
+    if (phi4_available_.load() && runtime_) {
         std::string full_prompt =
             "You are a helpful assistant in a terminal.\n"
             "Answer concisely. Use plain text, not markdown.\n"
@@ -140,11 +156,11 @@ void Phi4CommentaryProvider::InjectResult(const std::string& command, const std:
 }
 
 bool Phi4CommentaryProvider::IsAvailable() const {
-    return initialized_ && (phi4_available_ || fallback_enabled_);
+    return initialized_ && (phi4_available_.load() || fallback_enabled_);
 }
 
 bool Phi4CommentaryProvider::IsModelLoaded() const {
-    return phi4_available_ && runtime_ && runtime_->IsModelLoaded();
+    return phi4_available_.load() && runtime_ && runtime_->IsModelLoaded();
 }
 
 std::string Phi4CommentaryProvider::GetModelPath() const {
@@ -153,7 +169,8 @@ std::string Phi4CommentaryProvider::GetModelPath() const {
 }
 
 const char* Phi4CommentaryProvider::GetProviderType() const {
-    if (phi4_available_) return "phi4";
+    if (phi4_available_.load()) return "phi4";
+    if (runtime_ && runtime_->IsLoading()) return "phi4-loading";
     if (fallback_enabled_) return "fallback";
     return "unavailable";
 }
@@ -172,16 +189,16 @@ bool Phi4CommentaryProvider::Reload() {
     if (runtime_) {
         runtime_->Shutdown();
     }
-    phi4_available_ = false;
+    phi4_available_.store(false);
 
     runtime_.reset(new StubPhi4Runtime());
     if (!runtime_->Initialize(config_)) {
         WSH_LOG_WARN("Phi-4 runtime reload failed");
     }
 
-    phi4_available_ = runtime_->IsAvailable();
+    phi4_available_.store(runtime_->IsAvailable());
 
-    if (phi4_available_) {
+    if (phi4_available_.load()) {
         WSH_LOG_INFO("Phi-4 runtime reloaded successfully");
     } else if (fallback_enabled_) {
         WSH_LOG_INFO("Phi-4 runtime reloaded, using fallback");
@@ -197,10 +214,8 @@ void Phi4CommentaryProvider::WorkerThread() {
 
         {
             std::unique_lock<std::mutex> lock(queue_mutex_);
-            /* Wait until there's work or we're asked to stop.
-             * condition_variable replaces the old Sleep(50) polling loop,
-             * so commentary is generated the moment a command is queued. */
-            queue_cv_.wait(lock, [this]() {
+            /* Wake when work arrives, stop requested, or every 2 s to poll model load */
+            queue_cv_.wait_for(lock, std::chrono::seconds(2), [this]() {
                 return !pending_requests_.empty() || worker_stop_.load();
             });
 
@@ -213,11 +228,16 @@ void Phi4CommentaryProvider::WorkerThread() {
             }
         }
 
+        /* Detect when the async model load completes */
+        if (!phi4_available_.load() && runtime_ && runtime_->IsAvailable()) {
+            phi4_available_.store(true);
+            WSH_LOG_INFO("Phi-4 model load complete — commentary now active");
+        }
+
         if (has_work) {
             std::string commentary;
 
-            /* Try Phi-4 first */
-            if (phi4_available_ && runtime_) {
+            if (phi4_available_.load() && runtime_) {
                 prompt_builder_.SetCommand(req.command);
                 prompt_builder_.SetLanguage("ru");
                 std::string prompt = prompt_builder_.Build();
@@ -227,17 +247,13 @@ void Phi4CommentaryProvider::WorkerThread() {
                     config_.max_tokens,
                     config_.commentary_timeout_ms
                 );
-
-                /* Trim response */
                 commentary = trim(commentary);
             }
 
-            /* Fall back to deterministic if Phi-4 didn't produce anything */
             if (commentary.empty() && fallback_enabled_) {
                 commentary = fallback_.Generate(req.command);
             }
 
-            /* Cache result */
             {
                 std::lock_guard<std::mutex> lock(result_mutex_);
                 if (req.seq_id >= latest_seq_id_) {
