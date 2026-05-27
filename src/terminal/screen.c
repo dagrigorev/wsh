@@ -398,13 +398,13 @@ void screen_erase_display(ScreenBuffer *sb, int mode) {
             fill_cells(grid + r * sb->cols, sb->cols, &blank.attr);
         screen_erase_line(sb, 1);
     } else if (mode == 2 || mode == 3) {
-        /* All screen */
+        /* All screen; snap viewport to active grid so stale scrollback is hidden */
         fill_cells(grid, sb->cols * sb->rows, &blank.attr);
+        sb->viewport_offset = 0;
         if (mode == 3) {
             /* Also clear scrollback */
             sb->scrollback_head  = 0;
             sb->scrollback_count = 0;
-            sb->viewport_offset  = 0;
         }
     }
 }

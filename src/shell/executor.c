@@ -88,6 +88,16 @@ static char *find_exe(ShellContext *ctx, const char *name) {
 
 /* ── Redirection ──────────────────────────────────────────────────────────── */
 
+/* File-redirection IO adapter: routes builtin stdout writes to an open file
+ * HANDLE when a builtin runs with output redirected (e.g. echo foo > file). */
+typedef struct { IShellIO base; HANDLE h; } FileWriteIO;
+static void file_wr_write(IShellIO *self, const char *buf, int len) {
+    DWORD written = 0;
+    WriteFile(((FileWriteIO *)self)->h, buf, (DWORD)len, &written, NULL);
+}
+static int file_wr_read(IShellIO *self, char *buf, int size) {
+    (void)self; (void)buf; (void)size; return 0;
+}
 
 static HANDLE ctx_get_fd_handle(ShellContext *ctx, int fd) {
     if (fd == 0) return ctx->h_stdin;
@@ -534,7 +544,22 @@ static int exec_cmd_node(ShellContext *ctx, ASTNode *node, bool bg) {
 
         /* Built-ins */
         BuiltinFn fn = builtin_find(eargv[0]);
-        if (fn) { ret = fn(eargc, eargv, ctx); goto done; }
+        if (fn) {
+            /* When stdout is redirected to a file, route builtin output there
+             * instead of the terminal IO.  Builtins write through ctx->io, so
+             * we temporarily swap it for a handle-backed adapter. */
+            IShellIO *saved_io = ctx->io;
+            FileWriteIO file_io;
+            if (ctx->h_stdout != so && handle_is_usable(ctx->h_stdout)) {
+                file_io.base.write     = file_wr_write;
+                file_io.base.read_line = file_wr_read;
+                file_io.h = ctx->h_stdout;
+                ctx->io = (IShellIO *)&file_io;
+            }
+            ret = fn(eargc, eargv, ctx);
+            ctx->io = saved_io;
+            goto done;
+        }
 
         /* External */
         ret = spawn_external(ctx, eargv, eargc, bg);

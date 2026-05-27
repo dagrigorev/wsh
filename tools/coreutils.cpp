@@ -100,7 +100,20 @@ static bool remove_tree(const std::wstring& path) {
 static int rm(int argc, wchar_t **argv) {
     if (argc < 2 || is_help(argc, argv)) { print_common_help(L"rm"); return argc < 2 ? 1 : 0; }
     bool recursive=false, force=false; int rc=0;
-    for (int i=1;i<argc;i++) { std::wstring a=argv[i]; if (a==L"-r"||a==L"-R"||a==L"--recursive") recursive=true; else if (a==L"-f"||a==L"--force") force=true; else { BOOL ok=is_dir_path(a)?(recursive?remove_tree(a):FALSE):DeleteFileW(a.c_str()); if(!ok && !force){std::cerr<<"rm: cannot remove '"; err_w(a); std::cerr<<"'\n"; rc=1;} } }
+    for (int i=1;i<argc;i++) {
+        std::wstring a=argv[i];
+        if (a==L"--recursive") recursive=true;
+        else if (a==L"--force") force=true;
+        else if (a.size()>=2 && a[0]==L'-' && a[1]!=L'-') {
+            for (size_t k=1;k<a.size();k++) {
+                if (a[k]==L'r'||a[k]==L'R') recursive=true;
+                else if (a[k]==L'f') force=true;
+            }
+        } else {
+            BOOL ok=is_dir_path(a)?(recursive?remove_tree(a):FALSE):DeleteFileW(a.c_str());
+            if(!ok && !force){std::cerr<<"rm: cannot remove '"; err_w(a); std::cerr<<"'\n"; rc=1;}
+        }
+    }
     return rc;
 }
 static int rmdir_cmd(int argc, wchar_t **argv) { if(argc<2||is_help(argc,argv)){print_common_help(L"rmdir");return argc<2?1:0;} int rc=0; for(int i=1;i<argc;i++) if(!RemoveDirectoryW(argv[i])){std::cerr<<"rmdir: failed '"; err_w(argv[i]); std::cerr<<"'\n";rc=1;} return rc; }
@@ -126,10 +139,34 @@ static int head_tail(int argc, wchar_t **argv, bool tail) {
 static int grep(int argc, wchar_t **argv) {
     if (is_help(argc, argv)) { print_common_help(L"grep"); return 0; }
     if (argc < 2) { print_common_help(L"grep"); return 1; }
-    std::string pat = wide_to_utf8(argv[1]); bool found=false; int rc=0;
-    auto grep_one=[&](std::istream&in){ std::string line; while(std::getline(in,line)){ if(line.find(pat)!=std::string::npos){ std::cout<<line<<"\n"; found=true; } } };
-    if(argc==2){ grep_one(std::cin); }
-    else{ for(int a=2;a<argc;a++){ std::ifstream f(argv[a]); if(!f){std::cerr<<"grep: cannot open '"; err_w(argv[a]); std::cerr<<"'\n";rc=2;continue;} grep_one(f); } }
+    bool ignore_case=false, fixed=false;
+    std::vector<int> operands;
+    bool dashdash=false;
+    for (int i=1;i<argc;i++) {
+        std::wstring a=argv[i];
+        if (!dashdash && a==L"--") { dashdash=true; continue; }
+        if (!dashdash && a.size()>=2 && a[0]==L'-' && a[1]!=L'-') {
+            for (size_t k=1;k<a.size();k++) {
+                if (a[k]==L'i') ignore_case=true;
+                else if (a[k]==L'F') fixed=true;
+            }
+        } else { operands.push_back(i); }
+    }
+    (void)fixed;
+    if (operands.empty()) { print_common_help(L"grep"); return 1; }
+    std::string pat=wide_to_utf8(argv[operands[0]]);
+    if (ignore_case) { for (char &c:pat) c=(char)tolower((unsigned char)c); }
+    bool found=false; int rc=0;
+    auto grep_one=[&](std::istream&in){
+        std::string line;
+        while(std::getline(in,line)){
+            std::string cmp=line;
+            if (ignore_case) { for (char &c:cmp) c=(char)tolower((unsigned char)c); }
+            if(cmp.find(pat)!=std::string::npos){ std::cout<<line<<"\n"; found=true; }
+        }
+    };
+    if (operands.size()==1) { grep_one(std::cin); }
+    else { for(size_t idx=1;idx<operands.size();idx++){ std::ifstream f(argv[operands[idx]]); if(!f){std::cerr<<"grep: cannot open '"; err_w(argv[operands[idx]]); std::cerr<<"'\n";rc=2;continue;} grep_one(f); } }
     return rc?rc:(found?0:1);
 }
 static int sort_cmd(int argc, wchar_t **argv) { if(is_help(argc,argv)){print_common_help(L"sort");return 0;} std::vector<std::string> v; if(argc<2){std::string l;while(std::getline(std::cin,l))v.push_back(l);}else{for(int a=1;a<argc;a++){std::ifstream f(argv[a]);std::string l;while(std::getline(f,l))v.push_back(l);}} std::sort(v.begin(),v.end()); for(auto&s:v)std::cout<<s<<"\n"; return 0; }

@@ -27,12 +27,19 @@ static int tool_main(int argc, wchar_t **argv) {
     std::wstring path = L".";
     for (int i = 1; i < argc; ++i) {
         std::wstring a = argv[i];
-        if (a == L"-a" || a == L"--all") all = true;
-        else if (a == L"-l" || a == L"--long") lng = true;
+        if (a == L"--all") all = true;
+        else if (a == L"--long") lng = true;
         else if (a == L"--color=always") { color = true; force_color = true; }
         else if (a == L"--color=never") { color = false; force_color = false; }
         else if (a == L"--color=auto") { color = ansi_enabled(true); force_color = false; }
-        else path = a;
+        else if (a.size() >= 2 && a[0] == L'-' && a[1] != L'-') {
+            for (size_t j = 1; j < a.size(); ++j) {
+                if (a[j] == L'a') all = true;
+                else if (a[j] == L'l') lng = true;
+            }
+        } else if (a[0] != L'-') {
+            path = a;
+        }
     }
     if (color && !force_color) color = ansi_enabled(true);
     std::wstring mask = join_path(path, L"*");
