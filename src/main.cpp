@@ -32,7 +32,6 @@
 #include "ai/wsh_ai.h"
 #include "window.h"
 #include "repl.h"
-#include "ai/wsh_ai.h"
 #include "man_viewer.h"
 
 #define WSH_MAX_PANES 4
@@ -793,7 +792,9 @@ static void update_git_status(void) {
         _snprintf(git_dir, MAX_PATH, "%s\\.git", cur);
         if (PathFileExistsA(git_dir)) {
             strncpy(g_git.repo_root, cur, MAX_PATH - 1);
+            g_git.repo_root[MAX_PATH - 1] = '\0';
             strncpy(g_git.project, basename_const(cur), sizeof(g_git.project) - 1);
+            g_git.project[sizeof(g_git.project) - 1] = '\0';
             char head_path[MAX_PATH];
             _snprintf(head_path, MAX_PATH, "%s\\HEAD", git_dir);
             FILE *f = fopen(head_path, "r");
@@ -803,8 +804,13 @@ static void update_git_status(void) {
                     char *nl = strpbrk(line, "\r\n");
                     if (nl) *nl = '\0';
                     const char *prefix = "ref: refs/heads/";
-                    if (strncmp(line, prefix, strlen(prefix)) == 0) strncpy(g_git.branch, line + strlen(prefix), sizeof(g_git.branch) - 1);
-                    else if (line[0]) strncpy(g_git.branch, line, 12);
+                    if (strncmp(line, prefix, strlen(prefix)) == 0) {
+                        strncpy(g_git.branch, line + strlen(prefix), sizeof(g_git.branch) - 1);
+                        g_git.branch[sizeof(g_git.branch) - 1] = '\0';
+                    } else if (line[0]) {
+                        strncpy(g_git.branch, line, 12);
+                        g_git.branch[12] = '\0';
+                    }
                 }
                 fclose(f);
             }
@@ -812,7 +818,13 @@ static void update_git_status(void) {
             return;
         }
         if (PathIsRootA(cur)) break;
+        /* Guard against PathRemoveFileSpecA being a no-op (e.g. already root
+         * without a recognised root pattern) to prevent an infinite loop. */
+        char prev[MAX_PATH];
+        strncpy(prev, cur, MAX_PATH - 1);
+        prev[MAX_PATH - 1] = '\0';
         PathRemoveFileSpecA(cur);
+        if (strcmp(cur, prev) == 0) break;
     }
     strncpy(g_git.project, basename_const(cwd), sizeof(g_git.project) - 1);
 }
@@ -920,7 +932,12 @@ static void session_save_now(void) {
 
         for (int pi = 0; pi < tab->pane_count && pi < WSH_MAX_PANES; ++pi) {
             TerminalPane *pane = &tab->panes[pi];
-            if (!pane->initialized) continue;
+            if (!pane->initialized) {
+                /* Write a zero init-byte so the restore side stays aligned. */
+                uint8_t init = 0;
+                wb_write(&wb, &init, 1);
+                continue;
+            }
 
             uint8_t init = 1;
             wb_write(&wb, &init, 1);

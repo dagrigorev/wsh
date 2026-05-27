@@ -162,8 +162,11 @@ void repl_redraw_line(Repl *r) {
      *   <line_buf>  — current line content
      *   ESC[K       — erase stale content after the new logical line
      *   ESC[<n>D    — move cursor left by (len - cursor) columns
+     *
+     * Buffer must fit: prompt (up to sizeof(r->prompt)-1) + line (up to
+     * REPL_LINE_MAX-1) + ESC[K (3) + ESC[<digits>D (up to ~16) + "\r" (1).
      */
-    char seq[REPL_LINE_MAX + 64];
+    char seq[2 * REPL_LINE_MAX + 128];
     int  n = 0;
 
     seq[n++] = '\r';

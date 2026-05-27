@@ -457,17 +457,10 @@ static void process_char(VtParser *vt, uint32_t cp) {
             break;
 
         case VT_OSC_STRING:
-            if (cp == '\a' || cp == '\x9C') {
-                dispatch_osc(vt);
-                vt->state = VT_GROUND;
-            } else if (cp == '\x1B') {
-                /* ESC might be start of ST (ESC \) */
-                /* For simplicity, treat as end */
-                dispatch_osc(vt);
-                vt->state = VT_GROUND;
-            } else if (vt->osc_len < VT_MAX_OSC - 1) {
-                vt->osc_buf[vt->osc_len++] = (char)(cp & 0xFF);
-            }
+            /* Unreachable: the early-return block at the top of process_char
+             * handles all characters when state == VT_OSC_STRING and returns
+             * before this switch is evaluated.  Kept as a safety fallthrough
+             * in case the early-return logic ever changes. */
             break;
 
         case VT_DCS_STRING:

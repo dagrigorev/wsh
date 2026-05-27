@@ -215,31 +215,71 @@ int builtin_echo(int argc, char **argv, ShellContext *ctx) {
 
 /* ── printf ─────────────────────────────────────────────────────────────────── */
 
+/* Reject format specifiers that write to memory (%n) or are otherwise
+ * unsafe when fmt comes from user input. */
+static bool printf_fmt_safe(const char *fmt) {
+    for (const char *p = fmt; *p; p++) {
+        if (*p != '%') continue;
+        p++;
+        if (!*p) break;
+        if (*p == '%') continue; /* %% literal */
+        /* skip flags, width, precision */
+        while (*p && (strchr("-+ #0", *p) || isdigit((unsigned char)*p) || *p == '.')) p++;
+        /* skip length modifier */
+        while (*p && strchr("hlLzjt", *p)) p++;
+        if (!*p) break;
+        /* reject %n (memory write) */
+        if (*p == 'n') return false;
+    }
+    return true;
+}
+
+/* Expand a single printf format pass with up to 4 string arguments. */
+static void printf_one(ShellContext *ctx, const char *fmt,
+                        char **av, int ac) {
+    char buf[4096];
+    switch (ac) {
+        case 0:  _snprintf(buf, sizeof(buf), "%s", fmt); break;
+        case 1:  _snprintf(buf, sizeof(buf), fmt, av[0]); break;
+        case 2:  _snprintf(buf, sizeof(buf), fmt, av[0], av[1]); break;
+        case 3:  _snprintf(buf, sizeof(buf), fmt, av[0], av[1], av[2]); break;
+        default: _snprintf(buf, sizeof(buf), fmt, av[0], av[1], av[2], av[3]); break;
+    }
+    buf[sizeof(buf)-1] = '\0';
+    out(ctx, buf);
+}
+
 int builtin_printf_cmd(int argc, char **argv, ShellContext *ctx) {
     if (argc < 2) { outln(ctx, "printf: missing format"); return 1; }
     const char *fmt = argv[1];
-    int nargs = argc - 2;
 
-    /* Count format specifiers (excluding %%) to enable format-string recycling */
+    if (!printf_fmt_safe(fmt)) {
+        outln(ctx, "printf: unsafe format specifier");
+        return 1;
+    }
+
+    /* Count format specifiers (excluding %%) for recycling. */
     int nspec = 0;
     for (const char *p = fmt; *p; p++) {
         if (*p == '%' && p[1] && p[1] != '%') nspec++;
     }
-    if (nspec == 0 && nargs > 0) nspec = 1;
+    if (nspec == 0) {
+        /* No specifiers: emit format once regardless of extra args. */
+        printf_one(ctx, fmt, NULL, 0);
+        return 0;
+    }
 
-    int arg_off = 2; /* first value argument index */
+    int arg_off = 2;
+    if (arg_off >= argc) {
+        /* No arguments supplied — emit format with empty strings. */
+        printf_one(ctx, fmt, NULL, 0);
+        return 0;
+    }
     while (arg_off < argc) {
-        char buf[4096];
         int remaining = argc - arg_off;
-        switch (remaining) {
-            case 0: _snprintf(buf, sizeof(buf), "%s", fmt); break;
-            case 1: _snprintf(buf, sizeof(buf), fmt, argv[arg_off]); break;
-            case 2: _snprintf(buf, sizeof(buf), fmt, argv[arg_off], argv[arg_off+1]); break;
-            case 3: _snprintf(buf, sizeof(buf), fmt, argv[arg_off], argv[arg_off+1], argv[arg_off+2]); break;
-            default: _snprintf(buf, sizeof(buf), fmt, argv[arg_off], argv[arg_off+1], argv[arg_off+2], argv[arg_off+3]); break;
-        }
-        buf[sizeof(buf)-1] = '\0';
-        out(ctx, buf);
+        int use = remaining < nspec ? remaining : nspec;
+        if (use > 4) use = 4;
+        printf_one(ctx, fmt, argv + arg_off, use);
         arg_off += nspec;
     }
     return 0;
@@ -416,9 +456,9 @@ static int test_primary(char **argv, int n, int *pos, ShellContext *ctx) {
 
 /* Recursive test expression: handles -a (AND) with higher precedence than -o (OR) */
 static int test_eval(char **argv, int n, int *pos, ShellContext *ctx) {
-    /* Term: primary ( -a primary )* */
+    /* Term: primary ( -a primary )* — -a is logical AND */
     int left = test_primary(argv, n, pos, ctx);
-    while (*pos < n && !strcmp(argv[*pos], "-a")) { (*pos)++; int r = test_primary(argv, n, pos, ctx); left = (left==0||r==0)?1:0; }
+    while (*pos < n && !strcmp(argv[*pos], "-a")) { (*pos)++; int r = test_primary(argv, n, pos, ctx); left = (left==0 && r==0) ? 0 : 1; }
     return left;
 }
 
@@ -427,9 +467,9 @@ int builtin_test(int argc, char **argv, ShellContext *ctx) {
     int n=argc; if (n>1&&!strcmp(argv[n-1],"]")) n--;
     if (n<2) return 1;
     int pos = 1;
-    /* Top-level uses -o (OR) */
+    /* Top-level uses -o (OR) — logical OR */
     int left = test_eval(argv, n, &pos, ctx);
-    while (pos < n && !strcmp(argv[pos], "-o")) { pos++; int r = test_eval(argv, n, &pos, ctx); left = (left==0&&r==0)?1:0; }
+    while (pos < n && !strcmp(argv[pos], "-o")) { pos++; int r = test_eval(argv, n, &pos, ctx); left = (left==0 || r==0) ? 0 : 1; }
     return left;
 }
 
@@ -463,19 +503,27 @@ int builtin_read(int argc, char **argv, ShellContext *ctx) {
         if (*p) { *p = '\0'; p++; }
     }
     for (int i = 0; i < nvar; i++) {
-        if (i < nvar - 1 && i < nfield)
+        if (i < nvar - 1 && i < nfield) {
             shell_setenv(ctx, varnames[i], fields[i], false);
-        else if (i == nvar - 1) {
-            /* Last variable gets the remainder (re-join remaining fields) */
+        } else if (i == nvar - 1) {
+            /* Last variable gets its field plus all remaining fields joined by space */
             if (i < nfield) {
-                char *rem = fields[i];
+                /* Start with fields[i] as the base */
+                char *accum = str_dup(fields[i]);
                 for (int j = i + 1; j < nfield; j++) {
-                    size_t rlen = strlen(rem);
-                    char *joined = (char *)HeapAlloc(GetProcessHeap(), 0, rlen + strlen(fields[j]) + 2);
-                    if (joined) { memcpy(joined, rem, rlen); joined[rlen] = ' '; memcpy(joined+rlen+1, fields[j], strlen(fields[j])+1); }
-                    shell_setenv(ctx, varnames[i], joined, false);
-                    HeapFree(GetProcessHeap(), 0, joined);
+                    size_t alen = strlen(accum);
+                    size_t flen = strlen(fields[j]);
+                    char *joined = (char *)HeapAlloc(GetProcessHeap(), 0, alen + flen + 2);
+                    if (joined) {
+                        memcpy(joined, accum, alen);
+                        joined[alen] = ' ';
+                        memcpy(joined + alen + 1, fields[j], flen + 1);
+                        str_free(accum);
+                        accum = joined;
+                    }
                 }
+                shell_setenv(ctx, varnames[i], accum, false);
+                str_free(accum);
             } else {
                 shell_setenv(ctx, varnames[i], "", false);
             }
