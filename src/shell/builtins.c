@@ -22,6 +22,7 @@
 #include "../core/path_util.h"
 #include "../core/log.h"
 #include "../ai/wsh_ai.h"
+#include "../man_viewer.h"
 
 /* ── Dispatch table (Open/Closed: add entries, never touch builtin_find) ───── */
 
@@ -214,31 +215,71 @@ int builtin_echo(int argc, char **argv, ShellContext *ctx) {
 
 /* ── printf ─────────────────────────────────────────────────────────────────── */
 
+/* Reject format specifiers that write to memory (%n) or are otherwise
+ * unsafe when fmt comes from user input. */
+static bool printf_fmt_safe(const char *fmt) {
+    for (const char *p = fmt; *p; p++) {
+        if (*p != '%') continue;
+        p++;
+        if (!*p) break;
+        if (*p == '%') continue; /* %% literal */
+        /* skip flags, width, precision */
+        while (*p && (strchr("-+ #0", *p) || isdigit((unsigned char)*p) || *p == '.')) p++;
+        /* skip length modifier */
+        while (*p && strchr("hlLzjt", *p)) p++;
+        if (!*p) break;
+        /* reject %n (memory write) */
+        if (*p == 'n') return false;
+    }
+    return true;
+}
+
+/* Expand a single printf format pass with up to 4 string arguments. */
+static void printf_one(ShellContext *ctx, const char *fmt,
+                        char **av, int ac) {
+    char buf[4096];
+    switch (ac) {
+        case 0:  _snprintf(buf, sizeof(buf), "%s", fmt); break;
+        case 1:  _snprintf(buf, sizeof(buf), fmt, av[0]); break;
+        case 2:  _snprintf(buf, sizeof(buf), fmt, av[0], av[1]); break;
+        case 3:  _snprintf(buf, sizeof(buf), fmt, av[0], av[1], av[2]); break;
+        default: _snprintf(buf, sizeof(buf), fmt, av[0], av[1], av[2], av[3]); break;
+    }
+    buf[sizeof(buf)-1] = '\0';
+    out(ctx, buf);
+}
+
 int builtin_printf_cmd(int argc, char **argv, ShellContext *ctx) {
     if (argc < 2) { outln(ctx, "printf: missing format"); return 1; }
     const char *fmt = argv[1];
-    int nargs = argc - 2;
 
-    /* Count format specifiers (excluding %%) to enable format-string recycling */
+    if (!printf_fmt_safe(fmt)) {
+        outln(ctx, "printf: unsafe format specifier");
+        return 1;
+    }
+
+    /* Count format specifiers (excluding %%) for recycling. */
     int nspec = 0;
     for (const char *p = fmt; *p; p++) {
         if (*p == '%' && p[1] && p[1] != '%') nspec++;
     }
-    if (nspec == 0 && nargs > 0) nspec = 1;
+    if (nspec == 0) {
+        /* No specifiers: emit format once regardless of extra args. */
+        printf_one(ctx, fmt, NULL, 0);
+        return 0;
+    }
 
-    int arg_off = 2; /* first value argument index */
+    int arg_off = 2;
+    if (arg_off >= argc) {
+        /* No arguments supplied — emit format with empty strings. */
+        printf_one(ctx, fmt, NULL, 0);
+        return 0;
+    }
     while (arg_off < argc) {
-        char buf[4096];
         int remaining = argc - arg_off;
-        switch (remaining) {
-            case 0: _snprintf(buf, sizeof(buf), "%s", fmt); break;
-            case 1: _snprintf(buf, sizeof(buf), fmt, argv[arg_off]); break;
-            case 2: _snprintf(buf, sizeof(buf), fmt, argv[arg_off], argv[arg_off+1]); break;
-            case 3: _snprintf(buf, sizeof(buf), fmt, argv[arg_off], argv[arg_off+1], argv[arg_off+2]); break;
-            default: _snprintf(buf, sizeof(buf), fmt, argv[arg_off], argv[arg_off+1], argv[arg_off+2], argv[arg_off+3]); break;
-        }
-        buf[sizeof(buf)-1] = '\0';
-        out(ctx, buf);
+        int use = remaining < nspec ? remaining : nspec;
+        if (use > 4) use = 4;
+        printf_one(ctx, fmt, argv + arg_off, use);
         arg_off += nspec;
     }
     return 0;
@@ -415,9 +456,9 @@ static int test_primary(char **argv, int n, int *pos, ShellContext *ctx) {
 
 /* Recursive test expression: handles -a (AND) with higher precedence than -o (OR) */
 static int test_eval(char **argv, int n, int *pos, ShellContext *ctx) {
-    /* Term: primary ( -a primary )* */
+    /* Term: primary ( -a primary )* — -a is logical AND */
     int left = test_primary(argv, n, pos, ctx);
-    while (*pos < n && !strcmp(argv[*pos], "-a")) { (*pos)++; int r = test_primary(argv, n, pos, ctx); left = (left==0||r==0)?1:0; }
+    while (*pos < n && !strcmp(argv[*pos], "-a")) { (*pos)++; int r = test_primary(argv, n, pos, ctx); left = (left==0 && r==0) ? 0 : 1; }
     return left;
 }
 
@@ -426,9 +467,9 @@ int builtin_test(int argc, char **argv, ShellContext *ctx) {
     int n=argc; if (n>1&&!strcmp(argv[n-1],"]")) n--;
     if (n<2) return 1;
     int pos = 1;
-    /* Top-level uses -o (OR) */
+    /* Top-level uses -o (OR) — logical OR */
     int left = test_eval(argv, n, &pos, ctx);
-    while (pos < n && !strcmp(argv[pos], "-o")) { pos++; int r = test_eval(argv, n, &pos, ctx); left = (left==0&&r==0)?1:0; }
+    while (pos < n && !strcmp(argv[pos], "-o")) { pos++; int r = test_eval(argv, n, &pos, ctx); left = (left==0 || r==0) ? 0 : 1; }
     return left;
 }
 
@@ -462,19 +503,27 @@ int builtin_read(int argc, char **argv, ShellContext *ctx) {
         if (*p) { *p = '\0'; p++; }
     }
     for (int i = 0; i < nvar; i++) {
-        if (i < nvar - 1 && i < nfield)
+        if (i < nvar - 1 && i < nfield) {
             shell_setenv(ctx, varnames[i], fields[i], false);
-        else if (i == nvar - 1) {
-            /* Last variable gets the remainder (re-join remaining fields) */
+        } else if (i == nvar - 1) {
+            /* Last variable gets its field plus all remaining fields joined by space */
             if (i < nfield) {
-                char *rem = fields[i];
+                /* Start with fields[i] as the base */
+                char *accum = str_dup(fields[i]);
                 for (int j = i + 1; j < nfield; j++) {
-                    size_t rlen = strlen(rem);
-                    char *joined = (char *)HeapAlloc(GetProcessHeap(), 0, rlen + strlen(fields[j]) + 2);
-                    if (joined) { memcpy(joined, rem, rlen); joined[rlen] = ' '; memcpy(joined+rlen+1, fields[j], strlen(fields[j])+1); }
-                    shell_setenv(ctx, varnames[i], joined, false);
-                    HeapFree(GetProcessHeap(), 0, joined);
+                    size_t alen = strlen(accum);
+                    size_t flen = strlen(fields[j]);
+                    char *joined = (char *)HeapAlloc(GetProcessHeap(), 0, alen + flen + 2);
+                    if (joined) {
+                        memcpy(joined, accum, alen);
+                        joined[alen] = ' ';
+                        memcpy(joined + alen + 1, fields[j], flen + 1);
+                        str_free(accum);
+                        accum = joined;
+                    }
                 }
+                shell_setenv(ctx, varnames[i], accum, false);
+                str_free(accum);
             } else {
                 shell_setenv(ctx, varnames[i], "", false);
             }
@@ -814,14 +863,15 @@ static int print_man_topic(ShellContext *ctx, const char *topic) {
 }
 
 int builtin_man(int argc, char **argv, ShellContext *ctx) {
-    if (argc < 2) return print_man_topic(ctx, "wsh");
+    if (argc < 2) { if (man_viewer_open_topic("wsh")) return 0; return print_man_topic(ctx, "wsh"); }
+    if (man_viewer_open_topic(argv[1])) return 0;
     int ret = 0;
     for (int i = 1; i < argc; i++) if (print_man_topic(ctx, argv[i]) != 0) ret = 1;
     return ret;
 }
 
 int builtin_help(int argc, char **argv, ShellContext *ctx) {
-    if (argc > 1) return print_man_topic(ctx, argv[1]);
+    if (argc > 1) { if (man_viewer_open_topic(argv[1])) return 0; return print_man_topic(ctx, argv[1]); }
     outln(ctx, "Wsh built-ins:");
     outln(ctx, "  cd pwd echo printf export unset alias unalias source exit return");
     outln(ctx, "  set setopt jobs fg bg kill wait type which command eval exec");
@@ -842,21 +892,27 @@ int builtin_history(int argc, char **argv, ShellContext *ctx) {
     (void)argv;
 
     int count = history_count(&ctx->history);
-    int start = 0;
+    int display_count = count;
+    int start_offset = 0;
 
     if (argc >= 2) {
         int n = atoi(argv[1]);
         if (n > 0 && n < count) {
-            start = count - n;
+            start_offset = count - n;
+            display_count = n;
         }
     }
 
-    for (int i = start; i < count; ++i) {
-        const char *item = history_at(&ctx->history, i);
+    /* history_at(0) = most recent, history_at(count-1) = oldest.
+       We print oldest first with smallest number. */
+    for (int i = 0; i < display_count; ++i) {
+        int idx = count - 1 - start_offset - i;
+        if (idx < 0 || idx >= count) continue;
+        const char *item = history_at(&ctx->history, idx);
         if (!item) continue;
 
         char line[4096];
-        _snprintf(line, sizeof(line), "%5d  %s", i + 1, item);
+        _snprintf(line, sizeof(line), "%5d  %s", start_offset + i + 1, item);
         outln(ctx, line);
     }
 
@@ -1003,16 +1059,10 @@ int builtin_atrm(int argc, char **argv, ShellContext *ctx) {
 int builtin_ai(int argc, char **argv, ShellContext *ctx) {
     if (argc < 2) {
         outln(ctx, "ai: expected subcommand: status, suggest, explain, fix, on, off");
-        outln(ctx, "Usage:");
-        outln(ctx, "  ai status              show AI status");
-        outln(ctx, "  ai suggest             show project-aware suggestions");
-        outln(ctx, "  ai suggest build       show build suggestions");
-        outln(ctx, "  ai suggest test        show test suggestions");
-        outln(ctx, "  ai suggest git         show Git suggestions");
-        outln(ctx, "  ai explain             explain last command failure");
-        outln(ctx, "  ai fix                 suggest a command fix");
-        outln(ctx, "  ai on                  enable AI assistance");
-        outln(ctx, "  ai off                 disable AI assistance");
+        outln(ctx, "  ai commentary on/off              toggle command commentary");
+        outln(ctx, "  ai commentary test <cmd...>       test commentary with a command");
+        outln(ctx, "  ai phi4 status                    show Phi-4 model status");
+        outln(ctx, "  ai phi4 reload                    reload Phi-4 runtime");
         return 1;
     }
 
@@ -1030,6 +1080,62 @@ int builtin_ai(int argc, char **argv, ShellContext *ctx) {
     } else if (strcmp(argv[1], "off") == 0) {
         ctx->ai_enabled = false;
         outln(ctx, "AI: disabled");
+    } else if (strcmp(argv[1], "commentary") == 0) {
+        if (argc < 3) {
+            outfmt(ctx, "Commentary: %s\r\n",
+                   wsh_ai_commentary_is_enabled(ctx) ? "enabled" : "disabled");
+            outfmt(ctx, "Provider: %s\r\n", wsh_ai_commentary_provider_type(ctx));
+            return 0;
+        }
+        if (strcmp(argv[2], "on") == 0) {
+            wsh_ai_commentary_set_enabled(ctx, true);
+            outln(ctx, "AI commentary: enabled");
+        } else if (strcmp(argv[2], "off") == 0) {
+            wsh_ai_commentary_set_enabled(ctx, false);
+            outln(ctx, "AI commentary: disabled");
+        } else if (strcmp(argv[2], "test") == 0 && argc >= 4) {
+            /* Reconstruct command from remaining args */
+            char cmd_buf[4096] = {0};
+            for (int i = 3; i < argc; i++) {
+                if (i > 3) strncat(cmd_buf, " ", sizeof(cmd_buf) - strlen(cmd_buf) - 1);
+                strncat(cmd_buf, argv[i], sizeof(cmd_buf) - strlen(cmd_buf) - 1);
+            }
+            if (wsh_ai_commentary_test(ctx, cmd_buf)) {
+                const char *cc = wsh_ai_try_get_commentary(ctx, cmd_buf);
+                if (cc && cc[0]) {
+                    outfmt(ctx, "%s\r\n", cc);
+                } else {
+                    outln(ctx, "No commentary generated.");
+                }
+            } else {
+                outln(ctx, "No commentary generated.");
+            }
+        } else {
+            outln(ctx, "Usage: ai commentary on|off|test <cmd...>");
+            return 1;
+        }
+    } else if (strcmp(argv[1], "phi4") == 0) {
+        if (argc < 3) {
+            outln(ctx, "Usage: ai phi4 status|reload");
+            return 1;
+        }
+        if (strcmp(argv[2], "status") == 0) {
+            outfmt(ctx, "Phi-4 model: %s\r\n",
+                   wsh_ai_phi4_model_loaded(ctx) ? "loaded" : "missing");
+            const char *mp = wsh_ai_phi4_model_path(ctx);
+            if (mp && mp[0]) {
+                outfmt(ctx, "Model path: %s\r\n", mp);
+            }
+        } else if (strcmp(argv[2], "reload") == 0) {
+            if (wsh_ai_phi4_reload(ctx)) {
+                outln(ctx, "Phi-4 runtime reloaded.");
+            } else {
+                outln(ctx, "Phi-4 runtime reload failed.");
+            }
+        } else {
+            outfmt(ctx, "ai: unknown phi4 subcommand: %s\r\n", argv[2]);
+            return 1;
+        }
     } else {
         outfmt(ctx, "ai: unknown subcommand: %s\r\n", argv[1]);
         return 1;

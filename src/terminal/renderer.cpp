@@ -310,41 +310,35 @@ void renderer_paint_region(Renderer *r, const ScreenBuffer *sb, const RECT *rect
         }
     }
 
-    /* ── Reasoning overlay (proactive AI subtitles) ────────────────────────── */
-    if (active && r->reasoning_active) {
-        float overlay_y = oy + (float)(cursor_y + 1) * r->cell_h + 2.0f;
-        D2D1_COLOR_F overlay_bg = to_d2d(r->bg_color);
-        overlay_bg.a = 0.65f;
-        D2D1_COLOR_F overlay_fg = to_d2d(r->fg_color);
-        overlay_fg.a = 0.80f;
+    /* ── Inline suggestion on the row after cursor (proactive AI) ──────────── */
+    /* Rendered below grid when cursor is on last row; clip rect handles overflow */
+    if (active && r->reasoning_active && r->reasoning_line1[0]) {
+        int suggest_row = cursor_y + 1;
+        float sy = oy + (float)suggest_row * r->cell_h;
+        D2D1_RECT_F row_rc = {ox, sy, ox + cols * r->cell_w, sy + r->cell_h};
 
-        float max_w = cols * r->cell_w;
-        float line_h = r->cell_h * 0.80f; /* slightly smaller than cell */
+        /* Dimmed background for the suggestion row */
+        D2D1_COLOR_F dim_bg = to_d2d(r->bg_color);
+        dim_bg.a = 0.45f;
+        r->bg_brush->SetColor(dim_bg);
+        r->render_target->FillRectangle(row_rc, r->bg_brush);
 
-        for (int line = 0; line < 2; line++) {
-            const wchar_t* text = (line == 0) ? r->reasoning_line1 : r->reasoning_line2;
-            if (!text || text[0] == L'\0') continue;
+        /* Draw suggestion text in italic, dimmed */
+        D2D1_COLOR_F dim_fg = to_d2d(r->fg_color);
+        dim_fg.a = 0.50f;
+        r->fg_brush->SetColor(dim_fg);
 
-            /* Background pill */
-            D2D1_ROUNDED_RECT bg_rect;
-            bg_rect.rect.left   = ox;
-            bg_rect.rect.top    = overlay_y;
-            bg_rect.rect.right  = ox + max_w;
-            bg_rect.rect.bottom = overlay_y + line_h;
-            bg_rect.radiusX = 4.0f;
-            bg_rect.radiusY = 4.0f;
-            r->bg_brush->SetColor(overlay_bg);
-            r->render_target->FillRoundedRectangle(bg_rect, r->bg_brush);
-
-            /* Text */
-            D2D1_RECT_F text_rect = { ox + 4.0f, overlay_y + 1.0f,
-                                      ox + max_w - 4.0f, overlay_y + line_h };
-            r->fg_brush->SetColor(overlay_fg);
-            r->render_target->DrawTextW(text, (UINT32)wcslen(text),
-                r->font.fmt_normal, text_rect, r->fg_brush,
-                D2D1_DRAW_TEXT_OPTIONS_CLIP);
-
-            overlay_y += line_h + 2.0f;
+        IDWriteTextLayout *layout = NULL;
+        if (r->font.factory) {
+            r->font.factory->CreateTextLayout(
+                r->reasoning_line1, (UINT32)wcslen(r->reasoning_line1),
+                r->font.fmt_italic ? r->font.fmt_italic : r->font.fmt_normal,
+                cols * r->cell_w, r->cell_h, &layout);
+        }
+        if (layout) {
+            D2D1_POINT_2F orig = {ox, sy};
+            r->render_target->DrawTextLayout(orig, layout, r->fg_brush, D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT);
+            layout->Release();
         }
     }
 

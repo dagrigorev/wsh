@@ -7,6 +7,7 @@ add_library(wsh_core STATIC
     unicode.c
     log.c
     path_util.c
+    session.c
 )
 
 target_include_directories(wsh_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})

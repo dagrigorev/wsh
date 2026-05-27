@@ -66,6 +66,13 @@ int builtin_at(int argc, char **argv, ShellContext *ctx);
 int builtin_atq(int argc, char **argv, ShellContext *ctx);
 int builtin_atrm(int argc, char **argv, ShellContext *ctx);
 
+/* Help and documentation */
+int builtin_help(int argc, char **argv, ShellContext *ctx);
+int builtin_man(int argc, char **argv, ShellContext *ctx);
+
+/* History */
+int builtin_history(int argc, char **argv, ShellContext *ctx);
+
 /* AI assistant */
 int builtin_ai(int argc, char **argv, ShellContext *ctx);
 

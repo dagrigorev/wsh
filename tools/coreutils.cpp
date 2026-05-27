@@ -26,7 +26,7 @@ static void print_common_help(const wchar_t *name) {
 
 static int cat(int argc, wchar_t **argv) {
     if (is_help(argc, argv)) { print_common_help(L"cat"); return 0; }
-    if (argc == 1) { std::cerr << "cat: stdin mode is not implemented yet\n"; return 1; }
+    if (argc == 1) { std::string l; while(std::getline(std::cin,l)) std::cout<<l<<"\n"; return 0; }
     int rc=0;
     for (int i=1;i<argc;i++) {
         std::ifstream f(argv[i], std::ios::binary);
@@ -100,34 +100,82 @@ static bool remove_tree(const std::wstring& path) {
 static int rm(int argc, wchar_t **argv) {
     if (argc < 2 || is_help(argc, argv)) { print_common_help(L"rm"); return argc < 2 ? 1 : 0; }
     bool recursive=false, force=false; int rc=0;
-    for (int i=1;i<argc;i++) { std::wstring a=argv[i]; if (a==L"-r"||a==L"-R"||a==L"--recursive") recursive=true; else if (a==L"-f"||a==L"--force") force=true; else { BOOL ok=is_dir_path(a)?(recursive?remove_tree(a):FALSE):DeleteFileW(a.c_str()); if(!ok && !force){std::cerr<<"rm: cannot remove '"; err_w(a); std::cerr<<"'\n"; rc=1;} } }
+    for (int i=1;i<argc;i++) {
+        std::wstring a=argv[i];
+        if (a==L"--recursive") recursive=true;
+        else if (a==L"--force") force=true;
+        else if (a.size()>=2 && a[0]==L'-' && a[1]!=L'-') {
+            for (size_t k=1;k<a.size();k++) {
+                if (a[k]==L'r'||a[k]==L'R') recursive=true;
+                else if (a[k]==L'f') force=true;
+            }
+        } else {
+            BOOL ok=is_dir_path(a)?(recursive?remove_tree(a):FALSE):DeleteFileW(a.c_str());
+            if(!ok && !force){std::cerr<<"rm: cannot remove '"; err_w(a); std::cerr<<"'\n"; rc=1;}
+        }
+    }
     return rc;
 }
 static int rmdir_cmd(int argc, wchar_t **argv) { if(argc<2||is_help(argc,argv)){print_common_help(L"rmdir");return argc<2?1:0;} int rc=0; for(int i=1;i<argc;i++) if(!RemoveDirectoryW(argv[i])){std::cerr<<"rmdir: failed '"; err_w(argv[i]); std::cerr<<"'\n";rc=1;} return rc; }
 static int mkdir_cmd(int argc, wchar_t **argv) { if(argc<2||is_help(argc,argv)){print_common_help(L"mkdir");return argc<2?1:0;} int rc=0; for(int i=1;i<argc;i++) if(!CreateDirectoryW(argv[i],NULL)&&GetLastError()!=ERROR_ALREADY_EXISTS){std::cerr<<"mkdir: failed '"; err_w(argv[i]); std::cerr<<"'\n";rc=1;} return rc; }
 
 static int wc_cmd(int argc, wchar_t **argv) {
-    if (argc < 2 || is_help(argc, argv)) { print_common_help(L"wc"); return argc < 2 ? 1 : 0; }
-    int rc=0; for(int i=1;i<argc;i++){ std::ifstream f(argv[i],std::ios::binary); if(!f){std::cerr<<"wc: cannot open '"; err_w(argv[i]); std::cerr<<"'\n";rc=1;continue;} long long lines=0,words=0,bytes=0; bool inw=false; char c; while(f.get(c)){bytes++; if(c=='\n')lines++; if(isspace((unsigned char)c)) inw=false; else if(!inw){words++;inw=true;}} std::cout<<lines<<" "<<words<<" "<<bytes<<" "; out_w(argv[i]); std::cout<<"\n";} return rc;
+    if (is_help(argc, argv)) { print_common_help(L"wc"); return 0; }
+    bool do_l=false,do_w=false,do_c=false; std::vector<int> fidx;
+    for(int i=1;i<argc;i++){ std::wstring a=argv[i]; if(a.size()>1&&a[0]==L'-'&&a!=L"--"){for(size_t k=1;k<a.size();k++){if(a[k]==L'l')do_l=true;else if(a[k]==L'w')do_w=true;else if(a[k]==L'c')do_c=true;}}else if(a!=L"--")fidx.push_back(i);}
+    if(!do_l&&!do_w&&!do_c) do_l=do_w=do_c=true;
+    auto wc_one=[&](std::istream&in,const wchar_t*name){ long long li=0,wo=0,by=0; bool inw=false; char c; while(in.get(c)){by++; if(c=='\n')li++; if(isspace((unsigned char)c))inw=false; else if(!inw){wo++;inw=true;}} if(do_l)std::cout<<li<<" "; if(do_w)std::cout<<wo<<" "; if(do_c)std::cout<<by<<" "; if(name&&name[0])out_w(name); std::cout<<"\n"; };
+    if(fidx.empty()){ wc_one(std::cin,nullptr); return 0; }
+    int rc=0; for(int idx:fidx){ std::ifstream f(argv[idx],std::ios::binary); if(!f){std::cerr<<"wc: cannot open '";err_w(argv[idx]);std::cerr<<"'\n";rc=1;continue;} wc_one(f,argv[idx]); } return rc;
 }
 static int head_tail(int argc, wchar_t **argv, bool tail) {
-    if (argc < 2 || is_help(argc, argv)) { print_common_help(tail?L"tail":L"head"); return argc < 2 ? 1 : 0; }
-    int n=10, start=1; if(argc>3 && wcscmp(argv[1],L"-n")==0){n=_wtoi(argv[2]);start=3;} std::vector<std::string> lines; int rc=0;
-    for(int a=start;a<argc;a++){ std::ifstream f(argv[a]); if(!f){std::cerr<<(tail?"tail":"head")<<": cannot open '"; err_w(argv[a]); std::cerr<<"'\n";rc=1;continue;} std::string line; while(std::getline(f,line)) lines.push_back(line); int from=tail?std::max(0,(int)lines.size()-n):0; int to=tail?(int)lines.size():std::min(n,(int)lines.size()); for(int i=from;i<to;i++) std::cout<<lines[i]<<"\n"; lines.clear(); } return rc;
+    if (is_help(argc, argv)) { print_common_help(tail?L"tail":L"head"); return 0; }
+    int n=10, start=1;
+    if(argc>1){ std::wstring a1=argv[1]; if(a1==L"-n"&&argc>2){n=_wtoi(argv[2]);start=3;} else if(a1.size()>1&&a1[0]==L'-'&&iswdigit(a1[1])){n=_wtoi(a1.c_str()+1);start=2;} }
+    auto ht_one=[&](std::istream&in){ std::vector<std::string> lines; std::string line; while(std::getline(in,line)) lines.push_back(line); int from=tail?std::max(0,(int)lines.size()-n):0; int to=tail?(int)lines.size():std::min(n,(int)lines.size()); for(int i=from;i<to;i++) std::cout<<lines[i]<<"\n"; };
+    if(start>=argc){ ht_one(std::cin); return 0; }
+    int rc=0; for(int a=start;a<argc;a++){ std::ifstream f(argv[a]); if(!f){std::cerr<<(tail?"tail":"head")<<": cannot open '"; err_w(argv[a]); std::cerr<<"'\n";rc=1;continue;} ht_one(f); } return rc;
 }
 static int grep(int argc, wchar_t **argv) {
     if (is_help(argc, argv)) { print_common_help(L"grep"); return 0; }
-    if (argc < 3) { print_common_help(L"grep"); return 1; }
-    std::string pat = wide_to_utf8(argv[1]); bool found=false; int rc=0;
-    for(int a=2;a<argc;a++){ std::ifstream f(argv[a]); if(!f){std::cerr<<"grep: cannot open '"; err_w(argv[a]); std::cerr<<"'\n";rc=2;continue;} std::string line; while(std::getline(f,line)){ if(line.find(pat)!=std::string::npos){ std::cout<<line<<"\n"; found=true; } } } return rc?rc:(found?0:1);
+    if (argc < 2) { print_common_help(L"grep"); return 1; }
+    bool ignore_case=false, fixed=false;
+    std::vector<int> operands;
+    bool dashdash=false;
+    for (int i=1;i<argc;i++) {
+        std::wstring a=argv[i];
+        if (!dashdash && a==L"--") { dashdash=true; continue; }
+        if (!dashdash && a.size()>=2 && a[0]==L'-' && a[1]!=L'-') {
+            for (size_t k=1;k<a.size();k++) {
+                if (a[k]==L'i') ignore_case=true;
+                else if (a[k]==L'F') fixed=true;
+            }
+        } else { operands.push_back(i); }
+    }
+    (void)fixed;
+    if (operands.empty()) { print_common_help(L"grep"); return 1; }
+    std::string pat=wide_to_utf8(argv[operands[0]]);
+    if (ignore_case) { for (char &c:pat) c=(char)tolower((unsigned char)c); }
+    bool found=false; int rc=0;
+    auto grep_one=[&](std::istream&in){
+        std::string line;
+        while(std::getline(in,line)){
+            std::string cmp=line;
+            if (ignore_case) { for (char &c:cmp) c=(char)tolower((unsigned char)c); }
+            if(cmp.find(pat)!=std::string::npos){ std::cout<<line<<"\n"; found=true; }
+        }
+    };
+    if (operands.size()==1) { grep_one(std::cin); }
+    else { for(size_t idx=1;idx<operands.size();idx++){ std::ifstream f(argv[operands[idx]]); if(!f){std::cerr<<"grep: cannot open '"; err_w(argv[operands[idx]]); std::cerr<<"'\n";rc=2;continue;} grep_one(f); } }
+    return rc?rc:(found?0:1);
 }
-static int sort_cmd(int argc, wchar_t **argv) { if(argc<2||is_help(argc,argv)){print_common_help(L"sort");return argc<2?1:0;} std::vector<std::string> v; for(int a=1;a<argc;a++){std::ifstream f(argv[a]);std::string l;while(std::getline(f,l))v.push_back(l);} std::sort(v.begin(),v.end()); for(auto&s:v)std::cout<<s<<"\n"; return 0; }
-static int uniq(int argc, wchar_t **argv) { if(argc<2||is_help(argc,argv)){print_common_help(L"uniq");return argc<2?1:0;} std::string prev,l; bool have=false; for(int a=1;a<argc;a++){std::ifstream f(argv[a]);while(std::getline(f,l)){if(!have||l!=prev){std::cout<<l<<"\n";prev=l;have=true;}}} return 0; }
+static int sort_cmd(int argc, wchar_t **argv) { if(is_help(argc,argv)){print_common_help(L"sort");return 0;} std::vector<std::string> v; if(argc<2){std::string l;while(std::getline(std::cin,l))v.push_back(l);}else{for(int a=1;a<argc;a++){std::ifstream f(argv[a]);std::string l;while(std::getline(f,l))v.push_back(l);}} std::sort(v.begin(),v.end()); for(auto&s:v)std::cout<<s<<"\n"; return 0; }
+static int uniq(int argc, wchar_t **argv) { if(is_help(argc,argv)){print_common_help(L"uniq");return 0;} std::string prev,l; bool have=false; auto uniq_one=[&](std::istream&in){while(std::getline(in,l)){if(!have||l!=prev){std::cout<<l<<"\n";prev=l;have=true;}}}; if(argc<2)uniq_one(std::cin);else for(int a=1;a<argc;a++){std::ifstream f(argv[a]);uniq_one(f);} return 0; }
 static int basename_cmd(int argc, wchar_t **argv) { if(argc<2||is_help(argc,argv)){print_common_help(L"basename");return argc<2?1:0;} out_w(base_name(argv[1])); std::cout<<"\n"; return 0; }
 static int dirname_cmd(int argc, wchar_t **argv) { if(argc<2||is_help(argc,argv)){print_common_help(L"dirname");return argc<2?1:0;} std::wstring s=argv[1]; size_t p=s.find_last_of(L"\\/"); out_w(p==std::wstring::npos?L".":s.substr(0,p)); std::cout<<"\n"; return 0; }
 static int which_cmd(int argc, wchar_t **argv) { if(argc<2||is_help(argc,argv)){print_common_help(L"which");return argc<2?1:0;} int rc=0; for(int i=1;i<argc;i++){ wchar_t buf[MAX_PATH]{}; if(SearchPathW(NULL,argv[i],L".exe",MAX_PATH,buf,NULL)) { out_w(buf); std::cout<<"\n"; } else {rc=1; std::cerr<<"which: no "; err_w(argv[i]); std::cerr<<" in PATH\n";} } return rc; }
 static int sleep_cmd(int argc, wchar_t **argv) { if(argc<2||is_help(argc,argv)){print_common_help(L"sleep");return argc<2?1:0;} Sleep((DWORD)(_wtof(argv[1])*1000.0)); return 0; }
-static int yes_cmd(int argc, wchar_t **argv) { if (is_help(argc, argv)) { print_common_help(L"yes"); return 0; } std::string text=argc>1?wide_to_utf8(argv[1]):"y"; for(int i=0;i<10000;i++) std::cout<<text<<"\n"; return 0; }
+static int yes_cmd(int argc, wchar_t **argv) { if (is_help(argc, argv)) { print_common_help(L"yes"); return 0; } std::string text=argc>1?wide_to_utf8(argv[1]):"y"; for(;;) std::cout<<text<<"\n"; return 0; }
 static int true_cmd(int argc, wchar_t **argv) { if (is_help(argc, argv)) { print_common_help(L"true"); return 0; } return 0; }
 static int false_cmd(int argc, wchar_t **argv) { if (is_help(argc, argv)) { print_common_help(L"false"); return 0; } return 1; }
 

@@ -128,9 +128,16 @@ const char *history_search_prev(History *h, const char *pattern) {
 
 /* ─── History Expansion ──────────────────────────────────────────────────── */
 
+/* strncpy wrapper that always null-terminates. */
+static void safe_copy(char *dst, const char *src, int dst_size) {
+    if (!dst || dst_size <= 0) return;
+    strncpy(dst, src ? src : "", (size_t)(dst_size - 1));
+    dst[dst_size - 1] = '\0';
+}
+
 bool history_expand(History *h, const char *input, char *buf, int buf_size) {
     if (!input || input[0] != '!') {
-        strncpy(buf, input ? input : "", buf_size - 1);
+        safe_copy(buf, input, buf_size);
         return false;
     }
     const char *p = input + 1;
@@ -139,7 +146,7 @@ bool history_expand(History *h, const char *input, char *buf, int buf_size) {
     if (*p == '!') {
         const char *last = entry_at(h, 0);
         if (!last) return false;
-        strncpy(buf, last, buf_size - 1);
+        safe_copy(buf, last, buf_size);
         return true;
     }
     /* !$ — last argument of last command */
@@ -147,7 +154,7 @@ bool history_expand(History *h, const char *input, char *buf, int buf_size) {
         const char *last = entry_at(h, 0);
         if (!last) return false;
         const char *sp = strrchr(last, ' ');
-        strncpy(buf, sp ? sp + 1 : last, buf_size - 1);
+        safe_copy(buf, sp ? sp + 1 : last, buf_size);
         return true;
     }
     /* !* — all args of last command */
@@ -155,7 +162,7 @@ bool history_expand(History *h, const char *input, char *buf, int buf_size) {
         const char *last = entry_at(h, 0);
         if (!last) return false;
         const char *sp = strchr(last, ' ');
-        strncpy(buf, sp ? sp + 1 : "", buf_size - 1);
+        safe_copy(buf, sp ? sp + 1 : "", buf_size);
         return true;
     }
     /* !n — nth history entry (absolute command number, 1 = oldest) */
@@ -164,14 +171,14 @@ bool history_expand(History *h, const char *input, char *buf, int buf_size) {
         int offset = h->total_commands - idx;
         const char *e = entry_at(h, offset);
         if (!e) return false;
-        strncpy(buf, e, buf_size - 1);
+        safe_copy(buf, e, buf_size);
         return true;
     }
     /* !str — most recent starting with str */
     for (int i = 0; i < h->count; i++) {
         char *e = entry_at(h, i);
         if (e && str_startswith(e, p)) {
-            strncpy(buf, e, buf_size - 1);
+            safe_copy(buf, e, buf_size);
             return true;
         }
     }

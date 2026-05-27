@@ -73,6 +73,12 @@ void config_defaults(Config *cfg) {
     /* Scrollbar */
     cfg->scrollbar.enabled  = true;
     cfg->scrollbar.width_px = 8;
+
+    /* Session */
+    cfg->session.enabled              = true;
+    cfg->session.autosave_interval    = 30;
+    cfg->session.max_scrollback_lines = 500;
+    cfg->session.prompt_on_restore    = true;
 }
 
 /* ─── Color parsing ──────────────────────────────────────────────────────── */
@@ -207,6 +213,11 @@ static void apply_kv(ParseCtx *ctx, const char *key, char *val) {
     } else if (strcmp(sec, "scrollbar") == 0) {
         if      (!strcmp(key,"enabled"))   c->scrollbar.enabled  = !strcmp(v,"true");
         else if (!strcmp(key,"width_px"))  c->scrollbar.width_px = atoi(v);
+    } else if (strcmp(sec, "session") == 0) {
+        if      (!strcmp(key,"enabled"))              c->session.enabled              = !strcmp(v,"true");
+        else if (!strcmp(key,"autosave_interval"))    c->session.autosave_interval    = atoi(v);
+        else if (!strcmp(key,"max_scrollback_lines")) c->session.max_scrollback_lines = atoi(v);
+        else if (!strcmp(key,"prompt_on_restore"))    c->session.prompt_on_restore    = !strcmp(v,"true");
     }
 }
 
@@ -338,7 +349,12 @@ bool config_save_defaults(const char *toml_path) {
         "max_tabs = 20\n\n"
         "[scrollbar]\n"
         "enabled = true\n"
-        "width_px = 8\n"
+        "width_px = 8\n\n"
+        "[session]\n"
+        "enabled = true\n"
+        "autosave_interval = 30\n"
+        "max_scrollback_lines = 500\n"
+        "prompt_on_restore = true\n"
     );
     fclose(f);
     return true;

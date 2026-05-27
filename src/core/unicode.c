@@ -121,6 +121,44 @@ int wsh_utf8_display_width(const char *s) {
     return s ? wsh_utf8_display_width_n(s, (int)strlen(s)) : 0;
 }
 
+int wsh_utf8_display_width_skip_ansi(const char *s, int len) {
+    if (!s) return 0;
+    if (len < 0) len = (int)strlen(s);
+    int width = 0;
+    int i = 0;
+    while (i < len) {
+        if ((unsigned char)s[i] == 0x1B) {
+            i++;
+            if (i < len && s[i] == '[') {
+                i++;
+                while (i < len && !(s[i] >= 0x40 && s[i] <= 0x7E)) i++;
+                if (i < len) i++;
+            } else if (i < len && s[i] >= 0x40 && s[i] <= 0x5F) {
+                i++;
+            } else if (i < len && s[i] == ']') {
+                i++;
+                while (i < len && !(s[i] == 0x1B || s[i] == 0x07)) i++;
+                if (i < len && s[i] == 0x1B) i++;
+                if (i < len && s[i] == '\\') i++;
+            } else if (i < len && s[i] >= 0x20 && s[i] <= 0x2F) {
+                i++;
+                while (i < len && s[i] >= 0x20 && s[i] <= 0x2F) i++;
+                if (i < len && s[i] >= 0x40 && s[i] <= 0x7E) i++;
+            }
+            continue;
+        }
+        int used = 0; uint32_t cp = 0;
+        if (!decode_one((const unsigned char *)s + i, len - i, &used, &cp)) {
+            width += 1;
+            i += 1;
+            continue;
+        }
+        width += wsh_utf8_codepoint_width(cp);
+        i += used;
+    }
+    return width;
+}
+
 static char *bytes_to_utf8_codepage(UINT cp, const char *bytes, int len, int *out_len) {
     if (!bytes) return str_dup("");
     if (len < 0) len = (int)strlen(bytes);

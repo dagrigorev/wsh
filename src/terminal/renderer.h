@@ -66,8 +66,8 @@ typedef struct {
     bool   search_active;
 
     /* Reasoning overlay (proactive AI subtitles) */
-    wchar_t reasoning_line1[256];  /* line 1 text */
-    wchar_t reasoning_line2[256];  /* line 2 text (may be empty) */
+    wchar_t reasoning_line1[256];  /* reasoning overlay text */
+    wchar_t reasoning_line2[256];  /* (reserved, currently unused) */
     bool    reasoning_active;      /* true = draw overlay */
 
     /* DPI */

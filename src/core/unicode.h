@@ -28,6 +28,7 @@ int  wsh_utf8_prev_offset(const char *s, int offset);
 int  wsh_utf8_codepoint_width(uint32_t cp);
 int  wsh_utf8_display_width_n(const char *s, int len);
 int  wsh_utf8_display_width(const char *s);
+int  wsh_utf8_display_width_skip_ansi(const char *s, int len);
 
 char *wsh_bytes_to_utf8_for_terminal(const char *bytes, int len, int *out_len);
 char *wsh_utf16_to_utf8_clipboard(const wchar_t *w, int *out_len);

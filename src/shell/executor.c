@@ -61,8 +61,15 @@ static char *find_exe(ShellContext *ctx, const char *name) {
         }
     }
 
+    /* Prefer the shell's own PATH (reflects export PATH=... changes) and
+     * fall back to the Windows process environment if unset in the shell. */
     char pathenv[32768] = {0};
-    GetEnvironmentVariableA("PATH", pathenv, sizeof(pathenv));
+    const char *shell_path = shell_getenv(ctx, "PATH");
+    if (shell_path && shell_path[0]) {
+        strncpy(pathenv, shell_path, sizeof(pathenv) - 1);
+    } else {
+        GetEnvironmentVariableA("PATH", pathenv, sizeof(pathenv));
+    }
     char **dirs = NULL;
     int ndirs = str_split(pathenv, ';', &dirs);
 
@@ -76,12 +83,21 @@ static char *find_exe(ShellContext *ctx, const char *name) {
         }
     }
     str_split_free(dirs, ndirs);
-    (void)ctx;
     return result;
 }
 
 /* ── Redirection ──────────────────────────────────────────────────────────── */
 
+/* File-redirection IO adapter: routes builtin stdout writes to an open file
+ * HANDLE when a builtin runs with output redirected (e.g. echo foo > file). */
+typedef struct { IShellIO base; HANDLE h; } FileWriteIO;
+static void file_wr_write(IShellIO *self, const char *buf, int len) {
+    DWORD written = 0;
+    WriteFile(((FileWriteIO *)self)->h, buf, (DWORD)len, &written, NULL);
+}
+static int file_wr_read(IShellIO *self, char *buf, int size) {
+    (void)self; (void)buf; (void)size; return 0;
+}
 
 static HANDLE ctx_get_fd_handle(ShellContext *ctx, int fd) {
     if (fd == 0) return ctx->h_stdin;
@@ -528,7 +544,22 @@ static int exec_cmd_node(ShellContext *ctx, ASTNode *node, bool bg) {
 
         /* Built-ins */
         BuiltinFn fn = builtin_find(eargv[0]);
-        if (fn) { ret = fn(eargc, eargv, ctx); goto done; }
+        if (fn) {
+            /* When stdout is redirected to a file, route builtin output there
+             * instead of the terminal IO.  Builtins write through ctx->io, so
+             * we temporarily swap it for a handle-backed adapter. */
+            IShellIO *saved_io = ctx->io;
+            FileWriteIO file_io;
+            if (ctx->h_stdout != so && handle_is_usable(ctx->h_stdout)) {
+                file_io.base.write     = file_wr_write;
+                file_io.base.read_line = file_wr_read;
+                file_io.h = ctx->h_stdout;
+                ctx->io = (IShellIO *)&file_io;
+            }
+            ret = fn(eargc, eargv, ctx);
+            ctx->io = saved_io;
+            goto done;
+        }
 
         /* External */
         ret = spawn_external(ctx, eargv, eargc, bg);
@@ -576,24 +607,28 @@ static int pipe_rd_read(IShellIO *self, char *buf, int size) {
     return i;
 }
 
-/* Thread parameter for left-side pipe execution (BUG-002: concurrency). */
+/* Thread parameter for left-side pipe execution. */
 typedef struct {
     HANDLE       hwrite;
     ShellContext *ctx;
     ASTNode      *node;
     int          ret;
+    /* Shallow copy of the mutable execution-state fields so the left and
+     * right sides of the pipe do not race on last_status / cancel_requested
+     * / exit_requested.  Shared read-only state (env, aliases, functions,
+     * history, io, handles) is accessed via the original ctx pointer. */
+    ShellContext  ctx_copy;
 } PipeThreadParam;
 
 static DWORD WINAPI exec_pipe_left_thread(LPVOID param) {
     PipeThreadParam *ptp = (PipeThreadParam *)param;
+
+    /* ctx_copy is a shallow clone; redirect its I/O to the write end. */
     PipeWriteIO pio = { { pipe_wr_write, pipe_wr_read }, ptp->hwrite };
-    IShellIO *saved_io  = ptp->ctx->io;
-    HANDLE    old_out   = ptp->ctx->h_stdout;
-    ptp->ctx->io       = &pio.base;
-    ptp->ctx->h_stdout = ptp->hwrite;
-    ptp->ret = exec_node(ptp->ctx, ptp->node);
-    ptp->ctx->io       = saved_io;
-    ptp->ctx->h_stdout = old_out;
+    ptp->ctx_copy.io       = &pio.base;
+    ptp->ctx_copy.h_stdout = ptp->hwrite;
+
+    ptp->ret = exec_node(&ptp->ctx_copy, ptp->node);
     return 0;
 }
 
@@ -604,8 +639,16 @@ static int exec_pipe(ShellContext *ctx, ASTNode *node) {
     SECURITY_ATTRIBUTES sa = { sizeof(sa), NULL, TRUE };
     if (!CreatePipe(&hread, &hwrite, &sa, 65536)) return 1;
 
-    /* Left side runs in a thread so large pipe output does not deadlock. */
-    PipeThreadParam ptp = { hwrite, ctx, node->binary.left, 0 };
+    /* Left side runs in a thread so large pipe output does not deadlock.
+     * Give it a shallow copy of ctx so it has independent mutable fields
+     * (last_status, cancel_requested, exit_requested, etc.) and does not
+     * race with the right side running on the original ctx. */
+    PipeThreadParam ptp;
+    memset(&ptp, 0, sizeof(ptp));
+    ptp.hwrite    = hwrite;
+    ptp.ctx       = ctx;
+    ptp.node      = node->binary.left;
+    ptp.ctx_copy  = *ctx;   /* shallow copy — shared read-only state is fine */
     HANDLE hthread = CreateThread(NULL, 0, exec_pipe_left_thread, &ptp, 0, NULL);
     if (!hthread) { CloseHandle(hread); CloseHandle(hwrite); return 1; }
 

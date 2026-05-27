@@ -19,6 +19,7 @@
 #include "core/log.h"
 #include "core/path_util.h"
 #include "core/unicode.h"
+#include "core/session.h"
 #include "platform/config.h"
 #include "platform/pty.h"
 #include "platform/input.h"
@@ -28,9 +29,10 @@
 #include "shell/shell_ctx.h"
 #include "shell/history.h"
 #include "shell/completion.h"
+#include "ai/wsh_ai.h"
 #include "window.h"
 #include "repl.h"
-#include "ai/wsh_ai.h"
+#include "man_viewer.h"
 
 #define WSH_MAX_PANES 4
 #define WSH_MAX_TABS 8
@@ -157,6 +159,10 @@ static GitStatusModel    g_git = {0};
 static UiHitTargets      g_hits = {0};
 static SearchState       g_search = {0};
 
+template<typename T> static T dpi_scale(T v) {
+    return (T)(v * g_renderer.dpi / 96.0f + 0.5f);
+}
+
 static void update_native_scrollbar(HWND hwnd);
 static void layout_panes(HWND hwnd);
 static void refresh_runtime_status(bool force);
@@ -190,16 +196,23 @@ static TerminalPane *active_pane(void) {
     if (!tab) return NULL;
     if (tab->active_pane < 0) tab->active_pane = 0;
     if (tab->active_pane >= tab->pane_count) tab->active_pane = tab->pane_count - 1;
-    return tab->pane_count > 0 ? &tab->panes[tab->active_pane] : NULL;
+    if (tab->pane_count <= 0) return NULL;
+    if (tab->active_pane < 0 || tab->active_pane >= tab->pane_count) return NULL;
+    TerminalPane *p = &tab->panes[tab->active_pane];
+    if (!p->initialized) return NULL;
+    return p;
 }
 
 static void terminal_write(IShellIO *self, const char *buf, int len) {
     TerminalIO *t = (TerminalIO *)self;
+    if (!t || !t->lock || !t->vt) return;
     EnterCriticalSection(t->lock);
     vt_parser_feed(t->vt, buf, len);
     LeaveCriticalSection(t->lock);
-    update_native_scrollbar(t->hwnd);
-    InvalidateRect(t->hwnd, NULL, FALSE);
+    if (t->hwnd) {
+        update_native_scrollbar(t->hwnd);
+        InvalidateRect(t->hwnd, NULL, FALSE);
+    }
 }
 
 static int terminal_read_line(IShellIO *self, char *buf, int size) {
@@ -241,18 +254,22 @@ static void apply_default_gui_prompt(ShellContext *shell) {
 static void repl_exec_done_cb(Repl *r, int exec_result) {
     (void)exec_result;
     /* Find the pane that owns this REPL and post a message to the main window.
-     * We walk the tabs/panes to find the matching Repl pointer. */
-    for (int ti = 0; ti < g_tab_count; ++ti) {
+     * We walk the tabs/panes to find the matching Repl pointer.
+     * Acquire g_lock so we do not race with pane_stop/tab_stop on the main thread. */
+    EnterCriticalSection(&g_lock);
+    for (int ti = 0; ti < g_tab_count && ti < WSH_MAX_TABS; ++ti) {
         TerminalTab *tab = &g_tabs[ti];
         if (!tab->initialized) continue;
-        for (int pi = 0; pi < tab->pane_count; ++pi) {
+        for (int pi = 0; pi < tab->pane_count && pi < WSH_MAX_PANES; ++pi) {
             TerminalPane *pane = &tab->panes[pi];
-            if (&pane->repl == r) {
+            if (pane->initialized && &pane->repl == r) {
+                LeaveCriticalSection(&g_lock);
                 PostMessageW(g_hwnd, WM_WSH_EXEC_DONE, (WPARAM)ti, (LPARAM)pi);
                 return;
             }
         }
     }
+    LeaveCriticalSection(&g_lock);
 }
 
 static void pane_grid_from_rect(const RECT *rc, int *cols, int *rows) {
@@ -274,8 +291,9 @@ static void on_title(const char *title, void *ud) {
 
 static void on_pty_data(const char *buf, int len, void *ud) {
     TerminalPane *pane = (TerminalPane *)ud;
-    if (!pane || !pane->initialized) return;
+    if (!pane) return;
     EnterCriticalSection(&g_lock);
+    if (!pane->initialized) { LeaveCriticalSection(&g_lock); return; }
     vt_parser_feed(&pane->vt, buf, len);
     LeaveCriticalSection(&g_lock);
     update_native_scrollbar(g_hwnd);
@@ -340,6 +358,8 @@ static bool pane_start(TerminalPane *pane) {
         SetCurrentDirectoryW(old_cwd);
         HeapFree(GetProcessHeap(), 0, old_cwd);
     }
+    /* Apply AI runtime config from TOML settings */
+    wsh_ai_apply_runtime_config(&pane->shell, &g_cfg.ai);
     /* Initialize proactive AI reasoning micro-model */
     if (pane->shell.ai_enabled) {
         wsh_ai_init_reasoning(&pane->shell);
@@ -377,6 +397,8 @@ static bool pane_start(TerminalPane *pane) {
 
 static void pane_stop(TerminalPane *pane) {
     if (!pane || !pane->initialized) return;
+    EnterCriticalSection(&g_lock);
+    pane->initialized = false;
     if (pane->use_pty) {
         pane->last_exit_code = pty_exit_code(&pane->pty);
         pane->has_exit_code = true;
@@ -386,6 +408,7 @@ static void pane_stop(TerminalPane *pane) {
     shell_ctx_free(&pane->shell);
     screen_free(&pane->screen);
     memset(pane, 0, sizeof(*pane));
+    LeaveCriticalSection(&g_lock);
 }
 
 static void pane_resize(TerminalPane *pane) {
@@ -399,9 +422,9 @@ static void pane_resize(TerminalPane *pane) {
 static void terminal_view_rect(HWND hwnd, RECT *out) {
     if (!out) return;
     GetClientRect(hwnd, out);
-    out->left += g_sidebar_visible ? WSH_UI_SIDEBAR_W : 0;
-    out->top += WSH_UI_TITLE_H + WSH_UI_TOOLBAR_H + WSH_UI_TERM_HEADER_H;
-    out->bottom -= WSH_UI_STATUS_H;
+    out->left += g_sidebar_visible ? dpi_scale(WSH_UI_SIDEBAR_W) : 0;
+    out->top += dpi_scale(WSH_UI_TITLE_H + WSH_UI_TOOLBAR_H + WSH_UI_TERM_HEADER_H);
+    out->bottom -= dpi_scale(WSH_UI_STATUS_H);
     if (out->right <= out->left) out->right = out->left + 1;
     if (out->bottom <= out->top) out->bottom = out->top + 1;
 }
@@ -409,9 +432,9 @@ static void terminal_view_rect(HWND hwnd, RECT *out) {
 static void layout_panes(HWND hwnd) {
     TerminalTab *tab = active_tab();
     if (!hwnd || !tab || tab->pane_count <= 0) return;
-    g_renderer.reserved_left_px = g_sidebar_visible ? WSH_UI_SIDEBAR_W : 0;
-    g_renderer.reserved_top_px = WSH_UI_TITLE_H + WSH_UI_TOOLBAR_H + WSH_UI_TERM_HEADER_H;
-    g_renderer.reserved_bottom_px = WSH_UI_STATUS_H;
+    g_renderer.reserved_left_px = g_sidebar_visible ? dpi_scale(WSH_UI_SIDEBAR_W) : 0;
+    g_renderer.reserved_top_px = dpi_scale(WSH_UI_TITLE_H + WSH_UI_TOOLBAR_H + WSH_UI_TERM_HEADER_H);
+    g_renderer.reserved_bottom_px = dpi_scale(WSH_UI_STATUS_H);
     RECT rc; terminal_view_rect(hwnd, &rc);
     int w = rc.right - rc.left;
     int h = rc.bottom - rc.top;
@@ -453,9 +476,10 @@ static int pane_hit_test(int x, int y) {
     if (!tab) return 0;
     POINT pt = {x, y};
     for (int i = 0; i < tab->pane_count; ++i) {
-        if (PtInRect(&tab->panes[i].rect, pt)) return i;
+        if (tab->panes[i].initialized && PtInRect(&tab->panes[i].rect, pt)) return i;
     }
-    return tab->active_pane;
+    if (tab->active_pane >= 0 && tab->active_pane < tab->pane_count) return tab->active_pane;
+    return 0;
 }
 
 static bool pane_add(void) {
@@ -487,13 +511,13 @@ static void pane_close_active(void) {
        the last physical pane; when the focused pane is not last, focus is moved
        to the last pane before closing. */
     int idx = tab->active_pane;
+    if (idx < 0 || idx >= tab->pane_count) idx = tab->pane_count - 1;
     if (idx != tab->pane_count - 1) {
         tab->active_pane = tab->pane_count - 1;
         idx = tab->active_pane;
     }
 
     pane_stop(&tab->panes[idx]);
-    memset(&tab->panes[idx], 0, sizeof(tab->panes[idx]));
     tab->pane_count--;
     if (tab->active_pane >= tab->pane_count) tab->active_pane = tab->pane_count - 1;
     layout_panes(g_hwnd);
@@ -696,7 +720,7 @@ static const char *pane_cwd(const TerminalPane *p) {
 }
 
 static void pane_sync_cwd(TerminalPane *p) {
-    if (!p) return;
+    if (!p || !p->initialized) return;
     if (!p->use_pty && p->shell.cwd[0]) strncpy(p->display_cwd, p->shell.cwd, MAX_PATH - 1);
 }
 
@@ -768,7 +792,9 @@ static void update_git_status(void) {
         _snprintf(git_dir, MAX_PATH, "%s\\.git", cur);
         if (PathFileExistsA(git_dir)) {
             strncpy(g_git.repo_root, cur, MAX_PATH - 1);
+            g_git.repo_root[MAX_PATH - 1] = '\0';
             strncpy(g_git.project, basename_const(cur), sizeof(g_git.project) - 1);
+            g_git.project[sizeof(g_git.project) - 1] = '\0';
             char head_path[MAX_PATH];
             _snprintf(head_path, MAX_PATH, "%s\\HEAD", git_dir);
             FILE *f = fopen(head_path, "r");
@@ -778,8 +804,13 @@ static void update_git_status(void) {
                     char *nl = strpbrk(line, "\r\n");
                     if (nl) *nl = '\0';
                     const char *prefix = "ref: refs/heads/";
-                    if (strncmp(line, prefix, strlen(prefix)) == 0) strncpy(g_git.branch, line + strlen(prefix), sizeof(g_git.branch) - 1);
-                    else if (line[0]) strncpy(g_git.branch, line, 12);
+                    if (strncmp(line, prefix, strlen(prefix)) == 0) {
+                        strncpy(g_git.branch, line + strlen(prefix), sizeof(g_git.branch) - 1);
+                        g_git.branch[sizeof(g_git.branch) - 1] = '\0';
+                    } else if (line[0]) {
+                        strncpy(g_git.branch, line, 12);
+                        g_git.branch[12] = '\0';
+                    }
                 }
                 fclose(f);
             }
@@ -787,7 +818,13 @@ static void update_git_status(void) {
             return;
         }
         if (PathIsRootA(cur)) break;
+        /* Guard against PathRemoveFileSpecA being a no-op (e.g. already root
+         * without a recognised root pattern) to prevent an infinite loop. */
+        char prev[MAX_PATH];
+        strncpy(prev, cur, MAX_PATH - 1);
+        prev[MAX_PATH - 1] = '\0';
         PathRemoveFileSpecA(cur);
+        if (strcmp(cur, prev) == 0) break;
     }
     strncpy(g_git.project, basename_const(cwd), sizeof(g_git.project) - 1);
 }
@@ -835,10 +872,380 @@ static void screen_line_to_ascii(const ScreenBuffer *sb, int logical_row, char *
     out[oi] = '\0';
 }
 
+/* ── Session Persistence ─────────────────────────────────────────────────── */
+
+struct WriteBuf { uint8_t *data; size_t cap; size_t off; };
+
+static void wb_init(struct WriteBuf *wb, void *buf, size_t cap) {
+    wb->data = (uint8_t*)buf; wb->cap = cap; wb->off = 0;
+}
+
+static bool wb_write(struct WriteBuf *wb, const void *src, size_t n) {
+    if (wb->off + n > wb->cap) return false;
+    memcpy(wb->data + wb->off, src, n);
+    wb->off += n;
+    return true;
+}
+
+struct ReadBuf { const uint8_t *data; size_t size; size_t off; };
+
+static void rb_init(struct ReadBuf *rb, const void *data, size_t size) {
+    rb->data = (const uint8_t*)data; rb->size = size; rb->off = 0;
+}
+
+static bool rb_read(struct ReadBuf *rb, void *dst, size_t n) {
+    if (rb->off + n > rb->size) return false;
+    memcpy(dst, rb->data + rb->off, n);
+    rb->off += n;
+    return true;
+}
+
+static void session_save_now(void) {
+    if (!g_cfg.session.enabled) return;
+    size_t buf_size = 64ULL * 1024ULL * 1024ULL;
+    uint8_t *buf = (uint8_t*)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, buf_size);
+    if (!buf) return;
+
+    struct WriteBuf wb;
+    wb_init(&wb, buf, buf_size);
+
+    /* Header */
+    uint32_t magic = WSH_SESSION_MAGIC, version = WSH_SESSION_VERSION;
+    uint32_t tab_count_u32 = (uint32_t)g_tab_count;
+    uint32_t active_tab_u32 = (uint32_t)g_active_tab;
+    uint8_t sidebar = g_sidebar_visible ? 1 : 0;
+    wb_write(&wb, &magic, sizeof(magic));
+    wb_write(&wb, &version, sizeof(version));
+    wb_write(&wb, &tab_count_u32, sizeof(tab_count_u32));
+    wb_write(&wb, &active_tab_u32, sizeof(active_tab_u32));
+    wb_write(&wb, &sidebar, sizeof(sidebar));
+
+    EnterCriticalSection(&g_lock);
+    for (int ti = 0; ti < g_tab_count && ti < WSH_MAX_TABS; ++ti) {
+        TerminalTab *tab = &g_tabs[ti];
+        if (!tab->initialized) continue;
+
+        uint32_t pc = (uint32_t)tab->pane_count;
+        uint32_t ap = (uint32_t)tab->active_pane;
+        wb_write(&wb, &pc, sizeof(pc));
+        wb_write(&wb, &ap, sizeof(ap));
+
+        for (int pi = 0; pi < tab->pane_count && pi < WSH_MAX_PANES; ++pi) {
+            TerminalPane *pane = &tab->panes[pi];
+            if (!pane->initialized) {
+                /* Write a zero init-byte so the restore side stays aligned. */
+                uint8_t init = 0;
+                wb_write(&wb, &init, 1);
+                continue;
+            }
+
+            uint8_t init = 1;
+            wb_write(&wb, &init, 1);
+
+            uint16_t slen;
+            slen = (uint16_t)strlen(pane->startup_cwd);
+            wb_write(&wb, &slen, sizeof(slen));
+            wb_write(&wb, pane->startup_cwd, slen);
+
+            slen = (uint16_t)strlen(pane->display_cwd);
+            wb_write(&wb, &slen, sizeof(slen));
+            wb_write(&wb, pane->display_cwd, slen);
+
+            slen = (uint16_t)strlen(pane->screen.title);
+            wb_write(&wb, &slen, sizeof(slen));
+            wb_write(&wb, pane->screen.title, slen);
+
+            uint32_t cols = (uint32_t)pane->screen.cols;
+            uint32_t rows = (uint32_t)pane->screen.rows;
+            uint32_t cx = (uint32_t)pane->screen.cursor_x;
+            uint32_t cy = (uint32_t)pane->screen.cursor_y;
+            uint8_t cv = pane->screen.cursor_visible ? 1 : 0;
+            uint8_t alt = pane->screen.alt_screen_active ? 1 : 0;
+            uint8_t has_exit = pane->has_exit_code ? 1 : 0;
+
+            wb_write(&wb, &cols, sizeof(cols));
+            wb_write(&wb, &rows, sizeof(rows));
+            wb_write(&wb, &cx, sizeof(cx));
+            wb_write(&wb, &cy, sizeof(cy));
+            wb_write(&wb, &cv, 1);
+            wb_write(&wb, &alt, 1);
+            wb_write(&wb, &has_exit, 1);
+            if (has_exit) wb_write(&wb, &pane->last_exit_code, sizeof(pane->last_exit_code));
+
+            int total_cells = (int)(cols * rows);
+            uint32_t cell_bytes = (uint32_t)((size_t)total_cells * sizeof(ScreenCell));
+            wb_write(&wb, &cell_bytes, sizeof(cell_bytes));
+            wb_write(&wb, pane->screen.cells, cell_bytes);
+
+            uint32_t alt_bytes = 0;
+            if (alt && pane->screen.alt_cells) {
+                alt_bytes = (uint32_t)((size_t)total_cells * sizeof(ScreenCell));
+                wb_write(&wb, &alt_bytes, sizeof(alt_bytes));
+                wb_write(&wb, pane->screen.alt_cells, alt_bytes);
+            } else {
+                wb_write(&wb, &alt_bytes, sizeof(alt_bytes));
+            }
+
+            int max_sb = g_cfg.session.max_scrollback_lines > 0
+                ? g_cfg.session.max_scrollback_lines : WSH_SESSION_MAX_SCROLLBACK;
+            int sb_lines = pane->screen.scrollback_count;
+            int save_sb = sb_lines < max_sb ? sb_lines : max_sb;
+
+            uint32_t sb_line_count = (uint32_t)save_sb;
+            uint32_t sb_bytes = (uint32_t)((size_t)save_sb * cols * sizeof(ScreenCell));
+            wb_write(&wb, &sb_line_count, sizeof(sb_line_count));
+            wb_write(&wb, &sb_bytes, sizeof(sb_bytes));
+
+            if (save_sb > 0) {
+                int skip = sb_lines - save_sb;
+                for (int sl = skip; sl < sb_lines; ++sl) {
+                    ScreenCell *cell = screen_scrollback_line_from_oldest(&pane->screen, sl, 0);
+                    if (cell) wb_write(&wb, cell, (size_t)cols * sizeof(ScreenCell));
+                }
+            }
+        }
+    }
+    LeaveCriticalSection(&g_lock);
+
+    session_save_file(buf, wb.off);
+    HeapFree(GetProcessHeap(), 0, buf);
+    WSH_LOG_INFO("session saved (%zu bytes)", wb.off);
+}
+
+static bool session_restore_now(void) {
+    if (!g_cfg.session.enabled || !session_exists()) return false;
+
+    size_t buf_size = 64ULL * 1024ULL * 1024ULL;
+    uint8_t *buf = (uint8_t*)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, buf_size);
+    if (!buf) return false;
+
+    size_t actual = buf_size;
+    if (!session_read_file(buf, &actual)) {
+        HeapFree(GetProcessHeap(), 0, buf);
+        WSH_LOG_WARN("session_restore: read failed");
+        return false;
+    }
+
+    struct ReadBuf rb;
+    rb_init(&rb, buf, actual);
+
+    uint32_t magic, version, tab_count_u32, active_tab_u32;
+    uint8_t sidebar;
+    if (!rb_read(&rb, &magic, sizeof(magic)) || magic != WSH_SESSION_MAGIC ||
+        !rb_read(&rb, &version, sizeof(version)) || version != WSH_SESSION_VERSION ||
+        !rb_read(&rb, &tab_count_u32, sizeof(tab_count_u32)) ||
+        !rb_read(&rb, &active_tab_u32, sizeof(active_tab_u32)) ||
+        !rb_read(&rb, &sidebar, sizeof(sidebar))) {
+        HeapFree(GetProcessHeap(), 0, buf);
+        WSH_LOG_WARN("session_restore: bad header");
+        return false;
+    }
+
+    WSH_LOG_INFO("session_restore: %lu tabs, active=%lu", tab_count_u32, active_tab_u32);
+
+    if (g_cfg.session.prompt_on_restore) {
+        wchar_t msg[128];
+        wsprintfW(msg, L"Restore previous session (%lu tab%s)?",
+                  tab_count_u32, tab_count_u32 == 1 ? L"" : L"s");
+        if (MessageBoxW(g_hwnd, msg, L"Wsh", MB_YESNO | MB_ICONQUESTION) != IDYES) {
+            HeapFree(GetProcessHeap(), 0, buf);
+            session_delete();
+            return false;
+        }
+    }
+
+    /* First pass: read metadata and create panes */
+    /* We need to store cell data offsets for a second pass */
+    struct PaneCellOffsets {
+        size_t cell_bytes_off;
+        size_t cell_data_off;
+        size_t cell_data_size;
+        size_t alt_bytes_off;
+        size_t alt_data_off;
+        size_t alt_data_size;
+        size_t sb_count_off;
+        size_t sb_bytes_off;
+        size_t sb_data_off;
+        size_t sb_data_size;
+    };
+
+    struct RestorePane {
+        char  startup_cwd[MAX_PATH];
+        char  display_cwd[MAX_PATH];
+        char  title[256];
+        int   cols, rows;
+        int   cursor_x, cursor_y;
+        bool  cursor_visible;
+        bool  alt_screen_active;
+        DWORD last_exit_code;
+        bool  has_exit_code;
+        struct PaneCellOffsets offs;
+    };
+
+    struct RestoreTab {
+        int pane_count;
+        int active_pane;
+        struct RestorePane panes[WSH_MAX_PANES];
+    };
+
+    struct RestoreTab rtabs[WSH_MAX_TABS];
+    int restore_tab_count = 0;
+
+    for (uint32_t ti = 0; ti < tab_count_u32 && ti < WSH_MAX_TABS; ++ti) {
+        uint32_t pc, ap;
+        if (!rb_read(&rb, &pc, sizeof(pc)) || !rb_read(&rb, &ap, sizeof(ap))) break;
+        if (pc == 0 || pc > WSH_MAX_PANES) {
+            for (uint32_t si = 0; si < pc; ++si) {
+                uint8_t sinit; rb_read(&rb, &sinit, 1);
+                if (!sinit) continue;
+                uint16_t slen;
+                rb_read(&rb, &slen, sizeof(slen)); rb.off += slen;
+                rb_read(&rb, &slen, sizeof(slen)); rb.off += slen;
+                rb_read(&rb, &slen, sizeof(slen)); rb.off += slen;
+                rb.off += 4*5 + 3;
+                uint8_t has_exit2; memcpy(&has_exit2, rb.data + rb.off - 1, 1);
+                if (has_exit2) rb.off += 4;
+                uint32_t cb, ab;
+                rb_read(&rb, &cb, sizeof(cb)); rb.off += cb;
+                rb_read(&rb, &ab, sizeof(ab)); rb.off += ab;
+                uint32_t sbc, sbb;
+                rb_read(&rb, &sbc, sizeof(sbc)); rb_read(&rb, &sbb, sizeof(sbb)); rb.off += sbb;
+            }
+            continue;
+        }
+
+        struct RestoreTab *rt = &rtabs[restore_tab_count++];
+        rt->pane_count = (int)pc;
+        rt->active_pane = (int)ap;
+
+        for (uint32_t pi = 0; pi < pc; ++pi) {
+            struct RestorePane *rp = &rt->panes[pi];
+            memset(rp, 0, sizeof(*rp));
+
+            uint8_t init;
+            rb_read(&rb, &init, 1);
+            if (!init) continue;
+
+            uint16_t slen;
+            rb_read(&rb, &slen, sizeof(slen));
+            if (slen > 0 && slen < MAX_PATH) { rb_read(&rb, rp->startup_cwd, slen); rp->startup_cwd[slen] = '\0'; }
+
+            rb_read(&rb, &slen, sizeof(slen));
+            if (slen > 0 && slen < MAX_PATH) { rb_read(&rb, rp->display_cwd, slen); rp->display_cwd[slen] = '\0'; }
+
+            rb_read(&rb, &slen, sizeof(slen));
+            if (slen > 0 && slen < 256) { rb_read(&rb, rp->title, slen); rp->title[slen] = '\0'; }
+
+            uint32_t cols, rows, cx, cy;
+            uint8_t cv, alt, has_exit;
+            rb_read(&rb, &cols, sizeof(cols));
+            rb_read(&rb, &rows, sizeof(rows));
+            rb_read(&rb, &cx, sizeof(cx));
+            rb_read(&rb, &cy, sizeof(cy));
+            rb_read(&rb, &cv, 1);
+            rb_read(&rb, &alt, 1);
+            rb_read(&rb, &has_exit, 1);
+
+            rp->cols = (int)cols;
+            rp->rows = (int)rows;
+            rp->cursor_x = (int)cx;
+            rp->cursor_y = (int)cy;
+            rp->cursor_visible = cv != 0;
+            rp->alt_screen_active = alt != 0;
+            rp->has_exit_code = has_exit != 0;
+            if (has_exit) rb_read(&rb, &rp->last_exit_code, sizeof(rp->last_exit_code));
+
+            /* Record cell data offsets */
+            rp->offs.cell_bytes_off = rb.off;
+            uint32_t cell_bytes;
+            rb_read(&rb, &cell_bytes, sizeof(cell_bytes));
+            rp->offs.cell_data_off = rb.off;
+            rp->offs.cell_data_size = cell_bytes;
+            rb.off += cell_bytes;
+
+            rp->offs.alt_bytes_off = rb.off;
+            uint32_t alt_bytes;
+            rb_read(&rb, &alt_bytes, sizeof(alt_bytes));
+            rp->offs.alt_data_off = rb.off;
+            rp->offs.alt_data_size = alt_bytes;
+            rb.off += alt_bytes;
+
+            rp->offs.sb_count_off = rb.off;
+            uint32_t sb_line_count, sb_bytes;
+            rb_read(&rb, &sb_line_count, sizeof(sb_line_count));
+            rp->offs.sb_bytes_off = rb.off;
+            rb_read(&rb, &sb_bytes, sizeof(sb_bytes));
+            rp->offs.sb_data_off = rb.off;
+            rp->offs.sb_data_size = sb_bytes;
+            rb.off += sb_bytes;
+        }
+    }
+
+    /* Create tabs and panes */
+    g_tab_count = 0;
+    g_active_tab = 0;
+    g_sidebar_visible = sidebar != 0;
+
+    for (int ti = 0; ti < restore_tab_count; ++ti) {
+        struct RestoreTab *rt = &rtabs[ti];
+        TerminalTab *tab = &g_tabs[ti];
+        memset(tab, 0, sizeof(*tab));
+        tab->pane_count = rt->pane_count;
+        tab->active_pane = rt->active_pane;
+        g_tab_count = ti + 1;
+
+        for (int pi = 0; pi < rt->pane_count; ++pi) {
+            struct RestorePane *rp = &rt->panes[pi];
+            TerminalPane *pane = &tab->panes[pi];
+            memset(pane, 0, sizeof(*pane));
+
+            if (rp->startup_cwd[0]) strncpy(pane->startup_cwd, rp->startup_cwd, MAX_PATH - 1);
+            if (rp->display_cwd[0]) strncpy(pane->display_cwd, rp->display_cwd, MAX_PATH - 1);
+
+            /* Store restore data in a temp pointer so pane_start can use it */
+            /* pane_start will call screen_init; we then overwrite the screen */
+            if (!pane_start(pane)) continue;
+
+            /* Restore scrollback history (the valuable part) */
+            ScreenBuffer *sb = &pane->screen;
+            if (rp->offs.sb_data_size > 0 && sb->scrollback) {
+                int saved_cols = rp->cols;
+                int copy_lines = (int)(rp->offs.sb_data_size / (sizeof(ScreenCell) * (size_t)saved_cols));
+                if (copy_lines > sb->scrollback_capacity) copy_lines = sb->scrollback_capacity;
+
+                ScreenCell *sb_src = (ScreenCell*)(buf + rp->offs.sb_data_off);
+                for (int sl = 0; sl < copy_lines; ++sl) {
+                    ScreenCell *dst = sb->scrollback + sl * sb->cols;
+                    ScreenCell *src = sb_src + sl * saved_cols;
+                    int copy_cols = saved_cols < sb->cols ? saved_cols : sb->cols;
+                    memcpy(dst, src, (size_t)copy_cols * sizeof(ScreenCell));
+                }
+                sb->scrollback_count = copy_lines;
+                sb->scrollback_head = copy_lines % sb->scrollback_capacity;
+            }
+
+            /* Restore display_cwd from saved session */
+            if (rp->display_cwd[0]) strncpy(pane->display_cwd, rp->display_cwd, MAX_PATH - 1);
+
+            pane->initialized = true;
+        }
+
+        tab->initialized = true;
+    }
+
+    g_active_tab = (int)active_tab_u32;
+    if (g_active_tab >= g_tab_count) g_active_tab = 0;
+
+    HeapFree(GetProcessHeap(), 0, buf);
+    session_delete();
+    WSH_LOG_INFO("session restored: %d tabs", g_tab_count);
+    return true;
+}
+
 static void update_search_matches(void) {
     g_search.match_count = 0;
     TerminalPane *p = active_pane();
-    if (!p || !g_search.query[0]) {
+    if (!p || !p->initialized || !g_search.query[0]) {
         g_search.active_match = 0;
         return;
     }
@@ -892,11 +1299,16 @@ static void draw_chrome(Renderer *r) {
     TerminalPane *pane = active_pane();
     refresh_runtime_status(false);
 
-    RECT title = {client.left, client.top, client.right, client.top + WSH_UI_TITLE_H};
-    RECT toolbar = {client.left, title.bottom, client.right, title.bottom + WSH_UI_TOOLBAR_H};
-    RECT sidebar = {client.left, toolbar.bottom, client.left + (g_sidebar_visible ? WSH_UI_SIDEBAR_W : 0), client.bottom - WSH_UI_STATUS_H};
-    RECT term_header = {sidebar.right, toolbar.bottom, client.right, toolbar.bottom + WSH_UI_TERM_HEADER_H};
-    RECT status = {client.left, client.bottom - WSH_UI_STATUS_H, client.right, client.bottom};
+    int title_h = dpi_scale(WSH_UI_TITLE_H);
+    int toolbar_h = dpi_scale(WSH_UI_TOOLBAR_H);
+    int theader_h = dpi_scale(WSH_UI_TERM_HEADER_H);
+    int status_h = dpi_scale(WSH_UI_STATUS_H);
+    int sidebar_w = g_sidebar_visible ? dpi_scale(WSH_UI_SIDEBAR_W) : 0;
+    RECT title = {client.left, client.top, client.right, client.top + title_h};
+    RECT toolbar = {client.left, title.bottom, client.right, title.bottom + toolbar_h};
+    RECT sidebar = {client.left, toolbar.bottom, client.left + sidebar_w, client.bottom - status_h};
+    RECT term_header = {sidebar.right, toolbar.bottom, client.right, toolbar.bottom + theader_h};
+    RECT status = {client.left, client.bottom - status_h, client.right, client.bottom};
     RECT body = {sidebar.right, term_header.bottom, client.right, status.top};
 
     draw_rect(r, &title, g_theme.bg_card);
@@ -909,121 +1321,122 @@ static void draw_chrome(Renderer *r) {
     if (g_sidebar_visible) draw_line(r, (float)sidebar.right - 0.5f, (float)sidebar.top, (float)sidebar.right - 0.5f, (float)sidebar.bottom, g_theme.border);
     draw_line(r, (float)term_header.left, (float)term_header.bottom - 0.5f, (float)term_header.right, (float)term_header.bottom - 0.5f, g_theme.border);
 
-    RECT brand = {16, 10, 56, 32};
+    RECT brand = {dpi_scale(16), dpi_scale(10), dpi_scale(56), dpi_scale(32)};
     draw_text_u8(r, "Wsh", &brand, g_theme.text_primary);
 
-    int actions_w = 150;
-    int tx = 68;
-    int tab_w = WSH_UI_TAB_W;
-    int max_tab_right = client.right - actions_w - 12;
+    int actions_w = dpi_scale(150);
+    int tx = dpi_scale(68);
+    int tab_w = dpi_scale(WSH_UI_TAB_W);
+    int max_tab_right = client.right - actions_w - dpi_scale(12);
     if (g_tab_count > 1) {
-        int available = max_tab_right - tx - (g_tab_count - 1) * 6;
+        int available = max_tab_right - tx - (g_tab_count - 1) * dpi_scale(6);
         if (available > 0) {
             int fit = available / g_tab_count;
-            if (fit < tab_w) tab_w = fit < 116 ? 116 : fit;
+            if (fit < tab_w) tab_w = fit < dpi_scale(116) ? dpi_scale(116) : fit;
         }
     }
     g_hits.tab_count = g_tab_count;
     for (int i = 0; i < g_tab_count && i < WSH_MAX_TABS; ++i) {
         if (!g_tabs[i].initialized) continue;
-        RECT tr = {tx, 7, tx + tab_w, WSH_UI_TITLE_H - 4};
+        RECT tr = {tx, dpi_scale(7), tx + tab_w, dpi_scale(WSH_UI_TITLE_H - 4)};
         g_hits.tabs[i].rect = tr;
         g_hits.tabs[i].tab_index = i;
-        draw_round_rect(r, &tr, 7.0f, (i == g_active_tab) ? g_theme.bg_surface : g_theme.bg_card);
-        draw_round_border(r, &tr, 7.0f, (i == g_active_tab) ? g_theme.border_mid : g_theme.border);
-        TerminalPane *tp = (g_tabs[i].pane_count > 0) ? &g_tabs[i].panes[g_tabs[i].active_pane] : NULL;
-        draw_status_dot(r, (float)tr.left + 14.0f, (float)tr.top + 17.0f, pane_status_color(tp));
+        draw_round_rect(r, &tr, dpi_scale(7.0f), (i == g_active_tab) ? g_theme.bg_surface : g_theme.bg_card);
+        draw_round_border(r, &tr, dpi_scale(7.0f), (i == g_active_tab) ? g_theme.border_mid : g_theme.border);
+        int ap = g_tabs[i].active_pane;
+        TerminalPane *tp = (g_tabs[i].pane_count > 0 && ap >= 0 && ap < g_tabs[i].pane_count) ? &g_tabs[i].panes[ap] : NULL;
+        draw_status_dot(r, (float)tr.left + dpi_scale(14.0f), (float)tr.top + dpi_scale(17.0f), pane_status_color(tp));
         char label[160]; format_pane_label(tp, label, sizeof(label));
-        RECT lr = {tr.left + 24, tr.top + 7, tr.right - 28, tr.bottom - 4};
+        RECT lr = {tr.left + dpi_scale(24), tr.top + dpi_scale(7), tr.right - dpi_scale(28), tr.bottom - dpi_scale(4)};
         draw_text_u8(r, label, &lr, (i == g_active_tab) ? g_theme.text_primary : g_theme.text_secondary);
-        RECT cr = {tr.right - 25, tr.top + 7, tr.right - 7, tr.top + 25};
+        RECT cr = {tr.right - dpi_scale(25), tr.top + dpi_scale(7), tr.right - dpi_scale(7), tr.top + dpi_scale(25)};
         g_hits.tab_close[i] = cr;
         float cx = ((float)cr.left + (float)cr.right) * 0.5f;
         float cy = ((float)cr.top + (float)cr.bottom) * 0.5f;
         draw_line(r, cx - 4.0f, cy - 4.0f, cx + 4.0f, cy + 4.0f, g_theme.text_faint);
         draw_line(r, cx + 4.0f, cy - 4.0f, cx - 4.0f, cy + 4.0f, g_theme.text_faint);
-        tx += tab_w + 6;
+        tx += tab_w + dpi_scale(6);
     }
-    g_hits.add_tab = {tx + 4, 10, tx + 30, 36};
-    draw_round_rect(r, &g_hits.add_tab, 7.0f, g_theme.bg_hover);
-    draw_round_border(r, &g_hits.add_tab, 7.0f, g_theme.border_mid);
-    RECT add_text = {g_hits.add_tab.left + 8, g_hits.add_tab.top + 4, g_hits.add_tab.right, g_hits.add_tab.bottom};
+    g_hits.add_tab = {tx + dpi_scale(4), dpi_scale(10), tx + dpi_scale(30), dpi_scale(36)};
+    draw_round_rect(r, &g_hits.add_tab, dpi_scale(7.0f), g_theme.bg_hover);
+    draw_round_border(r, &g_hits.add_tab, dpi_scale(7.0f), g_theme.border_mid);
+    RECT add_text = {g_hits.add_tab.left + dpi_scale(8), g_hits.add_tab.top + dpi_scale(4), g_hits.add_tab.right, g_hits.add_tab.bottom};
     draw_text_u8(r, "+", &add_text, g_theme.text_primary);
 
-    int bx = client.right - 148;
-    g_hits.split = {bx, 8, bx + 28, 36}; draw_round_rect(r, &g_hits.split, 7.0f, g_theme.bg_card); RECT split_text = {bx + 9, 13, bx + 28, 34}; draw_text_u8(r, "S", &split_text, g_theme.text_secondary); bx += 32;
-    g_hits.search = {bx, 8, bx + 28, 36}; draw_round_rect(r, &g_hits.search, 7.0f, g_theme.bg_card); RECT search_text = {bx + 9, 13, bx + 28, 34}; draw_text_u8(r, "F", &search_text, g_theme.text_secondary); bx += 32;
-    g_hits.settings = {bx, 8, bx + 28, 36}; draw_round_rect(r, &g_hits.settings, 7.0f, g_theme.bg_card); RECT settings_text = {bx + 9, 13, bx + 28, 34}; draw_text_u8(r, "*", &settings_text, g_theme.text_secondary); bx += 32;
-    g_hits.sidebar_toggle = {bx, 8, bx + 28, 36}; draw_round_rect(r, &g_hits.sidebar_toggle, 7.0f, g_theme.bg_card); RECT side_text = {bx + 9, 13, bx + 28, 34}; draw_text_u8(r, g_sidebar_visible ? "<" : ">", &side_text, g_theme.text_secondary);
+    int bx = client.right - dpi_scale(148);
+    g_hits.split = {bx, dpi_scale(8), bx + dpi_scale(28), dpi_scale(36)}; draw_round_rect(r, &g_hits.split, dpi_scale(7.0f), g_theme.bg_card); RECT split_text = {bx + dpi_scale(9), dpi_scale(13), bx + dpi_scale(28), dpi_scale(34)}; draw_text_u8(r, "S", &split_text, g_theme.text_secondary); bx += dpi_scale(32);
+    g_hits.search = {bx, dpi_scale(8), bx + dpi_scale(28), dpi_scale(36)}; draw_round_rect(r, &g_hits.search, dpi_scale(7.0f), g_theme.bg_card); RECT search_text = {bx + dpi_scale(9), dpi_scale(13), bx + dpi_scale(28), dpi_scale(34)}; draw_text_u8(r, "F", &search_text, g_theme.text_secondary); bx += dpi_scale(32);
+    g_hits.settings = {bx, dpi_scale(8), bx + dpi_scale(28), dpi_scale(36)}; draw_round_rect(r, &g_hits.settings, dpi_scale(7.0f), g_theme.bg_card); RECT settings_text = {bx + dpi_scale(9), dpi_scale(13), bx + dpi_scale(28), dpi_scale(34)}; draw_text_u8(r, "*", &settings_text, g_theme.text_secondary); bx += dpi_scale(32);
+    g_hits.sidebar_toggle = {bx, dpi_scale(8), bx + dpi_scale(28), dpi_scale(36)}; draw_round_rect(r, &g_hits.sidebar_toggle, dpi_scale(7.0f), g_theme.bg_card); RECT side_text = {bx + dpi_scale(9), dpi_scale(13), bx + dpi_scale(28), dpi_scale(34)}; draw_text_u8(r, g_sidebar_visible ? "<" : ">", &side_text, g_theme.text_secondary);
 
     char path[256]; compact_path(pane_cwd(pane), path, sizeof(path));
-    RECT path_box = {toolbar.left + 14, toolbar.top + 7, toolbar.right - 132, toolbar.bottom - 7};
-    draw_round_rect(r, &path_box, 10.0f, g_theme.bg_base);
-    draw_round_border(r, &path_box, 10.0f, g_theme.border_mid);
-    draw_ui_dot(r, (float)path_box.left + 13.0f, (float)path_box.top + 13.0f, 3.5f, g_theme.accent);
-    RECT path_text = {path_box.left + 24, path_box.top + 5, path_box.right - 10, path_box.bottom};
+    RECT path_box = {toolbar.left + dpi_scale(14), toolbar.top + dpi_scale(7), toolbar.right - dpi_scale(132), toolbar.bottom - dpi_scale(7)};
+    draw_round_rect(r, &path_box, dpi_scale(10.0f), g_theme.bg_base);
+    draw_round_border(r, &path_box, dpi_scale(10.0f), g_theme.border_mid);
+    draw_ui_dot(r, (float)path_box.left + dpi_scale(13.0f), (float)path_box.top + dpi_scale(13.0f), dpi_scale(3.5f), g_theme.accent);
+    RECT path_text = {path_box.left + dpi_scale(24), path_box.top + dpi_scale(5), path_box.right - dpi_scale(10), path_box.bottom};
     draw_text_u8(r, path, &path_text, g_theme.text_secondary);
-    RECT badge = {toolbar.right - 116, toolbar.top + 9, toolbar.right - 16, toolbar.bottom - 9};
-    draw_round_rect(r, &badge, 10.0f, g_theme.bg_base);
-    draw_round_border(r, &badge, 10.0f, g_theme.border_mid);
-    RECT badge_text = {badge.left + 13, badge.top + 3, badge.right - 10, badge.bottom};
+    RECT badge = {toolbar.right - dpi_scale(116), toolbar.top + dpi_scale(9), toolbar.right - dpi_scale(16), toolbar.bottom - dpi_scale(9)};
+    draw_round_rect(r, &badge, dpi_scale(10.0f), g_theme.bg_base);
+    draw_round_border(r, &badge, dpi_scale(10.0f), g_theme.border_mid);
+    RECT badge_text = {badge.left + dpi_scale(13), badge.top + dpi_scale(3), badge.right - dpi_scale(10), badge.bottom};
     draw_text_u8(r, is_process_elevated() ? "elevated" : "local", &badge_text, g_theme.green);
 
     char header[512];
-    DWORD pid = pane && pane->use_pty ? pane->pty.pid : GetCurrentProcessId();
-    const char *state = (pane && pane->use_pty && !pty_is_alive(&pane->pty)) ? "closed" : "idle";
+    DWORD pid = pane && pane->initialized && pane->use_pty ? pane->pty.pid : GetCurrentProcessId();
+    const char *state = (pane && pane->initialized && pane->use_pty && !pty_is_alive(&pane->pty)) ? "closed" : "idle";
     _snprintf(header, sizeof(header), "%s · PID %lu · %s · %s", shell_label(), (unsigned long)pid, path[0] ? path : "-", state);
-    RECT hr = {term_header.left + 14, term_header.top + 7, term_header.right - 14, term_header.bottom};
+    RECT hr = {term_header.left + dpi_scale(14), term_header.top + dpi_scale(7), term_header.right - dpi_scale(14), term_header.bottom};
     draw_text_u8(r, header, &hr, g_theme.text_secondary);
 
     if (g_sidebar_visible) {
-        RECT sr = {sidebar.left + 14, sidebar.top + 12, sidebar.right - 10, sidebar.top + 30};
+        RECT sr = {sidebar.left + dpi_scale(14), sidebar.top + dpi_scale(12), sidebar.right - dpi_scale(10), sidebar.top + dpi_scale(30)};
         draw_text_u8(r, "SESSIONS", &sr, g_theme.text_faint);
-        int y = sidebar.top + 36;
+        int y = sidebar.top + dpi_scale(36);
         if (tab) {
             for (int i = 0; i < tab->pane_count; ++i) {
-                RECT item = {sidebar.left + 8, y, sidebar.right - 8, y + 26};
+                RECT item = {sidebar.left + dpi_scale(8), y, sidebar.right - dpi_scale(8), y + dpi_scale(26)};
                 if (i == tab->active_pane) {
-                    draw_round_rect(r, &item, 7.0f, g_theme.bg_hover);
-                    RECT rail = {item.left, item.top + 5, item.left + 3, item.bottom - 5};
+                    draw_round_rect(r, &item, dpi_scale(7.0f), g_theme.bg_hover);
+                    RECT rail = {item.left, item.top + dpi_scale(5), item.left + dpi_scale(3), item.bottom - dpi_scale(5)};
                     draw_round_rect(r, &rail, 2.0f, g_theme.accent);
                 }
-                draw_status_dot(r, (float)item.left + 12.0f, (float)item.top + 13.0f, pane_status_color(&tab->panes[i]));
+                draw_status_dot(r, (float)item.left + dpi_scale(12.0f), (float)item.top + dpi_scale(13.0f), pane_status_color(&tab->panes[i]));
                 char label[160]; format_pane_label(&tab->panes[i], label, sizeof(label));
-                RECT ir = {item.left + 24, item.top + 5, item.right - 6, item.bottom};
+                RECT ir = {item.left + dpi_scale(24), item.top + dpi_scale(5), item.right - dpi_scale(6), item.bottom};
                 draw_text_u8(r, label, &ir, i == tab->active_pane ? g_theme.text_primary : g_theme.text_secondary);
-                y += 28;
+                y += dpi_scale(28);
             }
         }
-        y += 10;
-        RECT rr = {sidebar.left + 14, y, sidebar.right - 10, y + 18};
-        draw_text_u8(r, "RESOURCES", &rr, g_theme.text_faint); y += 24;
+        y += dpi_scale(10);
+        RECT rr = {sidebar.left + dpi_scale(14), y, sidebar.right - dpi_scale(10), y + dpi_scale(18)};
+        draw_text_u8(r, "RESOURCES", &rr, g_theme.text_faint); y += dpi_scale(24);
         char metric[128];
-        if (g_resources.cpu_available) { _snprintf(metric, sizeof(metric), "CPU %.0f%%", g_resources.cpu_percent); RECT mr={sidebar.left+14,y,sidebar.right-10,y+18}; draw_text_u8(r, metric, &mr, g_theme.text_secondary); y+=20; }
-        if (g_resources.memory_available) { _snprintf(metric, sizeof(metric), "RAM %lu%%", (unsigned long)g_resources.memory_load); RECT mr={sidebar.left+14,y,sidebar.right-10,y+18}; draw_text_u8(r, metric, &mr, g_theme.text_secondary); y+=20; }
-        if (g_resources.disk_available) { double used = 100.0 * (double)(g_resources.disk_total - g_resources.disk_free) / (double)g_resources.disk_total; _snprintf(metric, sizeof(metric), "Disk %.0f%%", used); RECT mr={sidebar.left+14,y,sidebar.right-10,y+18}; draw_text_u8(r, metric, &mr, g_theme.text_secondary); y+=20; }
-        y += 10;
-        RECT ar = {sidebar.left + 14, y, sidebar.right - 10, y + 18};
-        draw_text_u8(r, "ACTIONS", &ar, g_theme.text_faint); y += 24;
-        g_hits.duplicate = {sidebar.left + 14, y, sidebar.right - 14, y + 22};
-        draw_round_rect(r, &g_hits.duplicate, 6.0f, g_theme.bg_card);
-        RECT dup_text = {g_hits.duplicate.left + 10, g_hits.duplicate.top + 3, g_hits.duplicate.right - 8, g_hits.duplicate.bottom};
-        draw_text_u8(r, "Duplicate pane", &dup_text, g_theme.text_secondary); y += 26;
-        g_hits.kill = {sidebar.left + 14, y, sidebar.right - 14, y + 22};
-        draw_round_rect(r, &g_hits.kill, 6.0f, g_theme.bg_card);
-        RECT kill_text = {g_hits.kill.left + 10, g_hits.kill.top + 3, g_hits.kill.right - 8, g_hits.kill.bottom};
+        if (g_resources.cpu_available) { _snprintf(metric, sizeof(metric), "CPU %.0f%%", g_resources.cpu_percent); RECT mr={sidebar.left+dpi_scale(14),y,sidebar.right-dpi_scale(10),y+dpi_scale(18)}; draw_text_u8(r, metric, &mr, g_theme.text_secondary); y+=dpi_scale(20); }
+        if (g_resources.memory_available) { _snprintf(metric, sizeof(metric), "RAM %lu%%", (unsigned long)g_resources.memory_load); RECT mr={sidebar.left+dpi_scale(14),y,sidebar.right-dpi_scale(10),y+dpi_scale(18)}; draw_text_u8(r, metric, &mr, g_theme.text_secondary); y+=dpi_scale(20); }
+        if (g_resources.disk_available) { double used = 100.0 * (double)(g_resources.disk_total - g_resources.disk_free) / (double)g_resources.disk_total; _snprintf(metric, sizeof(metric), "Disk %.0f%%", used); RECT mr={sidebar.left+dpi_scale(14),y,sidebar.right-dpi_scale(10),y+dpi_scale(18)}; draw_text_u8(r, metric, &mr, g_theme.text_secondary); y+=dpi_scale(20); }
+        y += dpi_scale(10);
+        RECT ar = {sidebar.left + dpi_scale(14), y, sidebar.right - dpi_scale(10), y + dpi_scale(18)};
+        draw_text_u8(r, "ACTIONS", &ar, g_theme.text_faint); y += dpi_scale(24);
+        g_hits.duplicate = {sidebar.left + dpi_scale(14), y, sidebar.right - dpi_scale(14), y + dpi_scale(22)};
+        draw_round_rect(r, &g_hits.duplicate, dpi_scale(6.0f), g_theme.bg_card);
+        RECT dup_text = {g_hits.duplicate.left + dpi_scale(10), g_hits.duplicate.top + dpi_scale(3), g_hits.duplicate.right - dpi_scale(8), g_hits.duplicate.bottom};
+        draw_text_u8(r, "Duplicate pane", &dup_text, g_theme.text_secondary); y += dpi_scale(26);
+        g_hits.kill = {sidebar.left + dpi_scale(14), y, sidebar.right - dpi_scale(14), y + dpi_scale(22)};
+        draw_round_rect(r, &g_hits.kill, dpi_scale(6.0f), g_theme.bg_card);
+        RECT kill_text = {g_hits.kill.left + dpi_scale(10), g_hits.kill.top + dpi_scale(3), g_hits.kill.right - dpi_scale(8), g_hits.kill.bottom};
         draw_text_u8(r, "Kill process", &kill_text, pane_has_running_process(pane) ? g_theme.red : g_theme.text_faint);
     }
 
     if (g_search.open) {
-        RECT overlay = {body.right - 320, body.top + 10, body.right - 18, body.top + 42};
-        draw_round_rect(r, &overlay, 10.0f, g_theme.bg_card);
-        draw_round_border(r, &overlay, 10.0f, g_theme.border_mid);
-        draw_ui_dot(r, (float)overlay.left + 14.0f, (float)overlay.top + 16.0f, 3.5f, g_theme.accent);
+        RECT overlay = {body.right - dpi_scale(320), body.top + dpi_scale(10), body.right - dpi_scale(18), body.top + dpi_scale(42)};
+        draw_round_rect(r, &overlay, dpi_scale(10.0f), g_theme.bg_card);
+        draw_round_border(r, &overlay, dpi_scale(10.0f), g_theme.border_mid);
+        draw_ui_dot(r, (float)overlay.left + dpi_scale(14.0f), (float)overlay.top + dpi_scale(16.0f), dpi_scale(3.5f), g_theme.accent);
         char q[220];
         if (g_search.query[0]) _snprintf(q, sizeof(q), "Search: %s  %d match%s", g_search.query, g_search.match_count, g_search.match_count == 1 ? "" : "es");
         else _snprintf(q, sizeof(q), "Search:");
-        RECT qr = {overlay.left + 26, overlay.top + 8, overlay.right - 10, overlay.bottom};
+        RECT qr = {overlay.left + dpi_scale(26), overlay.top + dpi_scale(8), overlay.right - dpi_scale(10), overlay.bottom};
         draw_text_u8(r, q, &qr, g_theme.text_primary);
     }
 
@@ -1037,21 +1450,93 @@ static void draw_chrome(Renderer *r) {
               branch, g_git.project[0] ? g_git.project : basename_const(pane_cwd(pane)),
               shell_label(), pane ? pane->screen.cols : 0, pane ? pane->screen.rows : 0,
               tab ? tab->active_pane + 1 : 0, tab ? tab->pane_count : 0, clock_buf);
-    RECT str = {status.left + 14, status.top + 4, status.right - 12, status.bottom};
+    RECT str = {status.left + dpi_scale(14), status.top + dpi_scale(4), status.right - dpi_scale(12), status.bottom};
     draw_text_u8(r, stbuf, &str, 0xffffff);
+}
+
+/* ── Man page viewer overlay ───────────────────────────────────────────────── */
+
+static void draw_man_viewer(Renderer *r) {
+    const ManViewer *mv = man_viewer_get_state();
+    if (!mv || !mv->open) return;
+
+    RECT client; GetClientRect(g_hwnd, &client);
+    int title_h = dpi_scale(WSH_UI_TITLE_H);
+    int toolbar_h = dpi_scale(WSH_UI_TOOLBAR_H);
+    int theader_h = dpi_scale(WSH_UI_TERM_HEADER_H);
+    int status_h = dpi_scale(WSH_UI_STATUS_H);
+    int sidebar_w = g_sidebar_visible ? dpi_scale(WSH_UI_SIDEBAR_W) : 0;
+    RECT body = {sidebar_w, title_h + toolbar_h + theader_h, client.right, client.bottom - status_h};
+
+    int viewer_cols = MAN_VIEWER_COLS;
+    int viewer_pad_x = dpi_scale(20);
+    int viewer_pad_y = dpi_scale(12);
+    int header_h = dpi_scale(24);
+    int footer_h = dpi_scale(18);
+    int viewer_w = (int)(viewer_cols * r->cell_w + viewer_pad_x * 2);
+    int viewer_rows = (int)((body.bottom - body.top - dpi_scale(20)) / r->cell_h) - 2;
+    if (viewer_rows < 5) viewer_rows = 5;
+    int viewer_h = (int)(viewer_rows * r->cell_h + header_h + footer_h + viewer_pad_y * 2);
+
+    int viewer_x = body.left + ((body.right - body.left) - viewer_w) / 2;
+    int viewer_y = body.top + ((body.bottom - body.top) - viewer_h) / 2;
+    if (viewer_x < dpi_scale(8)) viewer_x = dpi_scale(8);
+    if (viewer_y < dpi_scale(8)) viewer_y = dpi_scale(8);
+
+    RECT bg = {viewer_x, viewer_y, viewer_x + viewer_w, viewer_y + viewer_h};
+    draw_round_rect(r, &bg, dpi_scale(10.0f), g_theme.bg_card);
+    draw_round_border(r, &bg, dpi_scale(10.0f), g_theme.border_mid);
+
+    char title[160];
+    _snprintf(title, sizeof(title), "Manual: %s  (%d lines)", mv->topic, mv->line_count);
+    RECT title_rc = {bg.left + viewer_pad_x, bg.top + dpi_scale(8), bg.right - viewer_pad_x, bg.top + header_h};
+    draw_text_u8(r, title, &title_rc, g_theme.accent);
+
+    float line_x = (float)(bg.left + viewer_pad_x);
+    float line_y = (float)(bg.top + header_h + dpi_scale(4));
+    int drawn = 0;
+    for (int i = mv->scroll_offset; i < mv->line_count; i++) {
+        if (line_y + r->cell_h > bg.bottom - footer_h) break;
+        RECT lr = {(int)line_x, (int)line_y, (int)(line_x + viewer_cols * r->cell_w), (int)(line_y + r->cell_h)};
+        uint32_t color = g_theme.text_primary;
+        const char *ln = mv->lines[i];
+        if (ln && ln[0] && ln[0] != ' ') {
+            bool all_upper = true;
+            for (const char *p = ln; *p; p++) {
+                if (isalpha((unsigned char)*p) && !isupper((unsigned char)*p)) { all_upper = false; break; }
+            }
+            if (all_upper) color = g_theme.cyan;
+        }
+        draw_text_u8(r, ln ? ln : "", &lr, color);
+        line_y += r->cell_h;
+        drawn++;
+    }
+
+    char scroll_info[128];
+    int total_vis = viewer_rows;
+    if (mv->line_count > total_vis) {
+        int max_pg = mv->line_count - total_vis + 1;
+        if (max_pg < 1) max_pg = 1;
+        int pg = (mv->scroll_offset / (total_vis > 0 ? total_vis : 1)) + 1;
+        _snprintf(scroll_info, sizeof(scroll_info), "Page %d/%d  |  scroll: Up/Down  |  close: Esc", pg, (mv->line_count + total_vis - 1) / total_vis);
+    } else {
+        _snprintf(scroll_info, sizeof(scroll_info), "close: Esc");
+    }
+    RECT footer_rc = {bg.left + viewer_pad_x, bg.bottom - footer_h - dpi_scale(2), bg.right - viewer_pad_x, bg.bottom - dpi_scale(2)};
+    draw_text_u8(r, scroll_info, &footer_rc, g_theme.text_faint);
 }
 
 /* ── Trigger AI reasoning update after input changes ───────────────────────── */
 
+#define AI_DEBOUNCE_TIMER_ID 4
+#define AI_DEBOUNCE_DELAY_MS 400
+
 static void trigger_ai_reasoning(TerminalPane *p) {
     if (!p || p->use_pty) return;
     if (!p->shell.ai_enabled) return;
-    /* Check if REPL's line changed and trigger async analysis */
     if (repl_is_reasoning_dirty(&p->repl)) {
-        const char *line = repl_get_line(&p->repl);
-        if (line && line[0]) {
-            wsh_ai_trigger_analysis(&p->shell, line);
-        }
+        KillTimer(g_hwnd, AI_DEBOUNCE_TIMER_ID);
+        SetTimer(g_hwnd, AI_DEBOUNCE_TIMER_ID, AI_DEBOUNCE_DELAY_MS, NULL);
         InvalidateRect(g_hwnd, NULL, FALSE);
     }
 }
@@ -1080,30 +1565,25 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     if (sh->ai_enabled && sh->ai_state) {
                         const char *input = repl_get_line(&ap->repl);
                         if (input && input[0]) {
-                            /* Line 1: show what the user typed */
-                            char line_buf[260];
-                            _snprintf(line_buf, sizeof(line_buf), "user input: %s", input);
-                            wchar_t *winput = u8_to_u16(line_buf, NULL);
-                            if (winput) {
-                                wcsncpy(g_renderer.reasoning_line1, winput, 255);
-                                g_renderer.reasoning_line1[255] = L'\0';
-                                str_free(winput);
-                            }
-                            /* Line 2: friendly AI reasoning (may lag by one keystroke) */
                             const char *reason = wsh_ai_get_reasoning(sh);
                             if (reason && reason[0]) {
                                 char reason_buf[260];
-                                _snprintf(reason_buf, sizeof(reason_buf), "reason: %s", reason);
+                                _snprintf(reason_buf, sizeof(reason_buf), "%s", reason);
                                 wchar_t *wreason = u8_to_u16(reason_buf, NULL);
                                 if (wreason) {
-                                    wcsncpy(g_renderer.reasoning_line2, wreason, 255);
-                                    g_renderer.reasoning_line2[255] = L'\0';
+                                    wcsncpy(g_renderer.reasoning_line1, wreason, 255);
+                                    g_renderer.reasoning_line1[255] = L'\0';
                                     str_free(wreason);
                                 }
+                                /* Only show the overlay when there is actual text to display.
+                                 * Previously this was set unconditionally, causing an empty
+                                 * dimmed row to appear below the cursor on every keystroke
+                                 * before the reasoning model had produced a result. */
+                                g_renderer.reasoning_active = true;
                             } else {
-                                g_renderer.reasoning_line2[0] = L'\0';
+                                g_renderer.reasoning_line1[0] = L'\0';
+                                g_renderer.reasoning_active = false;
                             }
-                            g_renderer.reasoning_active = true;
                         } else {
                             g_renderer.reasoning_active = false;
                         }
@@ -1117,12 +1597,14 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             if (tab) {
                 for (int i = 0; i < tab->pane_count; ++i) {
                     TerminalPane *p = &tab->panes[i];
+                    if (!p->initialized) continue;
                     bool active = (i == tab->active_pane);
                     bool cursor_visible_in_view = (p->screen.viewport_offset == 0);
                     renderer_paint_region(&g_renderer, &p->screen, &p->rect, active,
                                           cursor_visible_in_view, p->screen.cursor_x, p->screen.cursor_y);
                 }
             }
+            draw_man_viewer(&g_renderer);
             renderer_end_frame(&g_renderer);
             LeaveCriticalSection(&g_lock);
             EndPaint(hwnd, &ps);
@@ -1157,12 +1639,36 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     shell_scheduler_tick(&tp->shell);
                 InvalidateRect(hwnd, NULL, FALSE);
             }
+            if (wParam == 3) { session_save_now(); }
+            if (wParam == AI_DEBOUNCE_TIMER_ID) {
+                KillTimer(hwnd, AI_DEBOUNCE_TIMER_ID);
+                TerminalPane *ap = active_pane();
+                if (ap && !ap->use_pty && ap->shell.ai_enabled) {
+                    const char *line = repl_get_line(&ap->repl);
+                    if (line && line[0])
+                        wsh_ai_trigger_analysis(&ap->shell, line);
+                }
+                InvalidateRect(hwnd, NULL, FALSE);
+            }
             return 0;
 
         case WM_SETFOCUS: { TerminalPane *p = active_pane(); if (p) p->screen.cursor_visible = true; InvalidateRect(hwnd, NULL, FALSE); return 0; }
         case WM_KILLFOCUS: { TerminalPane *p = active_pane(); if (p) p->screen.cursor_visible = false; InvalidateRect(hwnd, NULL, FALSE); return 0; }
 
         case WM_KEYDOWN: {
+            bool man_active = man_viewer_get_state()->open;
+            if (man_active) {
+                switch (wParam) {
+                    case VK_ESCAPE: man_viewer_close(); InvalidateRect(hwnd, NULL, FALSE); return 0;
+                    case VK_UP:     man_viewer_scroll(-1); return 0;
+                    case VK_DOWN:   man_viewer_scroll(1); return 0;
+                    case VK_PRIOR:  man_viewer_scroll(-25); return 0;
+                    case VK_NEXT:   man_viewer_scroll(25); return 0;
+                    case VK_HOME:   man_viewer_scroll(-999999); return 0;
+                    case VK_END:    man_viewer_scroll(999999); return 0;
+                    default: return 0;
+                }
+            }
             TerminalPane *p = active_pane();
             if (!p) return 0;
             bool ctrl  = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
@@ -1272,6 +1778,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         }
 
         case WM_CHAR: {
+            if (man_viewer_get_state()->open) return 0;
             TerminalPane *p = active_pane();
             if (!p) return 0;
             if (g_suppress_char) { g_suppress_char = false; return 0; }
@@ -1298,6 +1805,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         }
 
         case WM_LBUTTONDOWN: {
+            if (man_viewer_get_state()->open) { man_viewer_close(); InvalidateRect(hwnd, NULL, FALSE); ReleaseCapture(); return 0; }
             SetCapture(hwnd);
             int mx = (short)LOWORD(lParam), my = (short)HIWORD(lParam);
             POINT pt = {mx, my};
@@ -1328,10 +1836,12 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         case WM_MOUSEMOVE: {
             if (g_renderer.sel_active) {
                 TerminalPane *p = active_pane();
-                int mx = (short)LOWORD(lParam), my = (short)HIWORD(lParam);
-                int col, row; pane_pixel_to_cell(p, mx, my, &col, &row);
-                g_renderer.sel_end_col = col; g_renderer.sel_end_row = row;
-                g_renderer.sel_valid = (col != g_renderer.sel_start_col || row != g_renderer.sel_start_row);
+                if (p && p->initialized) {
+                    int mx = (short)LOWORD(lParam), my = (short)HIWORD(lParam);
+                    int col, row; pane_pixel_to_cell(p, mx, my, &col, &row);
+                    g_renderer.sel_end_col = col; g_renderer.sel_end_row = row;
+                    g_renderer.sel_valid = (col != g_renderer.sel_start_col || row != g_renderer.sel_start_row);
+                }
                 InvalidateRect(hwnd, NULL, FALSE);
             }
             return 0;
@@ -1413,7 +1923,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         }
 
         case WM_VSCROLL: {
-            TerminalPane *p = active_pane(); if (!p) return 0;
+            TerminalPane *p = active_pane(); if (!p || !p->initialized) return 0;
             EnterCriticalSection(&g_lock);
             int max_offset = screen_max_viewport_offset(&p->screen);
             int pos = max_offset - p->screen.viewport_offset;
@@ -1444,6 +1954,17 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 if (tab->initialized && pi < tab->pane_count) {
                     TerminalPane *pane = &tab->panes[pi];
                     if (pane->initialized && !pane->shell.exit_requested) {
+                        /* Try to get AI commentary for the executed command */
+                        if (pane->shell.ai_enabled && pane->shell.last_command[0]) {
+                            const char *cc = wsh_ai_try_get_commentary(
+                                &pane->shell, pane->shell.last_command);
+                            if (cc && cc[0]) {
+                                char cc_line[512];
+                                _snprintf(cc_line, sizeof(cc_line),
+                                    "\x1b[2m[ai]\x1b[0m %s\r\n", cc);
+                                io_write(pane->shell.io, cc_line);
+                            }
+                        }
                         repl_show_prompt(&pane->repl);
                         update_native_scrollbar(hwnd);
                         InvalidateRect(hwnd, NULL, FALSE);
@@ -1457,6 +1978,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             if (g_cfg.general.confirm_exit) {
                 if (MessageBoxW(hwnd, L"Close Wsh?", L"Wsh", MB_YESNO | MB_ICONQUESTION) != IDYES) return 0;
             }
+            session_save_now();
             DestroyWindow(hwnd); return 0;
 
         case WM_DESTROY:
@@ -1495,26 +2017,35 @@ static int wsh_run(HINSTANCE hInst, HINSTANCE hPrev, LPSTR lpCmd, int nShow) {
 
     if (!renderer_init(&g_renderer, g_hwnd, &g_cfg)) return 1;
     WSH_LOG_DEBUG("renderer initialized");
+    man_viewer_init();
+    WSH_LOG_DEBUG("man viewer initialized");
     theme_material_cyber_dark(&g_theme);
     g_renderer.bg_color = renderer_rgb_to_color(g_theme.bg_base);
     g_renderer.fg_color = renderer_rgb_to_color(g_theme.text_primary);
     g_renderer.cursor_color = renderer_rgb_to_color(g_theme.accent);
     g_renderer.selection_color = renderer_rgb_to_color(0x27324a);
-    g_renderer.reserved_left_px = g_sidebar_visible ? WSH_UI_SIDEBAR_W : 0;
-    g_renderer.reserved_top_px = WSH_UI_TITLE_H + WSH_UI_TOOLBAR_H + WSH_UI_TERM_HEADER_H;
-    g_renderer.reserved_bottom_px = WSH_UI_STATUS_H;
+    g_renderer.reserved_left_px = g_sidebar_visible ? dpi_scale(WSH_UI_SIDEBAR_W) : 0;
+    g_renderer.reserved_top_px = dpi_scale(WSH_UI_TITLE_H + WSH_UI_TOOLBAR_H + WSH_UI_TERM_HEADER_H);
+    g_renderer.reserved_bottom_px = dpi_scale(WSH_UI_STATUS_H);
 
-    RECT rc; terminal_view_rect(g_hwnd, &rc);
-    g_tabs[0].panes[0].rect = rc;
-    g_tab_count = 1;
-    g_active_tab = 0;
-    WSH_LOG_DEBUG("starting initial tab");
-    tab_start(&g_tabs[0], NULL);
-    WSH_LOG_DEBUG("initial tab started");
+    bool restored = session_restore_now();
+
+    if (!restored) {
+        RECT rc; terminal_view_rect(g_hwnd, &rc);
+        g_tabs[0].panes[0].rect = rc;
+        g_tab_count = 1;
+        g_active_tab = 0;
+        WSH_LOG_DEBUG("starting initial tab");
+        tab_start(&g_tabs[0], NULL);
+        WSH_LOG_DEBUG("initial tab started");
+    }
     layout_panes(g_hwnd);
     update_native_scrollbar(g_hwnd);
     refresh_runtime_status(true);
     SetTimer(g_hwnd, 2, 1000, NULL);
+    if (g_cfg.session.enabled && g_cfg.session.autosave_interval > 0) {
+        SetTimer(g_hwnd, 3, (UINT)g_cfg.session.autosave_interval * 1000, NULL);
+    }
     ShowWindow(g_hwnd, nShow == 0 ? SW_SHOWNORMAL : nShow);
     SetWindowPos(g_hwnd, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
     UpdateWindow(g_hwnd);

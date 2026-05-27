@@ -8,6 +8,7 @@
 #include "../src/core/str_util.h"
 #include "../src/shell/shell_ctx.h"
 #include "../src/shell/builtins.h"
+#include "../src/shell/history.h"
 #include <string.h>
 
 /* ── Buffer IO ──────────────────────────────────────────────────────────────── */
@@ -125,6 +126,33 @@ TEST(Builtins, TestEmptyString) {
     ASSERT_EQ(builtin_test(3, argv_z, &g_ctx), 0);  /* -z "" is true */
     char *argv_n[] = { "test", "-n", "x", NULL };
     ASSERT_EQ(builtin_test(3, argv_n, &g_ctx), 0);  /* -n "x" is true */
+    teardown();
+}
+
+/* ── history ────────────────────────────────────────────────────────────────── */
+
+TEST(Builtins, HistoryShowsOldestFirst) {
+    setup();
+    history_push(&g_ctx.history, "echo first");
+    history_push(&g_ctx.history, "echo second");
+    history_push(&g_ctx.history, "echo third");
+
+    g_bio.len = 0; g_bio.buf[0] = '\0';
+    char *argv[] = { "history", NULL };
+    int ret = builtin_history(1, argv, &g_ctx);
+    ASSERT_EQ(ret, 0);
+
+    /* Check oldest appears first with line number 1 */
+    const char *first_line = strstr(g_bio.buf, "echo first");
+    const char *second_line = strstr(g_bio.buf, "echo second");
+    const char *third_line = strstr(g_bio.buf, "echo third");
+    ASSERT_NOT_NULL(first_line);
+    ASSERT_NOT_NULL(second_line);
+    ASSERT_NOT_NULL(third_line);
+    /* first should appear before second */
+    ASSERT_TRUE(first_line < second_line);
+    /* second should appear before third */
+    ASSERT_TRUE(second_line < third_line);
     teardown();
 }
 
