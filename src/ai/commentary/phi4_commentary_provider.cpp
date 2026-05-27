@@ -5,6 +5,10 @@
 #include <algorithm>
 #include <cstring>
 
+#ifdef WSH_HAVE_LLAMA
+#  include "direct_phi4_runtime.h"
+#endif
+
 namespace wsh {
 
 static int64_t now_ms() {
@@ -38,13 +42,34 @@ bool Phi4CommentaryProvider::Initialize(const Phi4Config& config, bool fallbackE
     fallback_enabled_ = fallbackEnabled;
     initialized_ = true;
 
-    /* Create runtime (stub for now; real llama.cpp runtime can be swapped) */
-    runtime_.reset(new StubPhi4Runtime());
-    if (!runtime_->Initialize(config_)) {
-        WSH_LOG_WARN("Phi-4 runtime initialization failed");
+    /* Try direct in-process runtime first (requires vendored llama.cpp) */
+#ifdef WSH_HAVE_LLAMA
+    {
+        auto direct = std::make_unique<DirectPhi4Runtime>();
+        if (direct->Initialize(config_) && direct->IsAvailable()) {
+            runtime_ = std::move(direct);
+            phi4_available_ = true;
+            WSH_LOG_INFO("Direct in-process Phi-4 runtime available");
+        }
     }
-
-    phi4_available_ = runtime_->IsAvailable();
+#endif
+    if (!phi4_available_) {
+        /* Fall back to subprocess runtime (llama-completion.exe) */
+        auto sub = std::make_unique<SubprocessPhi4Runtime>();
+        if (sub->Initialize(config_) && sub->IsAvailable()) {
+            runtime_ = std::move(sub);
+            phi4_available_ = true;
+            WSH_LOG_INFO("Subprocess Phi-4 runtime available (llama-completion.exe)");
+        } else {
+            /* Fall back to stub */
+            WSH_LOG_INFO("Phi-4 runtime unavailable, trying stub");
+            runtime_.reset(new StubPhi4Runtime());
+            if (!runtime_->Initialize(config_)) {
+                WSH_LOG_WARN("Phi-4 runtime initialization failed");
+            }
+            phi4_available_ = runtime_->IsAvailable();
+        }
+    }
 
     if (phi4_available_) {
         WSH_LOG_INFO("Phi-4 runtime available, commentary ready");
@@ -92,6 +117,20 @@ std::string Phi4CommentaryProvider::TryGetCommentary(const std::string& forComma
         return result;
     }
     return "";
+}
+
+std::string Phi4CommentaryProvider::Query(const std::string& prompt) {
+    if (prompt.empty()) return "";
+    if (phi4_available_ && runtime_) {
+        std::string full_prompt =
+            "You are a helpful assistant in a terminal.\n"
+            "Answer concisely. Use plain text, not markdown.\n"
+            "Maximum 2000 characters.\n\n"
+            "User: " + prompt + "\n\nAssistant:\n";
+        std::string result = trim(runtime_->Generate(full_prompt, 500, 15000));
+        if (!result.empty()) return result;
+    }
+    return "[ai] \"" + prompt + "\" — phi-4 model not loaded. Build with -DWSH_ENABLE_PHI4=ON or place model.gguf at models/phi-4/";
 }
 
 void Phi4CommentaryProvider::InjectResult(const std::string& command, const std::string& text) {

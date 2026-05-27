@@ -4,6 +4,7 @@
 
 #include "phi4_config.h"
 #include "phi4_runtime.h"
+#include "subprocess_phi4_runtime.h"
 #include "phi4_prompt_builder.h"
 #include "fallback_commentary_provider.h"
 #include <string>
@@ -40,6 +41,10 @@ public:
     /* Get the latest ready commentary (non-blocking, may return empty).
      * Pass the command to check staleness. */
     std::string TryGetCommentary(const std::string& forCommand);
+
+    /* Synchronous AI query — uses the same runtime with a Q&A prompt.
+     * Returns response, or empty string if unavailable. */
+    std::string Query(const std::string& prompt);
 
     /* Inject a pre-generated result directly (used by test path). */
     void InjectResult(const std::string& command, const std::string& text);

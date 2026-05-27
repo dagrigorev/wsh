@@ -38,6 +38,11 @@ const char *wsh_ai_get_reasoning(ShellContext *ctx);
 /* Get the latest analysis input (to check if reasoning is stale). */
 const char *wsh_ai_get_reasoning_input(ShellContext *ctx);
 
+/* ── AI Query API ─────────────────────────────────────────────────────────── */
+/* Synchronous AI query: send a prompt, get a response string (blocking).
+ * Returns a pointer to a static buffer (valid until next query call). */
+const char *wsh_ai_query(ShellContext *ctx, const char *prompt);
+
 /* ── AI Commentary API (C-only — C++ callers include config.h) ─────────── */
 /* Trigger commentary generation for the submitted command. Non-blocking. */
 void wsh_ai_trigger_command_commentary(ShellContext *ctx, const char *command);

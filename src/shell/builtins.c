@@ -22,6 +22,7 @@
 #include "../core/path_util.h"
 #include "../core/log.h"
 #include "../ai/wsh_ai.h"
+#include "../man_viewer.h"
 
 /* ── Dispatch table (Open/Closed: add entries, never touch builtin_find) ───── */
 
@@ -814,14 +815,15 @@ static int print_man_topic(ShellContext *ctx, const char *topic) {
 }
 
 int builtin_man(int argc, char **argv, ShellContext *ctx) {
-    if (argc < 2) return print_man_topic(ctx, "wsh");
+    if (argc < 2) { if (man_viewer_open_topic("wsh")) return 0; return print_man_topic(ctx, "wsh"); }
+    if (man_viewer_open_topic(argv[1])) return 0;
     int ret = 0;
     for (int i = 1; i < argc; i++) if (print_man_topic(ctx, argv[i]) != 0) ret = 1;
     return ret;
 }
 
 int builtin_help(int argc, char **argv, ShellContext *ctx) {
-    if (argc > 1) return print_man_topic(ctx, argv[1]);
+    if (argc > 1) { if (man_viewer_open_topic(argv[1])) return 0; return print_man_topic(ctx, argv[1]); }
     outln(ctx, "Wsh built-ins:");
     outln(ctx, "  cd pwd echo printf export unset alias unalias source exit return");
     outln(ctx, "  set setopt jobs fg bg kill wait type which command eval exec");

@@ -363,6 +363,14 @@ void wsh_ai_apply_runtime_config(ShellContext *ctx, const ConfigAi *cfg) {
     s->commentary_provider.Initialize(phi4_cfg, cfg->commentary.fallback_enabled);
 }
 
+extern "C" const char *wsh_ai_query(ShellContext *ctx, const char *prompt) {
+    if (!ctx || !ctx->ai_state || !prompt) return "AI: not initialized";
+    auto *s = static_cast<WshAiState *>(ctx->ai_state);
+    if (!ctx->ai_enabled) return "AI: disabled";
+    s->commentary_cache = s->commentary_provider.Query(prompt);
+    return s->commentary_cache.c_str();
+}
+
 extern "C" void wsh_ai_trigger_command_commentary(ShellContext *ctx, const char *command) {
     if (!ctx || !ctx->ai_state || !command) return;
     auto *s = static_cast<WshAiState *>(ctx->ai_state);

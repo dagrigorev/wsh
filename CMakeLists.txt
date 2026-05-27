@@ -44,9 +44,10 @@ add_compile_definitions(
     WSH_VERSION_PATCH=${PROJECT_VERSION_PATCH}
 )
 
-# Use the static MSVC runtime to avoid external VC++ CRT side-by-side
-# dependencies in NMake/standalone builds.
-set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+# Use the dynamic MSVC runtime to ensure CRT heap consistency across
+# the EXE and the shared llama/ggml DLLs (STATUS_STACK_BUFFER_OVERRUN
+# on MSVC when loading phi-4 GGUF with static /MT CRT).
+set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
 
 add_compile_options(
     /W4         # Warning level 4
@@ -92,8 +93,41 @@ add_custom_target(wsh_runtime_resources ALL
     COMMENT "Copying Wsh runtime resources to dist"
 )
 
-# ── Phi-4 local model support (requires vendored llama.cpp) ─────────────────
-option(WSH_ENABLE_PHI4 "Enable Phi-4 local model support (requires llama.cpp)" OFF)
+# ── Phi-4 local model support ──────────────────────────────────────────────
+option(WSH_ENABLE_PHI4 "Enable Phi-4 local model — fetch llama.cpp and link directly" OFF)
+
+if(WSH_ENABLE_PHI4)
+    message(STATUS "WSH: Fetching llama.cpp source for in-process inference...")
+    include(FetchContent)
+    FetchContent_Declare(llamacpp
+        URL      https://github.com/ggml-org/llama.cpp/archive/refs/tags/b9318.tar.gz
+        GIT_PROGRESS TRUE
+    )
+    # Suppress examples/tests/server — only build the core llama library
+    set(LLAMA_BUILD_TESTS   OFF CACHE BOOL "" FORCE)
+    set(LLAMA_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+    set(LLAMA_BUILD_SERVER  OFF CACHE BOOL "" FORCE)
+    FetchContent_MakeAvailable(llamacpp)
+    if(llamacpp_POPULATED)
+        add_compile_definitions(WSH_HAVE_LLAMA)
+        # Copy llama.dll to dist directory alongside Wsh.exe.
+        # The llama target's TARGET_FILE generator expression resolves to the
+        # actual DLL location at build time.
+        if(NOT TARGET copy_llama_dll)
+            add_custom_target(copy_llama_dll ALL
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    "$<TARGET_FILE:llama>"
+                    "${WSH_DIST_DIR}/$<TARGET_FILE_NAME:llama>"
+                DEPENDS llama
+                COMMENT "Copying llama.dll to dist/"
+            )
+            add_dependencies(wsh_runtime_resources copy_llama_dll)
+        endif()
+        message(STATUS "WSH: llama.cpp fetched, direct inference enabled")
+    else()
+        message(WARNING "WSH: llama.cpp fetch failed — falling back to subprocess Phi-4")
+    endif()
+endif()
 
 # ── Auto-download Phi-4 GGUF model ──────────────────────────────────────────
 option(WSH_DOWNLOAD_PHI4_MODEL "Download Phi-4 GGUF model during build (~4-14 GB)" OFF)
@@ -115,6 +149,29 @@ if(WSH_DOWNLOAD_PHI4_MODEL)
         COMMENT "Downloading Phi-4 model (live progress shows %%, speed, ETA)..."
     )
     add_dependencies(wsh_runtime_resources wsh_download_phi4)
+endif()
+
+# ── Auto-download llama-cli.exe (llama.cpp inference binary) ────────────────
+# Users can set WSH_LLAMA_CLI_URL to point to a specific release ZIP.
+option(WSH_DOWNLOAD_LLAMA_CLI "Download llama-cli.exe (~7 MB) for Phi-4 inference" OFF)
+set(WSH_LLAMA_CLI_URL "https://github.com/ggml-org/llama.cpp/releases/download/b9318/llama-b9318-bin-win-cpu-x64.zip"
+    CACHE STRING "URL for llama.cpp Windows release ZIP (containing llama-cli.exe)")
+set(WSH_LLAMA_CLI_DIR "${WSH_DIST_DIR}/bin" CACHE PATH "Output directory for llama-cli.exe")
+
+if(WSH_DOWNLOAD_LLAMA_CLI)
+    add_custom_target(wsh_download_llama_cli
+        COMMAND ${CMAKE_COMMAND} -E make_directory "${WSH_LLAMA_CLI_DIR}"
+        COMMAND if not exist "${WSH_LLAMA_CLI_DIR}/llama-cli.exe" (
+            curl.exe -L -o "${WSH_LLAMA_CLI_DIR}/llama-cli.zip" --progress-bar "${WSH_LLAMA_CLI_URL}"
+            && powershell -NoProfile -Command
+                "Expand-Archive -Path '${WSH_LLAMA_CLI_DIR}/llama-cli.zip' -DestinationPath '${WSH_LLAMA_CLI_DIR}' -Force"
+            && del /q "${WSH_LLAMA_CLI_DIR}/llama-cli.zip"
+        )
+        BYPRODUCTS "${WSH_LLAMA_CLI_DIR}/llama-cli.exe"
+        USES_TERMINAL
+        COMMENT "Downloading llama-cli.exe for Phi-4 inference..."
+    )
+    add_dependencies(wsh_runtime_resources wsh_download_llama_cli)
 endif()
 
 # ── Tests ────────────────────────────────────────────────────────────────────

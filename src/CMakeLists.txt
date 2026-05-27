@@ -3,6 +3,7 @@ add_executable(Wsh WIN32
     main.cpp
     window.cpp
     repl.c
+    man_viewer.c
     ${CMAKE_SOURCE_DIR}/res/Wsh.rc
 )
 

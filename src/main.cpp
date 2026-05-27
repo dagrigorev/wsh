@@ -33,6 +33,7 @@
 #include "window.h"
 #include "repl.h"
 #include "ai/wsh_ai.h"
+#include "man_viewer.h"
 
 #define WSH_MAX_PANES 4
 #define WSH_MAX_TABS 8
@@ -1436,6 +1437,78 @@ static void draw_chrome(Renderer *r) {
     draw_text_u8(r, stbuf, &str, 0xffffff);
 }
 
+/* ── Man page viewer overlay ───────────────────────────────────────────────── */
+
+static void draw_man_viewer(Renderer *r) {
+    const ManViewer *mv = man_viewer_get_state();
+    if (!mv || !mv->open) return;
+
+    RECT client; GetClientRect(g_hwnd, &client);
+    int title_h = dpi_scale(WSH_UI_TITLE_H);
+    int toolbar_h = dpi_scale(WSH_UI_TOOLBAR_H);
+    int theader_h = dpi_scale(WSH_UI_TERM_HEADER_H);
+    int status_h = dpi_scale(WSH_UI_STATUS_H);
+    int sidebar_w = g_sidebar_visible ? dpi_scale(WSH_UI_SIDEBAR_W) : 0;
+    RECT body = {sidebar_w, title_h + toolbar_h + theader_h, client.right, client.bottom - status_h};
+
+    int viewer_cols = MAN_VIEWER_COLS;
+    int viewer_pad_x = dpi_scale(20);
+    int viewer_pad_y = dpi_scale(12);
+    int header_h = dpi_scale(24);
+    int footer_h = dpi_scale(18);
+    int viewer_w = (int)(viewer_cols * r->cell_w + viewer_pad_x * 2);
+    int viewer_rows = (int)((body.bottom - body.top - dpi_scale(20)) / r->cell_h) - 2;
+    if (viewer_rows < 5) viewer_rows = 5;
+    int viewer_h = (int)(viewer_rows * r->cell_h + header_h + footer_h + viewer_pad_y * 2);
+
+    int viewer_x = body.left + ((body.right - body.left) - viewer_w) / 2;
+    int viewer_y = body.top + ((body.bottom - body.top) - viewer_h) / 2;
+    if (viewer_x < dpi_scale(8)) viewer_x = dpi_scale(8);
+    if (viewer_y < dpi_scale(8)) viewer_y = dpi_scale(8);
+
+    RECT bg = {viewer_x, viewer_y, viewer_x + viewer_w, viewer_y + viewer_h};
+    draw_round_rect(r, &bg, dpi_scale(10.0f), g_theme.bg_card);
+    draw_round_border(r, &bg, dpi_scale(10.0f), g_theme.border_mid);
+
+    char title[160];
+    _snprintf(title, sizeof(title), "Manual: %s  (%d lines)", mv->topic, mv->line_count);
+    RECT title_rc = {bg.left + viewer_pad_x, bg.top + dpi_scale(8), bg.right - viewer_pad_x, bg.top + header_h};
+    draw_text_u8(r, title, &title_rc, g_theme.accent);
+
+    float line_x = (float)(bg.left + viewer_pad_x);
+    float line_y = (float)(bg.top + header_h + dpi_scale(4));
+    int drawn = 0;
+    for (int i = mv->scroll_offset; i < mv->line_count; i++) {
+        if (line_y + r->cell_h > bg.bottom - footer_h) break;
+        RECT lr = {(int)line_x, (int)line_y, (int)(line_x + viewer_cols * r->cell_w), (int)(line_y + r->cell_h)};
+        uint32_t color = g_theme.text_primary;
+        const char *ln = mv->lines[i];
+        if (ln && ln[0] && ln[0] != ' ') {
+            bool all_upper = true;
+            for (const char *p = ln; *p; p++) {
+                if (isalpha((unsigned char)*p) && !isupper((unsigned char)*p)) { all_upper = false; break; }
+            }
+            if (all_upper) color = g_theme.cyan;
+        }
+        draw_text_u8(r, ln ? ln : "", &lr, color);
+        line_y += r->cell_h;
+        drawn++;
+    }
+
+    char scroll_info[128];
+    int total_vis = viewer_rows;
+    if (mv->line_count > total_vis) {
+        int max_pg = mv->line_count - total_vis + 1;
+        if (max_pg < 1) max_pg = 1;
+        int pg = (mv->scroll_offset / (total_vis > 0 ? total_vis : 1)) + 1;
+        _snprintf(scroll_info, sizeof(scroll_info), "Page %d/%d  |  scroll: Up/Down  |  close: Esc", pg, (mv->line_count + total_vis - 1) / total_vis);
+    } else {
+        _snprintf(scroll_info, sizeof(scroll_info), "close: Esc");
+    }
+    RECT footer_rc = {bg.left + viewer_pad_x, bg.bottom - footer_h - dpi_scale(2), bg.right - viewer_pad_x, bg.bottom - dpi_scale(2)};
+    draw_text_u8(r, scroll_info, &footer_rc, g_theme.text_faint);
+}
+
 /* ── Trigger AI reasoning update after input changes ───────────────────────── */
 
 #define AI_DEBOUNCE_TIMER_ID 4
@@ -1514,6 +1587,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                                           cursor_visible_in_view, p->screen.cursor_x, p->screen.cursor_y);
                 }
             }
+            draw_man_viewer(&g_renderer);
             renderer_end_frame(&g_renderer);
             LeaveCriticalSection(&g_lock);
             EndPaint(hwnd, &ps);
@@ -1565,6 +1639,19 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         case WM_KILLFOCUS: { TerminalPane *p = active_pane(); if (p) p->screen.cursor_visible = false; InvalidateRect(hwnd, NULL, FALSE); return 0; }
 
         case WM_KEYDOWN: {
+            bool man_active = man_viewer_get_state()->open;
+            if (man_active) {
+                switch (wParam) {
+                    case VK_ESCAPE: man_viewer_close(); InvalidateRect(hwnd, NULL, FALSE); return 0;
+                    case VK_UP:     man_viewer_scroll(-1); return 0;
+                    case VK_DOWN:   man_viewer_scroll(1); return 0;
+                    case VK_PRIOR:  man_viewer_scroll(-25); return 0;
+                    case VK_NEXT:   man_viewer_scroll(25); return 0;
+                    case VK_HOME:   man_viewer_scroll(-999999); return 0;
+                    case VK_END:    man_viewer_scroll(999999); return 0;
+                    default: return 0;
+                }
+            }
             TerminalPane *p = active_pane();
             if (!p) return 0;
             bool ctrl  = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
@@ -1674,6 +1761,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         }
 
         case WM_CHAR: {
+            if (man_viewer_get_state()->open) return 0;
             TerminalPane *p = active_pane();
             if (!p) return 0;
             if (g_suppress_char) { g_suppress_char = false; return 0; }
@@ -1700,6 +1788,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         }
 
         case WM_LBUTTONDOWN: {
+            if (man_viewer_get_state()->open) { man_viewer_close(); InvalidateRect(hwnd, NULL, FALSE); ReleaseCapture(); return 0; }
             SetCapture(hwnd);
             int mx = (short)LOWORD(lParam), my = (short)HIWORD(lParam);
             POINT pt = {mx, my};
@@ -1911,6 +2000,8 @@ static int wsh_run(HINSTANCE hInst, HINSTANCE hPrev, LPSTR lpCmd, int nShow) {
 
     if (!renderer_init(&g_renderer, g_hwnd, &g_cfg)) return 1;
     WSH_LOG_DEBUG("renderer initialized");
+    man_viewer_init();
+    WSH_LOG_DEBUG("man viewer initialized");
     theme_material_cyber_dark(&g_theme);
     g_renderer.bg_color = renderer_rgb_to_color(g_theme.bg_base);
     g_renderer.fg_color = renderer_rgb_to_color(g_theme.text_primary);

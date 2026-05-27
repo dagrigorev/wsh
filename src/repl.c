@@ -439,6 +439,20 @@ bool repl_handle_input(Repl *r, const char *bytes, int len) {
                 cmd_buf[REPL_LINE_MAX - 1] = '\0';
 
                 wsh_ai_clear_reasoning(r->ctx);
+
+                /* ── Backtick-wrapped input → AI query instead of command ── */
+                {
+                    size_t cmd_len = strlen(cmd_buf);
+                    if (cmd_len >= 3 && cmd_buf[0] == '`' && cmd_buf[cmd_len - 1] == '`') {
+                        cmd_buf[cmd_len - 1] = '\0';
+                        const char *ai_result = wsh_ai_query(r->ctx, cmd_buf + 1);
+                        emit(r, "\r\n");
+                        emit_fmt(r, "%s\r\n", ai_result && ai_result[0] ? ai_result : "AI: no response");
+                        repl_show_prompt(r);
+                        return true;
+                    }
+                }
+
                 bool launched = execute_line(r);
 
                 /* Queue AI commentary for the submitted command (non-blocking) */
