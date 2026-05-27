@@ -451,6 +451,9 @@ bool repl_handle_input(Repl *r, const char *bytes, int len) {
                         const char *ai_result = wsh_ai_query(r->ctx, cmd_buf + 1);
                         emit(r, "\r\n");
                         emit_fmt(r, "%s\r\n", ai_result && ai_result[0] ? ai_result : "AI: no response");
+                        r->len = 0; r->cursor = 0; r->line[0] = '\0';
+                        completion_free(&r->completion);
+                        r->completing = false;
                         repl_show_prompt(r);
                         return true;
                     }

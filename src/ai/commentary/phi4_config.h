@@ -11,6 +11,7 @@ struct Phi4Config {
     int context_tokens = 1024;
     int max_tokens = 64;
     float temperature = 0.85f;
+    int commentary_timeout_ms = 30000;  /* per-commentary generation timeout */
 };
 
 } /* namespace wsh */

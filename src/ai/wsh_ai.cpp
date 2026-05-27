@@ -89,11 +89,11 @@ extern "C" void wsh_ai_update_context(ShellContext *ctx) {
     c.lastExitCode = ctx->last_status;
     c.lastCommand = ctx->last_command;
 
-    /* History snapshot (last 50) */
+    /* History snapshot (last 50, most-recent first — index 0 = newest) */
     c.recentCommands.clear();
     int hcount = history_count(&ctx->history);
-    int start = hcount > 50 ? hcount - 50 : 0;
-    for (int i = start; i < hcount; i++) {
+    int take = (hcount > 50) ? 50 : hcount;
+    for (int i = 0; i < take; i++) {
         const char *entry = history_at(&ctx->history, i);
         if (entry) c.recentCommands.push_back(entry);
     }

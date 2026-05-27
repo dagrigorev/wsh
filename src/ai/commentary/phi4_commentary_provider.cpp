@@ -225,7 +225,7 @@ void Phi4CommentaryProvider::WorkerThread() {
                 commentary = runtime_->Generate(
                     prompt,
                     config_.max_tokens,
-                    250 /* timeout */
+                    config_.commentary_timeout_ms
                 );
 
                 /* Trim response */
