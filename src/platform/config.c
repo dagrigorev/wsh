@@ -32,13 +32,13 @@ void config_defaults(Config *cfg) {
     memset(cfg, 0, sizeof(*cfg));
 
     /* General */
-    strcpy(cfg->general.shell, "wsh");
+    cfg->general.shell[0] = 0;  /* empty = auto-detect; see resolve_shell() */
     cfg->general.scrollback    = 10000;
     cfg->general.confirm_exit  = true;
     strcpy(cfg->general.bell, "visual");
     strcpy(cfg->general.default_cwd, "~");
     strcpy(cfg->general.theme, "material-cyber-dark");
-    strcpy(cfg->general.title, "Wsh - ${cwd}");
+    strcpy(cfg->general.title, "Wisp - ${cwd}");
 
     /* Font */
     wcscpy(cfg->font.family, L"Cascadia Code");
@@ -73,8 +73,6 @@ void config_defaults(Config *cfg) {
     /* Scrollbar */
     cfg->scrollbar.enabled  = true;
     cfg->scrollbar.width_px = 8;
-
-    /* AI */
 }
 
 /* ─── Color parsing ──────────────────────────────────────────────────────── */
@@ -277,7 +275,7 @@ bool config_apply_theme_file(Config *cfg, const char *toml_path) {
 void config_path(char *out, int out_size) {
     char appdata[MAX_PATH] = {0};
     GetEnvironmentVariableA("APPDATA", appdata, MAX_PATH);
-    _snprintf(out, out_size, "%s\\Wsh\\Wsh.toml", appdata);
+    _snprintf(out, out_size, "%s\\Wisp\\Wisp.toml", appdata);
 }
 
 bool config_save_defaults(const char *toml_path) {
@@ -292,13 +290,13 @@ bool config_save_defaults(const char *toml_path) {
 
     fprintf(f,
         "[general]\n"
-        "shell = \"wsh\"\n"
+        "shell = \"\"\n"
         "scrollback = 10000\n"
         "confirm_exit = true\n"
         "bell = \"visual\"\n"
         "default_cwd = \"~\"\n"
         "theme = \"material-cyber-dark\"\n"
-        "title = \"Wsh - ${cwd}\"\n\n"
+        "title = \"Wisp - ${cwd}\"\n\n"
         "[font]\n"
         "family = \"Cascadia Code\"\n"
         "size = 13.0\n"

@@ -1,9 +1,9 @@
 #pragma once
-#ifndef WSH_CONFIG_H
-#define WSH_CONFIG_H
+#ifndef WISP_CONFIG_H
+#define WISP_CONFIG_H
 
 #include <windows.h>
-#include "wsh_bool.h"
+#include "wisp_bool.h"
 #include <stdint.h>
 #include "../core/session.h"
 
@@ -25,7 +25,7 @@ typedef struct {
 /* ─── Config Sections ────────────────────────────────────────────────────── */
 
 typedef struct {
-    char  shell[256];       /* "wsh" or path to exe */
+    char  shell[256];       /* empty = auto-detect, else path to exe */
     int   scrollback;
     bool  confirm_exit;
     char  bell[16];         /* "visual", "audio", "none" */
@@ -100,7 +100,7 @@ bool config_save_defaults(const char *toml_path);
 /* Apply colors from a theme TOML file. Theme file may contain [colors]. */
 bool config_apply_theme_file(Config *cfg, const char *toml_path);
 
-/* Resolve config file path: %APPDATA%\Wsh\Wsh.toml */
+/* Resolve config file path: %APPDATA%\Wisp\Wisp.toml */
 void config_path(char *out, int out_size);
 
 /* Parse "#RRGGBB" hex color string; returns 0 on failure */
@@ -111,4 +111,4 @@ uint32_t config_parse_color(const char *hex);
 }
 #endif
 
-#endif /* WSH_CONFIG_H */
+#endif /* WISP_CONFIG_H */

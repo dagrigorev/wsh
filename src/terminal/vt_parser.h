@@ -1,9 +1,9 @@
 #pragma once
-#ifndef WSH_VT_PARSER_H
-#define WSH_VT_PARSER_H
+#ifndef WISP_VT_PARSER_H
+#define WISP_VT_PARSER_H
 
 #include <windows.h>
-#include "wsh_bool.h"
+#include "wisp_bool.h"
 #include <stdint.h>
 #include "screen.h"
 
@@ -75,4 +75,4 @@ void vt_parser_reset(VtParser *vt);
 }
 #endif
 
-#endif /* WSH_VT_PARSER_H */
+#endif /* WISP_VT_PARSER_H */

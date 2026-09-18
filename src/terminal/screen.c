@@ -57,8 +57,8 @@ void screen_init(ScreenBuffer *sb, int cols, int rows, int scrollback_lines) {
 
     /* Extra bottom rows (for AI suggestions beyond visible grid) */
     sb->extra_bottom = (ScreenCell *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY,
-                       (size_t)(WSH_OVERSCROLL_LINES * cols) * sizeof(ScreenCell));
-    fill_cells(sb->extra_bottom, WSH_OVERSCROLL_LINES * cols, NULL);
+                       (size_t)(WISP_OVERSCROLL_LINES * cols) * sizeof(ScreenCell));
+    fill_cells(sb->extra_bottom, WISP_OVERSCROLL_LINES * cols, NULL);
 }
 
 void screen_free(ScreenBuffer *sb) {
@@ -139,12 +139,12 @@ void screen_resize(ScreenBuffer *sb, int new_cols, int new_rows) {
     }
     /* Handle extra_bottom reallocation on column resize */
     ScreenCell *neb = (ScreenCell *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY,
-                     (size_t)(WSH_OVERSCROLL_LINES * new_cols) * sizeof(ScreenCell));
+                     (size_t)(WISP_OVERSCROLL_LINES * new_cols) * sizeof(ScreenCell));
     if (neb) {
-        fill_cells(neb, WSH_OVERSCROLL_LINES * new_cols, NULL);
+        fill_cells(neb, WISP_OVERSCROLL_LINES * new_cols, NULL);
         if (sb->extra_bottom) {
             int copy_eb_cols = old_cols < new_cols ? old_cols : new_cols;
-            for (int i = 0; i < WSH_OVERSCROLL_LINES; i++) {
+            for (int i = 0; i < WISP_OVERSCROLL_LINES; i++) {
                 memcpy(neb + i * new_cols, sb->extra_bottom + i * old_cols,
                        (size_t)copy_eb_cols * sizeof(ScreenCell));
             }
@@ -310,7 +310,7 @@ void screen_carriage_return(ScreenBuffer *sb) {
 
 void screen_put_char(ScreenBuffer *sb, uint32_t ch, const CellAttr *attr) {
     screen_note_output(sb);
-    int char_width = wsh_utf8_codepoint_width(ch);
+    int char_width = wisp_utf8_codepoint_width(ch);
     if (char_width == 0) {
         /* Combining marks are currently stored as spacing replacement cells.
          * Full grapheme composition is a later ZLE-level enhancement. */
@@ -511,7 +511,7 @@ ScreenCell *screen_scrollback_line_from_oldest(ScreenBuffer *sb, int chronologic
 
 const ScreenCell *screen_visible_cell(const ScreenBuffer *sb, int viewport_row, int col) {
     if (!sb || viewport_row < 0 || col < 0 || col >= sb->cols) return NULL;
-    if (viewport_row >= sb->rows + WSH_OVERSCROLL_LINES) return NULL;
+    if (viewport_row >= sb->rows + WISP_OVERSCROLL_LINES) return NULL;
 
     const ScreenCell *grid = sb->alt_screen_active ? sb->alt_cells : sb->cells;
 
@@ -527,10 +527,10 @@ const ScreenCell *screen_visible_cell(const ScreenBuffer *sb, int viewport_row, 
         return grid + viewport_row * sb->cols + col;
     }
 
-    /* Overscroll: keep bottom WSH_OVERSCROLL_LINES rows always mapped to live grid */
+    /* Overscroll: keep bottom WISP_OVERSCROLL_LINES rows always mapped to live grid */
     /* Skip overscroll if the terminal is too small to have dedicated pinned rows */
-    if (sb->rows > WSH_OVERSCROLL_LINES) {
-        int pinned = sb->rows - WSH_OVERSCROLL_LINES;
+    if (sb->rows > WISP_OVERSCROLL_LINES) {
+        int pinned = sb->rows - WISP_OVERSCROLL_LINES;
         if (viewport_row >= pinned) {
             return grid + viewport_row * sb->cols + col;
         }
@@ -555,14 +555,14 @@ const ScreenCell *screen_visible_cell(const ScreenBuffer *sb, int viewport_row, 
 /* ─── Extra Bottom Rows (AI suggestions below grid) ──────────────────────── */
 
 ScreenCell *screen_extra_bottom_cell(ScreenBuffer *sb, int line, int col) {
-    if (!sb || !sb->extra_bottom || line < 0 || line >= WSH_OVERSCROLL_LINES) return NULL;
+    if (!sb || !sb->extra_bottom || line < 0 || line >= WISP_OVERSCROLL_LINES) return NULL;
     if (col < 0 || col >= sb->cols) return NULL;
     return sb->extra_bottom + line * sb->cols + col;
 }
 
 void screen_extra_bottom_clear(ScreenBuffer *sb) {
     if (!sb || !sb->extra_bottom) return;
-    fill_cells(sb->extra_bottom, WSH_OVERSCROLL_LINES * sb->cols, NULL);
+    fill_cells(sb->extra_bottom, WISP_OVERSCROLL_LINES * sb->cols, NULL);
 }
 
 void screen_put_cell_at(ScreenBuffer *sb, int row, int col, uint32_t ch, const CellAttr *attr) {
@@ -570,7 +570,7 @@ void screen_put_cell_at(ScreenBuffer *sb, int row, int col, uint32_t ch, const C
     ScreenCell *cell = NULL;
     if (row >= 0 && row < sb->rows) {
         cell = active_grid(sb) + row * sb->cols + col;
-    } else if (row >= sb->rows && row < sb->rows + WSH_OVERSCROLL_LINES && sb->extra_bottom && !sb->alt_screen_active) {
+    } else if (row >= sb->rows && row < sb->rows + WISP_OVERSCROLL_LINES && sb->extra_bottom && !sb->alt_screen_active) {
         cell = sb->extra_bottom + (row - sb->rows) * sb->cols + col;
     }
     if (cell) {

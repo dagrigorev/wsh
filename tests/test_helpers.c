@@ -6,8 +6,8 @@ int      g_test_count = 0;
 int      g_pass_count = 0;
 int      g_fail_count = 0;
 
-/* Called by C test files via the WSH_TEST_REGISTER macro */
-void wsh_register_test(const char *suite, const char *name, TestFn fn) {
+/* Called by C test files via the WISP_TEST_REGISTER macro */
+void wisp_register_test(const char *suite, const char *name, TestFn fn) {
     if (g_test_count < MAX_TESTS) {
         g_tests[g_test_count].suite = suite;
         g_tests[g_test_count].name  = name;

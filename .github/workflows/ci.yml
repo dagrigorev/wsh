@@ -32,13 +32,13 @@ jobs:
         uses: actions/checkout@v4
 
       # Same entry point the release workflow uses, so CI and release cannot
-      # drift apart. Phi-4 (WSH_ENABLE_PHI4) stays OFF, so no llama.cpp fetch
+      # drift apart. Phi-4 (WISP_ENABLE_PHI4) stays OFF, so no llama.cpp fetch
       # and no multi-GB model download.
       - name: Build and test
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          ./build-and-run-wsh.ps1 `
+          ./build-and-run-wisp.ps1 `
             -Configuration ${{ matrix.configuration }} `
             -BuildDir build-ci `
             -NoRun `

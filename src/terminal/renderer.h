@@ -1,11 +1,11 @@
 #pragma once
-#ifndef WSH_RENDERER_H
-#define WSH_RENDERER_H
+#ifndef WISP_RENDERER_H
+#define WISP_RENDERER_H
 
 #include <windows.h>
 #include <d2d1.h>
 #include <dwrite.h>
-#include "wsh_bool.h"
+#include "wisp_bool.h"
 #include "screen.h"
 #include "../platform/config.h"
 #include "font.h"
@@ -107,4 +107,4 @@ Color4F renderer_resolve_bg(const Renderer *r, const ScreenCell *cell);
 }
 #endif
 
-#endif /* WSH_RENDERER_H */
+#endif /* WISP_RENDERER_H */

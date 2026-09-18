@@ -1,9 +1,9 @@
 #pragma once
-#ifndef WSH_SCREEN_H
-#define WSH_SCREEN_H
+#ifndef WISP_SCREEN_H
+#define WISP_SCREEN_H
 
 #include <windows.h>
-#include "wsh_bool.h"
+#include "wisp_bool.h"
 #include <stdint.h>
 
 
@@ -91,7 +91,7 @@ typedef struct {
     char        title[256];
 
     /* Extra bottom rows: visible when viewport_offset == 0 (for AI suggestions etc.) */
-    ScreenCell *extra_bottom;          /* [WSH_OVERSCROLL_LINES * cols] */
+    ScreenCell *extra_bottom;          /* [WISP_OVERSCROLL_LINES * cols] */
 } ScreenBuffer;
 
 /* ─── API ────────────────────────────────────────────────────────────────── */
@@ -147,10 +147,10 @@ ScreenCell *screen_scrollback_line_from_oldest(ScreenBuffer *sb, int chronologic
 const ScreenCell *screen_visible_cell(const ScreenBuffer *sb, int viewport_row, int col);
 
 /* Extra bottom row access (rows beyond sb->rows, for AI suggestions) */
-#define WSH_OVERSCROLL_LINES 3
+#define WISP_OVERSCROLL_LINES 3
 ScreenCell *screen_extra_bottom_cell(ScreenBuffer *sb, int line, int col);
 void        screen_extra_bottom_clear(ScreenBuffer *sb);
-/* Write a character to any valid row (grid 0..rows-1 or extra rows rows..rows+WSH_OVERSCROLL_LINES-1) */
+/* Write a character to any valid row (grid 0..rows-1 or extra rows rows..rows+WISP_OVERSCROLL_LINES-1) */
 void screen_put_cell_at(ScreenBuffer *sb, int row, int col, uint32_t ch, const CellAttr *attr);
 
 
@@ -158,4 +158,4 @@ void screen_put_cell_at(ScreenBuffer *sb, int row, int col, uint32_t ch, const C
 }
 #endif
 
-#endif /* WSH_SCREEN_H */
+#endif /* WISP_SCREEN_H */

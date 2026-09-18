@@ -1,8 +1,8 @@
 cmake_minimum_required(VERSION 3.20)
 
-project(Wsh
+project(Wisp
     VERSION 1.0.0
-    DESCRIPTION "Wsh – ZSH-compatible Windows Terminal Emulator"
+    DESCRIPTION "Wisp - GPU-accelerated terminal emulator for Windows"
     LANGUAGES C CXX
 )
 
@@ -16,7 +16,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 # ── Build types ─────────────────────────────────────────────────────────────
-set(WSH_DIST_DIR "${CMAKE_BINARY_DIR}/dist" CACHE PATH "Runtime distribution directory")
+set(WISP_DIST_DIR "${CMAKE_BINARY_DIR}/dist" CACHE PATH "Runtime distribution directory")
 
 if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
@@ -24,10 +24,10 @@ endif()
 
 # ── Compiler / platform guards ──────────────────────────────────────────────
 if(NOT WIN32)
-    message(FATAL_ERROR "Wsh targets Windows only (ConPTY, Direct2D, DirectWrite).")
+    message(FATAL_ERROR "Wisp targets Windows only (ConPTY, Direct2D, DirectWrite).")
 endif()
 if(NOT MSVC)
-    message(FATAL_ERROR "Wsh requires MSVC (cl.exe). Use the VS Developer Command Prompt.")
+    message(FATAL_ERROR "Wisp requires MSVC (cl.exe). Use the VS Developer Command Prompt.")
 endif()
 
 # ── Global MSVC flags ────────────────────────────────────────────────────────
@@ -39,9 +39,9 @@ add_compile_definitions(
     _DISABLE_VECTORIZED_ALGORITHMS
     NOMINMAX
     # Expose version to source code
-    WSH_VERSION_MAJOR=${PROJECT_VERSION_MAJOR}
-    WSH_VERSION_MINOR=${PROJECT_VERSION_MINOR}
-    WSH_VERSION_PATCH=${PROJECT_VERSION_PATCH}
+    WISP_VERSION_MAJOR=${PROJECT_VERSION_MAJOR}
+    WISP_VERSION_MINOR=${PROJECT_VERSION_MINOR}
+    WISP_VERSION_PATCH=${PROJECT_VERSION_PATCH}
 )
 
 # Dynamic MSVC runtime: keeps one CRT heap shared by the EXE and any DLL it
@@ -68,41 +68,33 @@ add_link_options(
 
 # ── Sub-libraries (each a static lib — SOLID: one reason to change) ──────────
 add_subdirectory(src/core)
-add_subdirectory(src/shell)
 add_subdirectory(src/terminal)
 add_subdirectory(src/platform)
 
 # ── Main executable ──────────────────────────────────────────────────────────
 add_subdirectory(src)
 
-# ── Companion utilities ─────────────────────────────────────────────────────
-add_subdirectory(tools)
-
 # ── Runtime resources ───────────────────────────────────────────────────────
-add_custom_target(wsh_runtime_resources ALL
-    COMMAND ${CMAKE_COMMAND} -E make_directory "${WSH_DIST_DIR}/config"
-    COMMAND ${CMAKE_COMMAND} -E make_directory "${WSH_DIST_DIR}/themes"
-    COMMAND ${CMAKE_COMMAND} -E make_directory "${WSH_DIST_DIR}/man"
-    COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_SOURCE_DIR}/config" "${WSH_DIST_DIR}/config"
-    COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_SOURCE_DIR}/themes" "${WSH_DIST_DIR}/themes"
-    COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_SOURCE_DIR}/man" "${WSH_DIST_DIR}/man"
-    COMMENT "Copying Wsh runtime resources to dist"
+add_custom_target(wisp_runtime_resources ALL
+    COMMAND ${CMAKE_COMMAND} -E make_directory "${WISP_DIST_DIR}/themes"
+    COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_SOURCE_DIR}/themes" "${WISP_DIST_DIR}/themes"
+    COMMENT "Copying Wisp runtime resources to dist"
 )
 
 # ── Tests ────────────────────────────────────────────────────────────────────
-option(WSH_BUILD_TESTS "Build unit tests" ON)
-if(WSH_BUILD_TESTS)
+option(WISP_BUILD_TESTS "Build unit tests" ON)
+if(WISP_BUILD_TESTS)
     enable_testing()
     add_subdirectory(tests)
 endif()
 
 # ── Install rules ────────────────────────────────────────────────────────────
-install(TARGETS Wsh ls md tree ping htop wshinit cat pwd cp mv rm mkdir rmdir touch head tail wc grep sort uniq basename dirname whoami hostname uname date clear which sleep yes true false echo env printenv more less find tee cut RUNTIME DESTINATION bin)
-install(DIRECTORY config themes man DESTINATION share/Wsh)
+install(TARGETS Wisp RUNTIME DESTINATION bin)
+install(DIRECTORY themes DESTINATION share/Wisp)
 
 # ── CPack (ZIP distribution) ─────────────────────────────────────────────────
 set(CPACK_GENERATOR "ZIP")
-set(CPACK_PACKAGE_NAME "Wsh")
+set(CPACK_PACKAGE_NAME "Wisp")
 set(CPACK_PACKAGE_VERSION ${PROJECT_VERSION})
 include(CPack)
 

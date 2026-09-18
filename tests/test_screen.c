@@ -28,7 +28,7 @@ TEST(Screen, TracksWideCharactersAcrossTwoCells) {
 TEST(Screen, PreservesVisibleTextAcrossShrinkAndExpand) {
     ScreenBuffer sb;
     screen_init(&sb, 10, 4, 8);
-    const char *msg1 = " Wsh v1.0";
+    const char *msg1 = " Wisp v1.0";
     const char *msg2 = "help reload";
     for (const char *p = msg1; *p; ++p) screen_put_char(&sb, (unsigned char)*p, NULL);
     screen_newline(&sb); screen_carriage_return(&sb);

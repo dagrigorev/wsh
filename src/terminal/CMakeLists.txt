@@ -1,7 +1,7 @@
-# ── wsh_terminal ──────────────────────────────────────────────────────────────
+# ── wisp_terminal ──────────────────────────────────────────────────────────────
 # Single Responsibility: VT/ANSI emulation, screen buffer, rendering.
 # Knows nothing about shell semantics or ConPTY.
-add_library(wsh_terminal STATIC
+add_library(wisp_terminal STATIC
     screen.c
     vt_parser.c
     layout.c
@@ -10,5 +10,5 @@ add_library(wsh_terminal STATIC
     guid_init.cpp
 )
 
-target_include_directories(wsh_terminal PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
-target_link_libraries(wsh_terminal PUBLIC wsh_core d2d1 dwrite)
+target_include_directories(wisp_terminal PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(wisp_terminal PUBLIC wisp_core d2d1 dwrite)

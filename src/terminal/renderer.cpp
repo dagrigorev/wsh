@@ -64,7 +64,7 @@ static bool create_rt(Renderer *r) {
     D2D1_HWND_RENDER_TARGET_PROPERTIES hp; hp.hwnd=r->hwnd; hp.pixelSize=sz; hp.presentOptions=D2D1_PRESENT_OPTIONS_NONE;
 
     HRESULT hr=r->d2d_factory->CreateHwndRenderTarget(rp,hp,&r->render_target);
-    if (FAILED(hr)) { WSH_LOG_ERROR("CreateHwndRenderTarget: 0x%08X",hr); return false; }
+    if (FAILED(hr)) { WISP_LOG_ERROR("CreateHwndRenderTarget: 0x%08X",hr); return false; }
 
     if (r->fg_brush)     { r->fg_brush->Release();     r->fg_brush=NULL; }
     if (r->bg_brush)     { r->bg_brush->Release();     r->bg_brush=NULL; }
@@ -82,9 +82,9 @@ bool renderer_init(Renderer *r, HWND hwnd, const Config *cfg) {
     build_palette(r, cfg);
     D2D1_FACTORY_OPTIONS opts={D2D1_DEBUG_LEVEL_NONE};
     HRESULT hr=D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED,opts,&r->d2d_factory);
-    if (FAILED(hr)) { WSH_LOG_ERROR("D2D1CreateFactory: 0x%08X",hr); return false; }
+    if (FAILED(hr)) { WISP_LOG_ERROR("D2D1CreateFactory: 0x%08X",hr); return false; }
     if (!create_rt(r)) return false;
-    if (!font_init(&r->font,cfg->font.family,cfg->font.size,r->dpi)) { WSH_LOG_ERROR("font_init failed"); return false; }
+    if (!font_init(&r->font,cfg->font.family,cfg->font.size,r->dpi)) { WISP_LOG_ERROR("font_init failed"); return false; }
     r->cell_w=r->font.cell_width; r->cell_h=r->font.cell_height;
     r->cursor_style=cfg->cursor.style; r->cursor_visible=true; r->cursor_blink_state=true;
     r->tab_bar_height=0;
