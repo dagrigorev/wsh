@@ -99,14 +99,21 @@ def main():
     na_lines = 0
     done_lines = 0
 
+    wip_lines = 0
+
     for rel, lines in files:
         mod = module_of(rel)
         st = prior.get(rel)
-        if st and st != "todo":
-            if st == "n/a":
-                na_lines += lines
-            else:
-                done_lines += lines
+        if st == "n/a":
+            na_lines += lines
+        elif st == "done":
+            done_lines += lines
+        elif st == "wip":
+            # A partially ported file is not ported. Counting it as done
+            # would overstate progress by the whole file's length, so it
+            # stays in the remaining total and is reported separately.
+            wip_lines += lines
+            todo_lines += lines
         elif mod in NOT_APPLICABLE:
             na_lines += lines
         else:
@@ -131,8 +138,12 @@ def main():
     out.append("| Ported | - | {} |".format(done_lines))
     out.append("| Not applicable to a Windows port | - | {} |".format(na_lines))
     out.append("| Remaining | - | {} |".format(todo_lines))
+    out.append("| ...of which partially ported | - | {} |".format(wip_lines))
     out.append("")
-    out.append("Status values: `todo`, `wip`, `done`, `n/a`.")
+    out.append("Status values: `todo`, `wip`, `done`, `n/a`. A `wip` file counts")
+    out.append("toward *remaining*, not ported — a partially ported file is not")
+    out.append("ported, and counting it as done would overstate progress by the")
+    out.append("whole file's length.")
     out.append("")
     out.append("## Modules")
     out.append("")

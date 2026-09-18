@@ -16,8 +16,12 @@ License: MIT, (c) 2024 Mitchell Hashimoto and Ghostty contributors
 | Ported | - | 1448 |
 | Not applicable to a Windows port | - | 37082 |
 | Remaining | - | 303871 |
+| ...of which partially ported | - | 1468 |
 
-Status values: `todo`, `wip`, `done`, `n/a`.
+Status values: `todo`, `wip`, `done`, `n/a`. A `wip` file counts
+toward *remaining*, not ported — a partially ported file is not
+ported, and counting it as done would overstate progress by the
+whole file's length.
 
 ## Modules
 
@@ -85,7 +89,7 @@ Status values: `todo`, `wip`, `done`, `n/a`.
 | `terminal/SelectionGesture.zig` | 2110 | todo |
 | `terminal/hash_map.zig` | 1918 | todo |
 | `terminal/Selection.zig` | 1676 | todo |
-| `terminal/color.zig` | 1468 | todo |
+| `terminal/color.zig` | 1468 | wip |
 | `terminal/style.zig` | 1240 | todo |
 | `terminal/bitmap_allocator.zig` | 1221 | done |
 | `terminal/Parser.zig` | 1116 | todo |
