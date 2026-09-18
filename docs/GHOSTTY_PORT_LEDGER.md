@@ -13,9 +13,9 @@ License: MIT, (c) 2024 Mitchell Hashimoto and Ghostty contributors
 | | Files | Lines |
 |---|---:|---:|
 | Upstream `src/` (Zig) | 589 | 342401 |
-| Ported | - | 227 |
+| Ported | - | 1448 |
 | Not applicable to a Windows port | - | 37082 |
-| Remaining | - | 305092 |
+| Remaining | - | 303871 |
 
 Status values: `todo`, `wip`, `done`, `n/a`.
 
@@ -87,7 +87,7 @@ Status values: `todo`, `wip`, `done`, `n/a`.
 | `terminal/Selection.zig` | 1676 | todo |
 | `terminal/color.zig` | 1468 | todo |
 | `terminal/style.zig` | 1240 | todo |
-| `terminal/bitmap_allocator.zig` | 1221 | todo |
+| `terminal/bitmap_allocator.zig` | 1221 | done |
 | `terminal/Parser.zig` | 1116 | todo |
 | `terminal/sgr.zig` | 1114 | todo |
 | `terminal/osc.zig` | 1074 | todo |
