@@ -2,9 +2,9 @@
 
 Wsh is a Windows-first shell and terminal environment written in C/C++ with CMake, Win32, Direct2D/DirectWrite, and ConPTY.
 
-The project combines a real terminal host, a modular ZSH-compatible shell runtime, split panes, VT/ANSI rendering, scrollback, bundled Unix-like utilities, local manual pages, themes, an AI assistant subsystem (n-gram prediction, tiny LLM, Phi-4 commentary), session save/restore, and a Material Cyber UI.
+The project combines a real terminal host, a modular ZSH-compatible shell runtime, split panes, VT/ANSI rendering, scrollback, bundled Unix-like utilities, local manual pages, themes, session save/restore, and a Material Cyber UI.
 
-**Build**: 52 targets, zero errors — **Tests**: 61/61 passing (100%)
+**Build**: 51 targets, zero errors — **Tests**: 60/60 passing (100%)
 
 ## Screenshots
 
@@ -29,15 +29,8 @@ Implemented now:
 - Split panes (1–4) and active pane routing.
 - Modular ZSH-compatible built-in shell — lexer, parser, executor, 48 built-in commands, history (ring buffer, 50K max, reverse search, file persistence), jobs (64 max, fg/bg/kill), completion, variable expansion, globbing, brace expansion, arithmetic, command substitution, heredocs, pipelines, if/while/for/function/case, `precmd`/`preexec` hooks.
 - Optional external shell hosting through ConPTY (cmd.exe, PowerShell, WSL, etc.).
-- Config loading from `%APPDATA%\Wsh\Wsh.toml` with sections for general, font, cursor, colors, keybinds, tabs, scrollbar, session, and AI.
-- Built-in `help`, `man`, `history`, and `ai` commands with 43 bundled manual pages.
-- AI assistant subsystem:
-  - **N-gram prediction**: 4-gram statistical model for command completion trained from a command corpus.
-  - **Tiny LLM**: Micro reasoning model (~2 MB) for proactive suggestions during typing, displayed as subtitles below the prompt.
-  - **Rule-based fallback**: Heuristic suggestions when models are unavailable.
-  - **Phi-4 commentary**: Post-execution command analysis via Microsoft Phi-4 GGUF model, with both direct in-process (llama.cpp) and subprocess runtimes.
-  - **Backtick queries**: `` `natural language question` `` queries the AI inline.
-  - **Context awareness**: Detects CMake, Node.js, .NET, and Git projects for context-sensitive suggestions.
+- Config loading from `%APPDATA%\Wsh\Wsh.toml` with sections for general, font, cursor, colors, keybinds, tabs, scrollbar, and session.
+- Built-in `help`, `man`, and `history` commands with 42 bundled manual pages.
 - In-shell task scheduler — one-shot and repeating delayed commands (`at`/`atq`/`atrm`).
 - Session persistence — save and restore tabs, panes, scrollback, and cursor state across restarts.
 - Runtime logging under `%LOCALAPPDATA%\Wsh\logs\wsh.log` (10 MiB cap, auto-truncate).
@@ -86,10 +79,6 @@ Build options:
 
 | Option | Description |
 |---|---|
-| `-DWSH_ENABLE_PHI4=ON` | Fetch llama.cpp and enable direct in-process Phi-4 inference |
-| `-DWSH_DOWNLOAD_PHI4_MODEL=ON` | Download Phi-4 GGUF model during build (~14 GB) |
-| `-DWSH_DOWNLOAD_LLAMA_CLI=ON` | Download llama-cli.exe for subprocess Phi-4 inference |
-| `-DWSH_BUILD_TESTS=OFF` | Skip building tests |
 
 ## First Run
 
@@ -147,7 +136,6 @@ The main window is organized as:
 - Terminal header with active shell, PID, path, and state.
 - Terminal viewport backed by the real renderer and screen buffer.
 - Blue status bar with runtime state such as Git branch, folder, shell, encoding, size, pane index, and time.
-- AI reasoning overlay (3 extra rows below the viewport) showing proactive suggestions and commentary.
 
 The UI intentionally avoids fake data. Values shown in tabs, path bars, status badges, resource meters, and utility output come from active Wsh/session/system state. Unsupported data is hidden or shown as unavailable rather than invented.
 
@@ -215,12 +203,6 @@ visible = true
 [session]
 auto_save = true
 
-[ai]
-enabled = true
-phi4_model_path = "models/phi-4/model.gguf"
-phi4_ctx_tokens = 4096
-phi4_max_tokens = 256
-phi4_temperature = 0.7
 ```
 
 `general.shell = "wsh"` uses the built-in shell. Any other command path is hosted through ConPTY.
@@ -230,7 +212,6 @@ Title placeholders:
 - `${cwd}` — current working directory.
 - `${theme}` — configured theme name.
 - `${version}` — Wsh version.
-- `${ai}` — AI-enabled status indicator.
 
 Default shell config (`~/.zshrc`):
 
@@ -261,31 +242,16 @@ Built-in themes:
 - `src/shell` — modular ZSH-compatible shell: lexer, parser, executor, 48 builtins, env, expand, history, jobs, completion, scheduler, shell context.
 - `src/terminal` — screen buffer, VT/ANSI parser, Direct2D renderer, DirectWrite font, grid layout.
 - `src/platform` — TOML config parser, ConPTY lifecycle, Win32 keyboard input translation.
-- `src/ai` — AI provider framework: n-gram model, tiny LLM, rule-based provider, Phi-4 commentary (direct + subprocess runtimes), reasoning model, context detection.
 - `src/main.cpp`, `src/window.cpp`, `src/repl.c`, `src/man_viewer.c` — app wiring, window procedure, REPL, and man page viewer.
 - `tools` — companion utilities: `coreutils` (multi-call binary, 28 commands), `tree`, `ping`, `htop`, `md`, `wshinit`.
 - `themes` — 6 built-in TOML themes.
-- `man` — 43 bundled manual pages.
+- `man` — 42 bundled manual pages.
 - `config` — default `.zshrc` shell configuration.
-- `models` — Phi-4 GGUF model directory (placeholder, downloaded on demand).
-- `tests` — 28 unit test files (61 test cases).
+- `tests` — 19 unit test files (60 test cases).
 - `docs/screenshots` — README screenshots generated from real bundle output.
 - `docs/ARCHITECTURE.md` — subsystem mapping and known gaps.
 - `docs/REFACTORING_PLAN.md` — planned evolution into a complete console environment.
 - `.github/workflows/release.yml` — CI/CD: builds on tag push, packages ZIP with SHA256, publishes GitHub Release.
-
-## AI Subsystem
-
-Wsh includes a layered AI assistant with four providers and a commentary engine:
-
-| Component | Description |
-|---|---|
-| **N-gram predictor** | Statistical 4-gram model (~74 KB) trained from `tools/command_corpus.txt` for next-command prediction |
-| **Tiny LLM** | Micro reasoning model (~2 MB) providing proactive intent detection and suggestions during typing |
-| **Rule-based fallback** | Heuristic suggestions when no statistical model is available |
-| **Phi-4 commentary** | Post-execution analysis via Microsoft Phi-4 (~14 GB GGUF), with direct in-process (llama.cpp) or subprocess fallback |
-
-Built-in AI commands: `ai status`, `ai suggest`, `ai explain`, `ai fix`. The AI can also answer backtick-quoted questions inline (`` `how do I find large files?` ``).
 
 ## Error Logging
 

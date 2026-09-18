@@ -88,9 +88,6 @@ bool renderer_init(Renderer *r, HWND hwnd, const Config *cfg) {
     r->cell_w=r->font.cell_width; r->cell_h=r->font.cell_height;
     r->cursor_style=cfg->cursor.style; r->cursor_visible=true; r->cursor_blink_state=true;
     r->tab_bar_height=0;
-    r->reasoning_line1[0] = L'\0';
-    r->reasoning_line2[0] = L'\0';
-    r->reasoning_active = false;
     if (cfg->cursor.blink) r->blink_timer_id=SetTimer(hwnd,1,cfg->cursor.blink_rate_ms,NULL);
     RECT rc; GetClientRect(hwnd,&rc); renderer_resize(r,rc.right-rc.left,rc.bottom-rc.top);
     return true;
@@ -307,38 +304,6 @@ void renderer_paint_region(Renderer *r, const ScreenBuffer *sb, const RECT *rect
             r->fg_brush->SetColor(thumb);
             D2D1_ROUNDED_RECT th = {{track_x0, thumb_y, track_x1, thumb_y + thumb_h}, track_w * 0.5f, track_w * 0.5f};
             r->render_target->FillRoundedRectangle(th, r->fg_brush);
-        }
-    }
-
-    /* ── Inline suggestion on the row after cursor (proactive AI) ──────────── */
-    /* Rendered below grid when cursor is on last row; clip rect handles overflow */
-    if (active && r->reasoning_active && r->reasoning_line1[0]) {
-        int suggest_row = cursor_y + 1;
-        float sy = oy + (float)suggest_row * r->cell_h;
-        D2D1_RECT_F row_rc = {ox, sy, ox + cols * r->cell_w, sy + r->cell_h};
-
-        /* Dimmed background for the suggestion row */
-        D2D1_COLOR_F dim_bg = to_d2d(r->bg_color);
-        dim_bg.a = 0.45f;
-        r->bg_brush->SetColor(dim_bg);
-        r->render_target->FillRectangle(row_rc, r->bg_brush);
-
-        /* Draw suggestion text in italic, dimmed */
-        D2D1_COLOR_F dim_fg = to_d2d(r->fg_color);
-        dim_fg.a = 0.50f;
-        r->fg_brush->SetColor(dim_fg);
-
-        IDWriteTextLayout *layout = NULL;
-        if (r->font.factory) {
-            r->font.factory->CreateTextLayout(
-                r->reasoning_line1, (UINT32)wcslen(r->reasoning_line1),
-                r->font.fmt_italic ? r->font.fmt_italic : r->font.fmt_normal,
-                cols * r->cell_w, r->cell_h, &layout);
-        }
-        if (layout) {
-            D2D1_POINT_2F orig = {ox, sy};
-            r->render_target->DrawTextLayout(orig, layout, r->fg_brush, D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT);
-            layout->Release();
         }
     }
 

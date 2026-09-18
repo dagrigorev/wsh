@@ -156,9 +156,6 @@ typedef struct ShellContext {
      * operations (WaitForSingleObject loops, etc.). */
     volatile LONG cancel_requested;
 
-    /* ── AI assistant ──────────────────────────────────────────────────── */
-    bool   ai_enabled;                    /* default true */
-    void  *ai_state;                      /* opaque WshAiState* */
     char   last_command[4096];            /* last executed command text */
     char   last_stderr_snippet[4096];     /* captured stderr from last cmd */
 } ShellContext;

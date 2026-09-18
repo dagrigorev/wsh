@@ -63,9 +63,6 @@ struct Repl {
     int             exec_result;  /* exit status of last command */
     ReplExecDoneFn  on_exec_done; /* completion callback (may be NULL) */
 
-    /* AI reasoning overlay text (max 2 lines) */
-    wchar_t         reasoning_text[2][256];
-    bool            reasoning_dirty; /* set when reasoning needs update */
 };
 
 /* ── API ───────────────────────────────────────────────────────────────────── */
@@ -104,12 +101,6 @@ static inline const char *repl_get_line(const Repl *r) { return r->line; }
 /* Get current line length. */
 static inline int repl_get_line_len(const Repl *r) { return r->len; }
 
-/* Check if reasoning should be re-triggered (called from UI thread). */
-static inline bool repl_is_reasoning_dirty(Repl *r) {
-    bool d = r->reasoning_dirty;
-    r->reasoning_dirty = false;
-    return d;
-}
 
 
 #ifdef __cplusplus

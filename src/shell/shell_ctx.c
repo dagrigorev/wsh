@@ -22,7 +22,6 @@
 #include "../core/path_util.h"
 #include "../core/log.h"
 #include "../core/unicode.h"
-#include "../ai/wsh_ai.h"
 
 /* ── Handle fields (child process I/O; stored directly in ctx) ────────────── */
 /*
@@ -90,9 +89,6 @@ void shell_ctx_init(ShellContext *ctx, IShellIO *io) {
     env_set(ctx->env, "WSH_TERM", "1", true);
     env_set(ctx->env, "IFS",   " \t\n",  false);
 
-    /* AI assistant: enabled by default */
-    ctx->ai_enabled = true;
-    ctx->ai_state = wsh_ai_state_create();
     ctx->last_command[0] = '\0';
     ctx->last_stderr_snippet[0] = '\0';
 
@@ -131,11 +127,6 @@ void shell_ctx_free(ShellContext *ctx) {
     /* Free trap handlers */
     for (int i = 0; i < TRAP_COUNT; i++) str_free(ctx->traps[i]);
 
-    /* Free AI state */
-    if (ctx->ai_state) {
-        wsh_ai_state_free(ctx->ai_state);
-        ctx->ai_state = NULL;
-    }
 
     /* Free env scope chain */
     while (ctx->env) ctx->env = env_scope_pop(ctx->env);

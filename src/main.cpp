@@ -29,7 +29,6 @@
 #include "shell/shell_ctx.h"
 #include "shell/history.h"
 #include "shell/completion.h"
-#include "ai/wsh_ai.h"
 #include "window.h"
 #include "repl.h"
 #include "man_viewer.h"
@@ -357,12 +356,6 @@ static bool pane_start(TerminalPane *pane) {
     if (old_cwd) {
         SetCurrentDirectoryW(old_cwd);
         HeapFree(GetProcessHeap(), 0, old_cwd);
-    }
-    /* Apply AI runtime config from TOML settings */
-    wsh_ai_apply_runtime_config(&pane->shell, &g_cfg.ai);
-    /* Initialize proactive AI reasoning micro-model */
-    if (pane->shell.ai_enabled) {
-        wsh_ai_init_reasoning(&pane->shell);
     }
     source_user_zshrc(&pane->shell);
     apply_default_gui_prompt(&pane->shell);
@@ -1526,21 +1519,6 @@ static void draw_man_viewer(Renderer *r) {
     draw_text_u8(r, scroll_info, &footer_rc, g_theme.text_faint);
 }
 
-/* ── Trigger AI reasoning update after input changes ───────────────────────── */
-
-#define AI_DEBOUNCE_TIMER_ID 4
-#define AI_DEBOUNCE_DELAY_MS 400
-
-static void trigger_ai_reasoning(TerminalPane *p) {
-    if (!p || p->use_pty) return;
-    if (!p->shell.ai_enabled) return;
-    if (repl_is_reasoning_dirty(&p->repl)) {
-        KillTimer(g_hwnd, AI_DEBOUNCE_TIMER_ID);
-        SetTimer(g_hwnd, AI_DEBOUNCE_TIMER_ID, AI_DEBOUNCE_DELAY_MS, NULL);
-        InvalidateRect(g_hwnd, NULL, FALSE);
-    }
-}
-
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
         case WM_PAINT: {
@@ -1557,43 +1535,6 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             strncpy(g_renderer.search_query, g_search.query, sizeof(g_renderer.search_query) - 1);
             g_renderer.search_query[sizeof(g_renderer.search_query) - 1] = '\0';
             TerminalTab *tab = active_tab();
-            /* Update proactive reasoning overlay from AI state */
-            {
-                TerminalPane *ap = active_pane();
-                if (ap && ap->initialized && !ap->use_pty) {
-                    ShellContext *sh = &ap->shell;
-                    if (sh->ai_enabled && sh->ai_state) {
-                        const char *input = repl_get_line(&ap->repl);
-                        if (input && input[0]) {
-                            const char *reason = wsh_ai_get_reasoning(sh);
-                            if (reason && reason[0]) {
-                                char reason_buf[260];
-                                _snprintf(reason_buf, sizeof(reason_buf), "%s", reason);
-                                wchar_t *wreason = u8_to_u16(reason_buf, NULL);
-                                if (wreason) {
-                                    wcsncpy(g_renderer.reasoning_line1, wreason, 255);
-                                    g_renderer.reasoning_line1[255] = L'\0';
-                                    str_free(wreason);
-                                }
-                                /* Only show the overlay when there is actual text to display.
-                                 * Previously this was set unconditionally, causing an empty
-                                 * dimmed row to appear below the cursor on every keystroke
-                                 * before the reasoning model had produced a result. */
-                                g_renderer.reasoning_active = true;
-                            } else {
-                                g_renderer.reasoning_line1[0] = L'\0';
-                                g_renderer.reasoning_active = false;
-                            }
-                        } else {
-                            g_renderer.reasoning_active = false;
-                        }
-                    } else {
-                        g_renderer.reasoning_active = false;
-                    }
-                } else {
-                    g_renderer.reasoning_active = false;
-                }
-            }
             if (tab) {
                 for (int i = 0; i < tab->pane_count; ++i) {
                     TerminalPane *p = &tab->panes[i];
@@ -1640,16 +1581,6 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 InvalidateRect(hwnd, NULL, FALSE);
             }
             if (wParam == 3) { session_save_now(); }
-            if (wParam == AI_DEBOUNCE_TIMER_ID) {
-                KillTimer(hwnd, AI_DEBOUNCE_TIMER_ID);
-                TerminalPane *ap = active_pane();
-                if (ap && !ap->use_pty && ap->shell.ai_enabled) {
-                    const char *line = repl_get_line(&ap->repl);
-                    if (line && line[0])
-                        wsh_ai_trigger_analysis(&ap->shell, line);
-                }
-                InvalidateRect(hwnd, NULL, FALSE);
-            }
             return 0;
 
         case WM_SETFOCUS: { TerminalPane *p = active_pane(); if (p) p->screen.cursor_visible = true; InvalidateRect(hwnd, NULL, FALSE); return 0; }
@@ -1737,7 +1668,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                             if (wtext) {
                                 int u8len = 0;
                                 char *text = wsh_utf16_to_utf8_clipboard(wtext, &u8len);
-                                if (text) { if (p->use_pty) pty_write(&p->pty, text, u8len); else { repl_handle_input(&p->repl, text, u8len); trigger_ai_reasoning(p); } str_free(text); }
+                                if (text) { if (p->use_pty) pty_write(&p->pty, text, u8len); else { repl_handle_input(&p->repl, text, u8len); } str_free(text); }
                                 GlobalUnlock(hd);
                             }
                         }
@@ -1768,7 +1699,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                         if (p->use_pty) pty_write(&p->pty, ev.bytes, ev.len);
                         else {
                             if (!repl_handle_input(&p->repl, ev.bytes, ev.len)) PostQuitMessage(0);
-                            trigger_ai_reasoning(p);
+                           
                         }
                     }
                     break;
@@ -1798,7 +1729,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 if (p->use_pty) pty_write(&p->pty, ev.bytes, ev.len);
                 else {
                     if (!repl_handle_input(&p->repl, ev.bytes, ev.len)) PostQuitMessage(0);
-                    trigger_ai_reasoning(p);
+                   
                 }
             }
             return 0;
@@ -1896,7 +1827,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     const wchar_t *wtxt = (const wchar_t *)GlobalLock(hd);
                     if (wtxt) {
                         int u8len = 0; char *txt = wsh_utf16_to_utf8_clipboard(wtxt, &u8len);
-                        if (txt) { if (p->use_pty) pty_write(&p->pty, txt, u8len); else { repl_handle_input(&p->repl, txt, u8len); trigger_ai_reasoning(p); } str_free(txt); }
+                        if (txt) { if (p->use_pty) pty_write(&p->pty, txt, u8len); else { repl_handle_input(&p->repl, txt, u8len); } str_free(txt); }
                         GlobalUnlock(hd);
                     }
                 }
@@ -1954,17 +1885,6 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 if (tab->initialized && pi < tab->pane_count) {
                     TerminalPane *pane = &tab->panes[pi];
                     if (pane->initialized && !pane->shell.exit_requested) {
-                        /* Try to get AI commentary for the executed command */
-                        if (pane->shell.ai_enabled && pane->shell.last_command[0]) {
-                            const char *cc = wsh_ai_try_get_commentary(
-                                &pane->shell, pane->shell.last_command);
-                            if (cc && cc[0]) {
-                                char cc_line[512];
-                                _snprintf(cc_line, sizeof(cc_line),
-                                    "\x1b[2m[ai]\x1b[0m %s\r\n", cc);
-                                io_write(pane->shell.io, cc_line);
-                            }
-                        }
                         repl_show_prompt(&pane->repl);
                         update_native_scrollbar(hwnd);
                         InvalidateRect(hwnd, NULL, FALSE);

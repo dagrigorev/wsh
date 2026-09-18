@@ -32,7 +32,6 @@
 #include "shell/expand.h"
 #include "core/str_util.h"
 #include "core/log.h"
-#include "ai/wsh_ai.h"
 #include "core/unicode.h"
 
 /* ── Internal helpers ─────────────────────────────────────────────────────── */
@@ -52,9 +51,6 @@ static void emit_fmt(Repl *r, const char *fmt, ...) {
 void repl_init(Repl *r, ShellContext *ctx) {
     memset(r, 0, sizeof(*r));
     r->ctx = ctx;
-    r->reasoning_text[0][0] = L'\0';
-    r->reasoning_text[1][0] = L'\0';
-    r->reasoning_dirty = false;
 }
 
 void repl_free(Repl *r) {
@@ -199,7 +195,6 @@ static void insert_bytes(Repl *r, const char *bytes, int len) {
     memcpy(r->line + r->cursor, bytes, (size_t)len);
     r->cursor += len;
     r->len    += len;
-    r->reasoning_dirty = true;
     repl_redraw_line(r);
 }
 
@@ -215,7 +210,6 @@ static void delete_backward(Repl *r) {
             (size_t)(r->len - r->cursor));
     r->cursor -= back;
     r->len    -= back;
-    r->reasoning_dirty = true;
     repl_redraw_line(r);
 }
 
@@ -399,10 +393,8 @@ bool repl_handle_input(Repl *r, const char *bytes, int len) {
         switch (c) {
             /* Ctrl+C — cancel line */
             case 0x03:
-                wsh_ai_clear_reasoning(r->ctx);
                 emit(r, "^C\r\n");
                 r->len = r->cursor = 0;
-                r->reasoning_dirty = true;
                 completion_free(&r->completion);
                 repl_show_prompt(r);
                 return true;
@@ -441,38 +433,11 @@ bool repl_handle_input(Repl *r, const char *bytes, int len) {
                 strncpy(cmd_buf, r->line, REPL_LINE_MAX - 1);
                 cmd_buf[REPL_LINE_MAX - 1] = '\0';
 
-                wsh_ai_clear_reasoning(r->ctx);
-
-                /* ── Backtick-wrapped input → AI query instead of command ── */
-                {
-                    size_t cmd_len = strlen(cmd_buf);
-                    if (cmd_len >= 3 && cmd_buf[0] == '`' && cmd_buf[cmd_len - 1] == '`') {
-                        cmd_buf[cmd_len - 1] = '\0';
-                        const char *ai_result = wsh_ai_query(r->ctx, cmd_buf + 1);
-                        emit(r, "\r\n");
-                        emit_fmt(r, "%s\r\n", ai_result && ai_result[0] ? ai_result : "AI: no response");
-                        r->len = 0; r->cursor = 0; r->line[0] = '\0';
-                        completion_free(&r->completion);
-                        r->completing = false;
-                        repl_show_prompt(r);
-                        return true;
-                    }
-                }
 
                 bool launched = execute_line(r);
 
-                /* Queue AI commentary for the submitted command (non-blocking) */
-                if (cmd_buf[0] != '\0' && r->ctx->ai_enabled) {
-                    wsh_ai_trigger_command_commentary(r->ctx, cmd_buf);
-                }
-
                 if (r->ctx->exit_requested) return false;
                 if (!launched) {
-                    /* If command wasn't launched (empty line), try to show commentary immediately */
-                    const char *cc = wsh_ai_try_get_commentary(r->ctx, cmd_buf);
-                    if (cc && cc[0]) {
-                        emit_fmt(r, "%s\r\n", cc);
-                    }
                     repl_show_prompt(r);
                 }
                 return true;
@@ -480,7 +445,6 @@ bool repl_handle_input(Repl *r, const char *bytes, int len) {
 
             /* Tab */
             case '\t':
-                wsh_ai_clear_reasoning(r->ctx);
                 handle_tab(r);
                 return true;
 
@@ -499,14 +463,13 @@ bool repl_handle_input(Repl *r, const char *bytes, int len) {
 
             /* Ctrl+K — kill to EOL */
             case 0x0B:
-                r->len = r->cursor; r->reasoning_dirty = true; repl_redraw_line(r); return true;
+                r->len = r->cursor; repl_redraw_line(r); return true;
 
             /* Ctrl+U — kill to BOL */
             case 0x15:
                 memmove(r->line, r->line + r->cursor,
                         (size_t)(r->len - r->cursor + 1));
-                r->len -= r->cursor; r->cursor = 0; r->reasoning_dirty = true;
-                repl_redraw_line(r); return true;
+                r->len -= r->cursor; r->cursor = 0;                repl_redraw_line(r); return true;
 
             /* Ctrl+W — kill word before cursor */
             case 0x17: {
@@ -518,7 +481,6 @@ bool repl_handle_input(Repl *r, const char *bytes, int len) {
                 memmove(r->line + r->cursor, r->line + end,
                         (size_t)(r->len - end + 1));
                 r->len -= (end - r->cursor);
-                r->reasoning_dirty = true;
                 repl_redraw_line(r); return true;
             }
 

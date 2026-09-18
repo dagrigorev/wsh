@@ -74,7 +74,6 @@ int builtin_man(int argc, char **argv, ShellContext *ctx);
 int builtin_history(int argc, char **argv, ShellContext *ctx);
 
 /* AI assistant */
-int builtin_ai(int argc, char **argv, ShellContext *ctx);
 
 /* ZSH completion stubs (no-ops that prevent "command not found" errors) */
 int builtin_noop(int argc, char **argv, ShellContext *ctx);
