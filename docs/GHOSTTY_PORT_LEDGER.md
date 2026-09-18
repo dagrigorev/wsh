@@ -13,9 +13,9 @@ License: MIT, (c) 2024 Mitchell Hashimoto and Ghostty contributors
 | | Files | Lines |
 |---|---:|---:|
 | Upstream `src/` (Zig) | 589 | 342401 |
-| Ported | - | 0 |
+| Ported | - | 227 |
 | Not applicable to a Windows port | - | 37082 |
-| Remaining | - | 305319 |
+| Remaining | - | 305092 |
 
 Status values: `todo`, `wip`, `done`, `n/a`.
 
@@ -105,7 +105,7 @@ Status values: `todo`, `wip`, `done`, `n/a`.
 | `terminal/paste.zig` | 247 | todo |
 | `terminal/hyperlink.zig` | 240 | todo |
 | `terminal/device_attributes.zig` | 227 | todo |
-| `terminal/size.zig` | 227 | todo |
+| `terminal/size.zig` | 227 | done |
 | `terminal/highlight.zig` | 213 | todo |
 | `terminal/mouse.zig` | 169 | todo |
 | `terminal/size_report.zig` | 160 | todo |
