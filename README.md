@@ -8,11 +8,11 @@ Wisp is a terminal emulator and nothing else. It does not implement a shell — 
 
 ## Relationship to Ghostty
 
-Wisp is an independent project, heavily inspired by [Ghostty](https://github.com/ghostty-org/ghostty) — its design philosophy, its scope and its defaults. It is **not** affiliated with, endorsed by, or a port of the Ghostty project, and it shares no code with it. Ghostty is written in Zig and targets macOS and Linux; Wisp is written in C/C++ and targets Windows.
+Wisp is an unofficial Windows port of [Ghostty](https://github.com/ghostty-org/ghostty), working module by module through Ghostty's source. It is **not** affiliated with or endorsed by the Ghostty project. Ghostty is written in Zig and targets macOS and Linux; Wisp is written in C/C++ and targets Windows.
 
-What Wisp takes from Ghostty is the shape of the thing: a terminal emulator that renders on the GPU, uses platform-native UI, ships almost no chrome, and leaves shell behaviour to the shell.
+The port is at the very beginning. Upstream `src/` is 342,401 lines of Zig across 589 files; 305,319 of those lines are in scope for Windows and none are ported yet. [`docs/GHOSTTY_PORT_LEDGER.md`](docs/GHOSTTY_PORT_LEDGER.md) tracks every file and its status, and is regenerated from a real checkout rather than maintained by hand.
 
-Wisp does not attempt to match Ghostty feature for feature. Ghostty is a large, mature project; Wisp is a young one. See [Not Implemented](#not-implemented) for the gap.
+What Wisp has today is its own C/C++ code that follows Ghostty's shape — a terminal emulator that renders on the GPU, uses platform-native UI, ships almost no chrome, and leaves shell behaviour to the shell. See [Not Implemented](#not-implemented) for the gap against upstream.
 
 ## Current State
 
@@ -152,4 +152,10 @@ The file is capped at 10 MiB and truncated automatically.
 
 ## License
 
-MIT.
+MIT — see [LICENSE](LICENSE).
+
+Wisp follows Ghostty's design and is working through a file-by-file port of its
+modules. Ghostty is MIT licensed, (c) 2024 Mitchell Hashimoto and Ghostty
+contributors. See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for the
+attribution convention, and [docs/GHOSTTY_PORT_LEDGER.md](docs/GHOSTTY_PORT_LEDGER.md)
+for what has been ported so far.
