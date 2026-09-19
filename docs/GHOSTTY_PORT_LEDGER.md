@@ -13,9 +13,9 @@ License: MIT, (c) 2024 Mitchell Hashimoto and Ghostty contributors
 | | Files | Lines |
 |---|---:|---:|
 | Upstream `src/` (Zig) | 589 | 342401 |
-| Ported | - | 3452 |
+| Ported | - | 5370 |
 | Not applicable to a Windows port | - | 37082 |
-| Remaining | - | 301867 |
+| Remaining | - | 299949 |
 | ...of which partially ported | - | 1468 |
 
 Status values: `todo`, `wip`, `done`, `n/a`. A `wip` file counts
@@ -87,7 +87,7 @@ whole file's length.
 | `terminal/page.zig` | 4523 | todo |
 | `terminal/render.zig` | 2397 | todo |
 | `terminal/SelectionGesture.zig` | 2110 | todo |
-| `terminal/hash_map.zig` | 1918 | todo |
+| `terminal/hash_map.zig` | 1918 | done |
 | `terminal/Selection.zig` | 1676 | todo |
 | `terminal/color.zig` | 1468 | wip |
 | `terminal/style.zig` | 1240 | todo |
