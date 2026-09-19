@@ -55,6 +55,13 @@ typedef CellCountInt HyperlinkCountInt;
 typedef uint32_t GraphemeBytesInt;
 typedef uint32_t StringBytesInt;
 
+/* Round v up to the next multiple of alignment, which must be a power of
+ * two. Lives here rather than beside its first caller because every
+ * offset-based structure needs it to lay out its members. */
+inline size_t align_forward(size_t v, size_t alignment) {
+    return (v + alignment - 1) & ~(alignment - 1);
+}
+
 /* ─── base address helpers ───────────────────────────────────────────────── */
 
 struct OffsetBuf;

@@ -13,9 +13,9 @@ License: MIT, (c) 2024 Mitchell Hashimoto and Ghostty contributors
 | | Files | Lines |
 |---|---:|---:|
 | Upstream `src/` (Zig) | 589 | 342401 |
-| Ported | - | 2562 |
+| Ported | - | 3452 |
 | Not applicable to a Windows port | - | 37082 |
-| Remaining | - | 302757 |
+| Remaining | - | 301867 |
 | ...of which partially ported | - | 1468 |
 
 Status values: `todo`, `wip`, `done`, `n/a`. A `wip` file counts
@@ -95,7 +95,7 @@ whole file's length.
 | `terminal/Parser.zig` | 1116 | todo |
 | `terminal/sgr.zig` | 1114 | done |
 | `terminal/osc.zig` | 1074 | todo |
-| `terminal/ref_counted_set.zig` | 890 | todo |
+| `terminal/ref_counted_set.zig` | 890 | done |
 | `terminal/apc.zig` | 766 | todo |
 | `terminal/stream_continuation.zig` | 606 | todo |
 | `terminal/dcs.zig` | 571 | todo |

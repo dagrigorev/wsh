@@ -87,9 +87,7 @@ inline unsigned popcount64(uint64_t v) {
     return (unsigned)((v * 0x0101010101010101ULL) >> 56);
 }
 
-inline size_t align_forward(size_t v, size_t alignment) {
-    return (v + alignment - 1) & ~(alignment - 1);
-}
+/* align_forward now lives in size.hpp, beside the other layout helpers. */
 
 /* A full 64-bit mask of `n` ones. n must be 1..64; n==0 would shift by 64,
  * which is undefined in C++. */
