@@ -750,13 +750,14 @@ inline void hyperlink::PageEntry::free(Page *page) const {
 
 /* ─── page hyperlink operations ──────────────────────────────────────────── */
 
-/* Hash for the hyperlink map's keys, which are cell offsets.
+/* Hash for map keys that are cell offsets, used by both the grapheme map
+ * and the hyperlink map.
  *
  * A cell offset is always a multiple of sizeof(Cell), so its low bits are
  * zero. The map takes its bucket index from the low bits of the hash, so
  * using the offset directly would leave most buckets unreachable and pile
  * every key into a fraction of the table. Mixing first spreads them. */
-struct PageHyperlinkHash {
+struct PageCellKeyHash {
     uint64_t operator()(OffsetInt off) const {
         uint64_t x = (uint64_t)off + 0x9E3779B97F4A7C15ULL;
         x = (x ^ (x >> 30)) * 0xBF58476D1CE4E5B9ULL;
@@ -765,8 +766,8 @@ struct PageHyperlinkHash {
     }
 };
 
-inline uint64_t page_hyperlink_hash(OffsetInt off) {
-    return PageHyperlinkHash()(off);
+inline uint64_t page_cell_key_hash(OffsetInt off) {
+    return PageCellKeyHash()(off);
 }
 
 /* Copy bytes into the page's string storage, returning a slice.
@@ -833,7 +834,7 @@ inline bool page_set_cell_hyperlink(Page *p, CellCountInt x, CellCountInt y,
     Cell *c = p->get_cell(x, y);
     const OffsetInt cell_off = get_offset<Cell>(p->memory, c).offset;
 
-    if (!p->hyperlink_map.put(p->memory, page_hyperlink_hash(cell_off),
+    if (!p->hyperlink_map.put(p->memory, page_cell_key_hash(cell_off),
                               cell_off, link_id)) {
         p->hyperlink_set.release(p->memory, link_id);
         return false;
@@ -857,7 +858,7 @@ inline bool page_get_cell_hyperlink(Page *p, CellCountInt x, CellCountInt y,
 
     const OffsetInt cell_off = get_offset<Cell>(p->memory, c).offset;
     hyperlink::Id *link_id = p->hyperlink_map.get(
-        p->memory, page_hyperlink_hash(cell_off), cell_off);
+        p->memory, page_cell_key_hash(cell_off), cell_off);
     if (!link_id) return false;
 
     p->hyperlink_set.context.base = p->memory;
@@ -880,7 +881,7 @@ inline void page_clear_cell_hyperlink(Page *p, CellCountInt x, CellCountInt y) {
     if (!c->hyperlink()) return;
 
     const OffsetInt cell_off = get_offset<Cell>(p->memory, c).offset;
-    const uint64_t h = page_hyperlink_hash(cell_off);
+    const uint64_t h = page_cell_key_hash(cell_off);
 
     hyperlink::Id *link_id = p->hyperlink_map.get(p->memory, h, cell_off);
     if (link_id) {
@@ -889,12 +890,161 @@ inline void page_clear_cell_hyperlink(Page *p, CellCountInt x, CellCountInt y) {
         p->hyperlink_set.context.page = p;
 
         p->hyperlink_set.release(p->memory, *link_id);
-        p->hyperlink_map.remove(p->memory, h, cell_off, PageHyperlinkHash());
+        p->hyperlink_map.remove(p->memory, h, cell_off, PageCellKeyHash());
     }
 
     /* The row's hyperlink flag is a false-positive-only hint like styled, so
      * it is deliberately not cleared here. */
     c->set_hyperlink(false);
+}
+
+/* ─── page grapheme operations ───────────────────────────────────────────── */
+
+/* A cell holds one codepoint. Anything built from several — a base letter
+ * plus combining marks, a flag, an emoji with a modifier — keeps its first
+ * codepoint in the cell and the rest in the page's grapheme storage, found by
+ * the cell's offset.
+ *
+ * Splitting it this way keeps the common case free: a cell of plain text
+ * costs nothing extra, and only cells that actually need more pay for it. The
+ * cell's tag says which case it is, and the row carries a flag so operations
+ * that erase cells can skip grapheme cleanup entirely on rows that never had
+ * any.
+ *
+ * Appending reallocates, which is quadratic in the number of codepoints on
+ * one cell. Clusters are two or three codepoints in practice, so the simpler
+ * code is worth more than the saved copies. */
+
+/* The additional codepoints on a cell, beyond the one it holds directly.
+ * Returns false if the cell has none. */
+inline bool page_grapheme_codepoints(Page *p, CellCountInt x, CellCountInt y,
+                                     const uint32_t **out, uint32_t *out_len) {
+    if (!p) return false;
+
+    Cell *c = p->get_cell(x, y);
+    if (!c->has_grapheme()) return false;
+
+    const OffsetInt cell_off = get_offset<Cell>(p->memory, c).offset;
+    GraphemeSlice *slice = p->grapheme_map.get(
+        p->memory, page_cell_key_hash(cell_off), cell_off);
+    if (!slice || slice->len == 0) return false;
+
+    Offset<uint32_t> o;
+    o.offset = slice->offset;
+    *out = o.ptr(p->memory);
+    *out_len = slice->len;
+    return true;
+}
+
+/* Append a codepoint to a cell's grapheme cluster.
+ *
+ * Returns false and changes nothing if the grapheme storage or map is full;
+ * the cell keeps the codepoints it already had and still renders. */
+inline bool page_append_grapheme(Page *p, CellCountInt x, CellCountInt y,
+                                 uint32_t cp) {
+    if (!p) return false;
+
+    Cell *c = p->get_cell(x, y);
+    const OffsetInt cell_off = get_offset<Cell>(p->memory, c).offset;
+    const uint64_t h = page_cell_key_hash(cell_off);
+
+    const uint32_t *old_cps = nullptr;
+    uint32_t old_len = 0;
+    GraphemeSlice *existing = p->grapheme_map.get(p->memory, h, cell_off);
+    if (existing && existing->len > 0) {
+        Offset<uint32_t> o;
+        o.offset = existing->offset;
+        old_cps = o.ptr(p->memory);
+        old_len = existing->len;
+    }
+
+    uint32_t *dst = p->grapheme_alloc.alloc<uint32_t>(p->memory, old_len + 1);
+    if (!dst) return false;
+
+    for (uint32_t i = 0; i < old_len; i++) dst[i] = old_cps[i];
+    dst[old_len] = cp;
+
+    GraphemeSlice slice;
+    slice.offset = get_offset<uint32_t>(p->memory, dst).offset;
+    slice.len = old_len + 1;
+
+    if (!p->grapheme_map.put(p->memory, h, cell_off, slice)) {
+        p->grapheme_alloc.free(p->memory, dst, old_len + 1);
+        return false;
+    }
+
+    /* The old run is only released once the new one is safely in the map, so
+     * a failure above leaves the cell exactly as it was. */
+    if (old_len > 0) {
+        p->grapheme_alloc.free(p->memory, const_cast<uint32_t *>(old_cps), old_len);
+    }
+
+    c->set_content_tag(ContentTag::codepoint_grapheme);
+    p->get_row(y)->set_grapheme(true);
+    return true;
+}
+
+/* Drop a cell's extra codepoints, leaving the one in the cell itself. */
+inline void page_clear_grapheme(Page *p, CellCountInt x, CellCountInt y) {
+    if (!p) return;
+
+    Cell *c = p->get_cell(x, y);
+    if (!c->has_grapheme()) return;
+
+    const OffsetInt cell_off = get_offset<Cell>(p->memory, c).offset;
+    const uint64_t h = page_cell_key_hash(cell_off);
+
+    GraphemeSlice *slice = p->grapheme_map.get(p->memory, h, cell_off);
+    if (slice && slice->len > 0) {
+        Offset<uint32_t> o;
+        o.offset = slice->offset;
+        p->grapheme_alloc.free(p->memory, o.ptr(p->memory), slice->len);
+    }
+    p->grapheme_map.remove(p->memory, h, cell_off, PageCellKeyHash());
+
+    /* Back to an ordinary single-codepoint cell. The row's grapheme flag is a
+     * false-positive-only hint, so it stays set. */
+    c->set_content_tag(ContentTag::codepoint);
+}
+
+/* ─── erasing ────────────────────────────────────────────────────────────── */
+
+/* Erase a cell, releasing everything it referenced.
+ *
+ * Page::clear_cell only knows about styles, because graphemes and hyperlinks
+ * are reached through free functions declared after Page. This is the
+ * complete version and is what erase paths should call — dropping a cell
+ * without releasing its grapheme run or its link would strand both for the
+ * page's lifetime. */
+inline void page_erase_cell(Page *p, CellCountInt x, CellCountInt y) {
+    if (!p) return;
+    page_clear_grapheme(p, x, y);
+    page_clear_cell_hyperlink(p, x, y);
+    p->clear_cell_style(x, y);
+    *p->get_cell(x, y) = Cell();
+}
+
+/* Erase a whole row. */
+inline void page_erase_row(Page *p, CellCountInt y) {
+    if (!p) return;
+
+    /* The row flags are false-positive-only, so a row that never held a style,
+     * grapheme or link can skip the per-cell release work entirely. This is
+     * why those flags exist. */
+    Row *row = p->get_row(y);
+    const bool needs_release =
+        row->styled() || row->grapheme() || row->hyperlink();
+
+    if (needs_release) {
+        for (CellCountInt x = 0; x < p->capacity.cols; x++) {
+            page_erase_cell(p, x, y);
+        }
+    } else {
+        Cell *cells = p->get_cells(y);
+        for (CellCountInt x = 0; x < p->capacity.cols; x++) cells[x] = Cell();
+    }
+
+    row->set_dirty(true);
 }
 
 /* ─── closing the style/page cycle ───────────────────────────────────────── */
