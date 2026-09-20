@@ -703,6 +703,104 @@ inline bool screen_erase_display(Screen *s, int mode, bool selective) {
     return true;
 }
 
+
+/* ─── scrolling a region ─────────────────────────────────────────────────── */
+
+/* Whether every row of a screen range lives in one page.
+ *
+ * Worth asking because the answer decides which of two quite different
+ * operations runs. Rows inside a page move by swapping 64-bit handles and
+ * nothing else happens; rows spanning pages have to be copied, which means
+ * re-interning every style and link they carry. Most scroll regions are small
+ * and most pages hold hundreds of rows, so the cheap path is the usual one. */
+inline PageNode *screen_rows_in_one_page(Screen *s, CellCountInt top,
+                                         CellCountInt bot,
+                                         CellCountInt *page_top) {
+    Pin a = page_list_active_pin(&s->pages, 0, top);
+    Pin b = page_list_active_pin(&s->pages, 0, bot);
+    if (!a.valid() || !b.valid() || a.node != b.node) return nullptr;
+
+    *page_top = a.y;
+    return a.node;
+}
+
+/* Move the rows of a region up, blanking the ones that arrive at the bottom.
+ *
+ * This is the scroll that happens inside a screen, with no scrollback
+ * involved: what leaves the top of the region is gone. A caller that wants
+ * the departing line kept has to be the whole-screen case, which is not this
+ * function's business. */
+inline bool screen_scroll_region_up(Screen *s, CellCountInt top,
+                                    CellCountInt bot, CellCountInt n) {
+    if (n == 0 || top > bot || bot >= s->pages.rows) return false;
+
+    const CellCountInt count = (CellCountInt)(bot - top + 1);
+    if (n >= count) {
+        screen_clear_rows(s, top, bot, false);
+        return true;
+    }
+
+    CellCountInt page_top = 0;
+    PageNode *node = screen_rows_in_one_page(s, top, bot, &page_top);
+    if (node) {
+        page_scroll_up(&node->page, page_top,
+                       (CellCountInt)(page_top + count - 1), n);
+        screen_cursor_reload(s);
+        return true;
+    }
+
+    /* Across a page boundary the rows have to be copied, since a row's cells
+     * belong to the page they were allocated in. */
+    for (CellCountInt y = top; (CellCountInt)(y + n) <= bot; y++) {
+        Pin dst = page_list_active_pin(&s->pages, 0, y);
+        Pin src = page_list_active_pin(&s->pages, 0, (CellCountInt)(y + n));
+        if (!dst.valid() || !src.valid()) return false;
+        if (!page_clone_row(&dst.node->page, dst.y, &src.node->page, src.y)) {
+            return false;
+        }
+    }
+
+    screen_clear_rows(s, (CellCountInt)(bot - n + 1), bot, false);
+    screen_cursor_reload(s);
+    return true;
+}
+
+/* The same downwards: rows move toward the bottom and blank ones arrive at
+ * the top. What falls off the bottom of the region is gone. */
+inline bool screen_scroll_region_down(Screen *s, CellCountInt top,
+                                      CellCountInt bot, CellCountInt n) {
+    if (n == 0 || top > bot || bot >= s->pages.rows) return false;
+
+    const CellCountInt count = (CellCountInt)(bot - top + 1);
+    if (n >= count) {
+        screen_clear_rows(s, top, bot, false);
+        return true;
+    }
+
+    CellCountInt page_top = 0;
+    PageNode *node = screen_rows_in_one_page(s, top, bot, &page_top);
+    if (node) {
+        page_scroll_down(&node->page, page_top,
+                         (CellCountInt)(page_top + count - 1), n);
+        screen_cursor_reload(s);
+        return true;
+    }
+
+    for (CellCountInt y = bot; y >= (CellCountInt)(top + n); y--) {
+        Pin dst = page_list_active_pin(&s->pages, 0, y);
+        Pin src = page_list_active_pin(&s->pages, 0, (CellCountInt)(y - n));
+        if (!dst.valid() || !src.valid()) return false;
+        if (!page_clone_row(&dst.node->page, dst.y, &src.node->page, src.y)) {
+            return false;
+        }
+        if (y == 0) break;
+    }
+
+    screen_clear_rows(s, top, (CellCountInt)(top + n - 1), false);
+    screen_cursor_reload(s);
+    return true;
+}
+
 /* ─── resizing ───────────────────────────────────────────────────────────── */
 
 /* Drop the blank rows below the cursor before a reflow.

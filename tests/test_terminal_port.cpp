@@ -548,3 +548,430 @@ TEST(terminal, resizing_to_nothing_is_refused) {
 
     terminal_deinit(&t);
 }
+
+/* ─── scroll regions ─────────────────────────────────────────────────────── */
+
+/* Put a letter per row so a scroll can be read off. */
+static void label(Terminal *t, CellCountInt rows) {
+    for (CellCountInt y = 0; y < rows; y++) {
+        ASSERT_TRUE(screen_cursor_absolute(t->active, 0, y));
+        ASSERT_TRUE(terminal_print(t, (uint32_t)('A' + y), 1));
+    }
+}
+
+static bool rows_read(Terminal *t, const char *want) {
+    for (CellCountInt y = 0; want[y]; y++) {
+        Cell *c = screen_cell(t->active, 0, y);
+        const uint32_t got = c ? c->codepoint() : 0xFFFF;
+        const uint32_t expect = want[y] == '.' ? 0 : (uint32_t)want[y];
+        if (got != expect) return false;
+    }
+    return true;
+}
+
+TEST(region, defaults_to_the_whole_screen) {
+    Terminal t;
+    ASSERT_TRUE(terminal_init(&t, 10, 5, 0));
+
+    ASSERT_EQ(t.scroll_top, 0);
+    ASSERT_EQ(t.scroll_bot, 4);
+    ASSERT_TRUE(terminal_region_is_whole_screen(&t));
+
+    terminal_deinit(&t);
+}
+
+TEST(region, setting_one_homes_the_cursor) {
+    Terminal t;
+    ASSERT_TRUE(terminal_init(&t, 10, 6, 0));
+    ASSERT_TRUE(screen_cursor_absolute(t.active, 5, 4));
+
+    ASSERT_TRUE(terminal_set_scroll_region(&t, 1, 4));
+
+    ASSERT_EQ(t.scroll_top, 1);
+    ASSERT_EQ(t.scroll_bot, 4);
+    /* Programs set a region and then draw from the top without a separate
+     * positioning sequence. */
+    ASSERT_EQ(t.active->cursor.x, 0);
+    ASSERT_EQ(t.active->cursor.y, 0);
+
+    terminal_deinit(&t);
+}
+
+TEST(region, a_nonsense_region_is_ignored) {
+    Terminal t;
+    ASSERT_TRUE(terminal_init(&t, 10, 6, 0));
+    ASSERT_TRUE(terminal_set_scroll_region(&t, 1, 4));
+
+    /* Ignored entirely rather than clamped, which is what real terminals
+     * do. */
+    ASSERT_FALSE(terminal_set_scroll_region(&t, 4, 4));
+    ASSERT_FALSE(terminal_set_scroll_region(&t, 5, 2));
+    ASSERT_EQ(t.scroll_top, 1);
+    ASSERT_EQ(t.scroll_bot, 4);
+
+    terminal_deinit(&t);
+}
+
+TEST(region, a_line_feed_inside_a_region_scrolls_only_it) {
+    Terminal t;
+    ASSERT_TRUE(terminal_init(&t, 10, 6, 0));
+    label(&t, 6);
+
+    ASSERT_TRUE(terminal_set_scroll_region(&t, 2, 4));
+    ASSERT_TRUE(screen_cursor_absolute(t.active, 0, 4));
+    ASSERT_TRUE(terminal_linefeed(&t));
+
+    /* Rows outside the region do not move, which is the whole point of a
+     * region: a status line stays still while the rest scrolls. */
+    ASSERT_TRUE(rows_read(&t, "ABDE.F"));
+    ASSERT_EQ(t.active->cursor.y, 4);
+
+    terminal_deinit(&t);
+}
+
+TEST(region, a_line_feed_inside_a_region_makes_no_scrollback) {
+    Terminal t;
+    ASSERT_TRUE(terminal_init(&t, 10, 6, 0));
+    label(&t, 6);
+    ASSERT_TRUE(terminal_set_scroll_region(&t, 1, 4));
+    const size_t before = t.active->pages.row_count;
+
+    ASSERT_TRUE(screen_cursor_absolute(t.active, 0, 4));
+    ASSERT_TRUE(terminal_linefeed(&t));
+
+    /* The row that left the top of the region has not left the screen — the
+     * rows below the region are still showing. Keeping it would fill the
+     * history with the middle frames of a progress bar. */
+    ASSERT_EQ(t.active->pages.row_count, before);
+    ASSERT_EQ(page_list_max_scroll(&t.active->pages), 0u);
+
+    terminal_deinit(&t);
+}
+
+TEST(region, a_line_feed_with_the_whole_screen_still_makes_scrollback) {
+    Terminal t;
+    ASSERT_TRUE(terminal_init(&t, 10, 4, 0));
+    label(&t, 4);
+
+    ASSERT_TRUE(screen_cursor_absolute(t.active, 0, 3));
+    ASSERT_TRUE(terminal_linefeed(&t));
+
+    /* The distinction the whole thing turns on: with nothing set, the row
+     * leaving the top is the oldest thing shown and belongs in the
+     * history. */
+    ASSERT_EQ(page_list_max_scroll(&t.active->pages), 1u);
+    Pin old = page_list_pin(&t.active->pages, 0);
+    old.x = 0;
+    ASSERT_EQ(old.cell()->codepoint(), 'A');
+
+    terminal_deinit(&t);
+}
+
+TEST(region, a_line_feed_below_the_region_just_moves) {
+    Terminal t;
+    ASSERT_TRUE(terminal_init(&t, 10, 6, 0));
+    label(&t, 6);
+    ASSERT_TRUE(terminal_set_scroll_region(&t, 0, 3));
+
+    ASSERT_TRUE(screen_cursor_absolute(t.active, 0, 4));
+    ASSERT_TRUE(terminal_linefeed(&t));
+
+    /* A cursor left outside the region is not scrolling anything. */
+    ASSERT_TRUE(rows_read(&t, "ABCDEF"));
+    ASSERT_EQ(t.active->cursor.y, 5);
+
+    terminal_deinit(&t);
+}
+
+TEST(region, reverse_index_at_the_top_of_a_region) {
+    Terminal t;
+    ASSERT_TRUE(terminal_init(&t, 10, 6, 0));
+    label(&t, 6);
+
+    ASSERT_TRUE(terminal_set_scroll_region(&t, 2, 5));
+    ASSERT_TRUE(screen_cursor_absolute(t.active, 0, 2));
+    ASSERT_TRUE(terminal_reverse_index(&t));
+
+    /* The region's rows move down, its last row falls off, and rows outside
+     * it are untouched. */
+    ASSERT_TRUE(rows_read(&t, "AB.CDE"));
+    ASSERT_EQ(t.active->cursor.y, 2);
+
+    terminal_deinit(&t);
+}
+
+/* ─── the page boundary ──────────────────────────────────────────────────── */
+
+TEST(region, scrolling_works_across_a_page_boundary) {
+    Terminal t;
+    ASSERT_TRUE(terminal_init(&t, 10, 6, 0));
+
+    /* Push the screen across a page seam by filling the first page. Rows
+     * inside a page move by swapping handles; rows spanning pages have to be
+     * copied, and both must produce the same thing. */
+    const CellCountInt per_page = t.primary.pages.first->page.capacity.rows;
+    for (CellCountInt i = 0; i < (CellCountInt)(per_page - 3); i++) {
+        ASSERT_TRUE(screen_cursor_absolute(t.active, 0, t.rows - 1));
+        ASSERT_TRUE(terminal_linefeed(&t));
+    }
+
+    label(&t, 6);
+    Pin a = page_list_active_pin(&t.active->pages, 0, 0);
+    Pin b = page_list_active_pin(&t.active->pages, 0, 5);
+    ASSERT_TRUE(a.node != b.node);
+
+    ASSERT_TRUE(terminal_set_scroll_region(&t, 1, 5));
+    ASSERT_TRUE(screen_cursor_absolute(t.active, 0, 5));
+    ASSERT_TRUE(terminal_linefeed(&t));
+
+    ASSERT_TRUE(rows_read(&t, "ACDEF."));
+
+    terminal_deinit(&t);
+}
+
+TEST(region, styles_survive_a_scroll_across_a_page_boundary) {
+    Terminal t;
+    ASSERT_TRUE(terminal_init(&t, 10, 6, 0));
+
+    const CellCountInt per_page = t.primary.pages.first->page.capacity.rows;
+    for (CellCountInt i = 0; i < (CellCountInt)(per_page - 3); i++) {
+        ASSERT_TRUE(screen_cursor_absolute(t.active, 0, t.rows - 1));
+        ASSERT_TRUE(terminal_linefeed(&t));
+    }
+
+    /* Copying a row between pages re-interns everything it carries, so the
+     * style has to come out the other side even though its ID will not. */
+    ASSERT_TRUE(screen_cursor_absolute(t.active, 0, 5));
+    t.active->cursor.style.fg_color.tag = style::StyleColor::Tag::palette;
+    t.active->cursor.style.fg_color.palette = 33;
+    ASSERT_TRUE(terminal_print(&t, 'z', 1));
+    t.active->cursor.style = style::Style();
+
+    ASSERT_TRUE(terminal_set_scroll_region(&t, 1, 5));
+    ASSERT_TRUE(screen_cursor_absolute(t.active, 0, 5));
+    ASSERT_TRUE(terminal_linefeed(&t));
+
+    Pin moved = page_list_active_pin(&t.active->pages, 0, 4);
+    ASSERT_EQ(moved.node->page.get_cell(0, moved.y)->codepoint(), 'z');
+    ASSERT_EQ(moved.node->page.get_cell_style(0, moved.y).fg_color.palette, 33);
+
+    terminal_deinit(&t);
+}
+
+/* ─── origin mode ────────────────────────────────────────────────────────── */
+
+TEST(origin, off_addresses_the_whole_screen) {
+    Terminal t;
+    ASSERT_TRUE(terminal_init(&t, 10, 6, 0));
+    ASSERT_TRUE(terminal_set_scroll_region(&t, 2, 5));
+
+    ASSERT_TRUE(terminal_cursor_position(&t, 0, 0));
+    ASSERT_EQ(t.active->cursor.y, 0);
+
+    terminal_deinit(&t);
+}
+
+TEST(origin, on_addresses_the_region) {
+    Terminal t;
+    ASSERT_TRUE(terminal_init(&t, 10, 6, 0));
+    ASSERT_TRUE(terminal_set_scroll_region(&t, 2, 5));
+    t.modes.origin = true;
+
+    /* A program that set a region can address it from the top without
+     * knowing where on the screen it put it. */
+    ASSERT_TRUE(terminal_cursor_position(&t, 0, 0));
+    ASSERT_EQ(t.active->cursor.y, 2);
+
+    ASSERT_TRUE(terminal_cursor_position(&t, 0, 2));
+    ASSERT_EQ(t.active->cursor.y, 4);
+
+    terminal_deinit(&t);
+}
+
+TEST(origin, on_keeps_the_cursor_inside_the_region) {
+    Terminal t;
+    ASSERT_TRUE(terminal_init(&t, 10, 6, 0));
+    ASSERT_TRUE(terminal_set_scroll_region(&t, 2, 4));
+    t.modes.origin = true;
+
+    ASSERT_TRUE(terminal_cursor_position(&t, 0, 99));
+    ASSERT_EQ(t.active->cursor.y, t.scroll_bot);
+
+    terminal_deinit(&t);
+}
+
+/* ─── inserting and deleting lines ───────────────────────────────────────── */
+
+TEST(lines, inserting_pushes_the_rest_down) {
+    Terminal t;
+    ASSERT_TRUE(terminal_init(&t, 10, 6, 0));
+    label(&t, 6);
+
+    ASSERT_TRUE(screen_cursor_absolute(t.active, 3, 2));
+    ASSERT_TRUE(terminal_insert_lines(&t, 1));
+
+    ASSERT_TRUE(rows_read(&t, "AB.CDE"));
+    /* Left margin afterwards, which is in the standard and which programs
+     * rely on. */
+    ASSERT_EQ(t.active->cursor.x, 0);
+    ASSERT_EQ(t.active->cursor.y, 2);
+
+    terminal_deinit(&t);
+}
+
+TEST(lines, deleting_pulls_the_rest_up) {
+    Terminal t;
+    ASSERT_TRUE(terminal_init(&t, 10, 6, 0));
+    label(&t, 6);
+
+    ASSERT_TRUE(screen_cursor_absolute(t.active, 0, 1));
+    ASSERT_TRUE(terminal_delete_lines(&t, 2));
+
+    ASSERT_TRUE(rows_read(&t, "ADEF.."));
+
+    terminal_deinit(&t);
+}
+
+TEST(lines, inserting_stops_at_the_bottom_of_the_region) {
+    Terminal t;
+    ASSERT_TRUE(terminal_init(&t, 10, 6, 0));
+    label(&t, 6);
+    ASSERT_TRUE(terminal_set_scroll_region(&t, 1, 4));
+
+    ASSERT_TRUE(screen_cursor_absolute(t.active, 0, 1));
+    ASSERT_TRUE(terminal_insert_lines(&t, 1));
+
+    /* Row 5 is outside the region and does not move; the region's last row
+     * falls off rather than pushing past it. */
+    ASSERT_TRUE(rows_read(&t, "A.BCDF"));
+
+    terminal_deinit(&t);
+}
+
+TEST(lines, a_cursor_outside_the_region_does_nothing) {
+    Terminal t;
+    ASSERT_TRUE(terminal_init(&t, 10, 6, 0));
+    label(&t, 6);
+    ASSERT_TRUE(terminal_set_scroll_region(&t, 1, 3));
+
+    ASSERT_TRUE(screen_cursor_absolute(t.active, 0, 5));
+    ASSERT_TRUE(terminal_insert_lines(&t, 2));
+    ASSERT_TRUE(terminal_delete_lines(&t, 2));
+
+    ASSERT_TRUE(rows_read(&t, "ABCDEF"));
+
+    terminal_deinit(&t);
+}
+
+TEST(lines, more_than_the_region_holds_clears_it) {
+    Terminal t;
+    ASSERT_TRUE(terminal_init(&t, 10, 6, 0));
+    label(&t, 6);
+    ASSERT_TRUE(terminal_set_scroll_region(&t, 1, 4));
+
+    ASSERT_TRUE(screen_cursor_absolute(t.active, 0, 1));
+    ASSERT_TRUE(terminal_delete_lines(&t, 99));
+
+    ASSERT_TRUE(rows_read(&t, "A....F"));
+
+    terminal_deinit(&t);
+}
+
+/* ─── inserting and deleting characters ──────────────────────────────────── */
+
+TEST(chars, inserting_pushes_the_line_right) {
+    Terminal t;
+    ASSERT_TRUE(terminal_init(&t, 10, 4, 0));
+    write_text(&t, "abcdef");
+
+    ASSERT_TRUE(screen_cursor_absolute(t.active, 2, 0));
+    ASSERT_TRUE(terminal_insert_chars(&t, 2));
+
+    char got[32];
+    read_row(&t, 0, got, sizeof(got));
+    ASSERT_TRUE(strcmp(got, "ab  cdef") == 0);
+
+    terminal_deinit(&t);
+}
+
+TEST(chars, inserting_drops_what_falls_off_the_end) {
+    Terminal t;
+    ASSERT_TRUE(terminal_init(&t, 6, 4, 0));
+    write_text(&t, "abcdef");
+
+    ASSERT_TRUE(screen_cursor_absolute(t.active, 0, 0));
+    ASSERT_TRUE(terminal_insert_chars(&t, 2));
+
+    char got[32];
+    read_row(&t, 0, got, sizeof(got));
+    ASSERT_TRUE(strcmp(got, "  abcd") == 0);
+
+    terminal_deinit(&t);
+}
+
+TEST(chars, deleting_pulls_the_line_left) {
+    Terminal t;
+    ASSERT_TRUE(terminal_init(&t, 10, 4, 0));
+    write_text(&t, "abcdef");
+
+    ASSERT_TRUE(screen_cursor_absolute(t.active, 1, 0));
+    ASSERT_TRUE(terminal_delete_chars(&t, 2));
+
+    char got[32];
+    read_row(&t, 0, got, sizeof(got));
+    ASSERT_TRUE(strcmp(got, "adef") == 0);
+
+    terminal_deinit(&t);
+}
+
+TEST(chars, deleting_more_than_the_line_holds_clears_it) {
+    Terminal t;
+    ASSERT_TRUE(terminal_init(&t, 10, 4, 0));
+    write_text(&t, "abcdef");
+
+    ASSERT_TRUE(screen_cursor_absolute(t.active, 2, 0));
+    ASSERT_TRUE(terminal_delete_chars(&t, 99));
+
+    char got[32];
+    read_row(&t, 0, got, sizeof(got));
+    ASSERT_TRUE(strcmp(got, "ab") == 0);
+
+    terminal_deinit(&t);
+}
+
+TEST(chars, inserting_and_deleting_carry_styles) {
+    Terminal t;
+    ASSERT_TRUE(terminal_init(&t, 10, 4, 0));
+
+    t.active->cursor.style.fg_color.tag = style::StyleColor::Tag::palette;
+    t.active->cursor.style.fg_color.palette = 21;
+    write_text(&t, "xyz");
+    t.active->cursor.style = style::Style();
+
+    ASSERT_TRUE(screen_cursor_absolute(t.active, 0, 0));
+    ASSERT_TRUE(terminal_insert_chars(&t, 2));
+
+    Pin p = page_list_active_pin(&t.active->pages, 0, 0);
+    ASSERT_EQ(p.node->page.get_cell(2, p.y)->codepoint(), 'x');
+    ASSERT_EQ(p.node->page.get_cell_style(2, p.y).fg_color.palette, 21);
+
+    terminal_deinit(&t);
+}
+
+/* ─── resizing ───────────────────────────────────────────────────────────── */
+
+TEST(region, is_reset_by_a_resize) {
+    Terminal t;
+    ASSERT_TRUE(terminal_init(&t, 20, 10, 0));
+    ASSERT_TRUE(terminal_set_scroll_region(&t, 3, 7));
+
+    ASSERT_TRUE(terminal_resize(&t, 20, 5));
+
+    /* Its bounds are row numbers, and a region referring to rows the screen
+     * no longer has would leave a program scrolling something invisible. */
+    ASSERT_EQ(t.scroll_top, 0);
+    ASSERT_EQ(t.scroll_bot, 4);
+    ASSERT_TRUE(terminal_region_is_whole_screen(&t));
+
+    terminal_deinit(&t);
+}

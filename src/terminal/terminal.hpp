@@ -28,9 +28,10 @@
  * nothing runs on it yet.
  *
  * PARTIAL PORT. The terminal, its modes, both screens, printing, the C0
- * control characters and tab stops are here. Scroll regions, the escape
- * sequence dispatch and the rest of the modes are not, so the ledger records
- * Terminal.zig as `wip`.
+ * control characters, tab stops, scroll regions and the insert and delete
+ * operations are here. The character sets, the rest of the modes and the
+ * escape sequence dispatch are not, so the ledger records Terminal.zig as
+ * `wip`.
  */
 
 #pragma once
@@ -70,12 +71,16 @@ struct Modes {
      * different answer. */
     bool cursor_keys;
 
+    /* DECOM (?6): the cursor is positioned relative to the scroll region
+     * rather than to the screen, and cannot leave it. */
+    bool origin;
+
     /* ?1049: the alternate screen is showing. Kept as a mode because that is
      * how a program asks about it, but the truth is which screen is active. */
     bool alt_screen;
 
     Modes()
-        : wraparound(true), insert(false), cursor_keys(false),
+        : wraparound(true), insert(false), cursor_keys(false), origin(false),
           alt_screen(false) {}
 };
 
@@ -103,13 +108,18 @@ struct Terminal {
     CellCountInt cols;
     CellCountInt rows;
 
+    /* DECSTBM, inclusive and counted from the top of the screen. Set to the
+     * whole screen until a program says otherwise. */
+    CellCountInt scroll_top;
+    CellCountInt scroll_bot;
+
     /* One byte per column: is there a tab stop here. A bitset would be eight
      * times smaller and a great deal less obvious, for a few hundred bytes. */
     uint8_t *tabs;
 
     Terminal()
         : primary(), alternate(), active(nullptr), modes(), cols(0), rows(0),
-          tabs(nullptr) {}
+          scroll_top(0), scroll_bot(0), tabs(nullptr) {}
 };
 
 /* Put tab stops back to every eighth column. */
@@ -155,10 +165,17 @@ inline bool terminal_init(Terminal *t, CellCountInt cols, CellCountInt rows,
     }
     terminal_reset_tabs(t);
 
+    t->scroll_top = 0;
+    t->scroll_bot = (CellCountInt)(rows - 1);
+
     t->active = &t->primary;
     t->active->auto_wrap = t->modes.wraparound;
     return true;
 }
+
+/* Defined with the scroll region, which is what decides where home is. */
+inline bool terminal_cursor_position(Terminal *t, CellCountInt x,
+                                     CellCountInt y);
 
 /* ─── modes ──────────────────────────────────────────────────────────────── */
 
@@ -255,43 +272,6 @@ inline void terminal_carriage_return(Terminal *t) {
     screen_cursor_absolute(s, 0, s->cursor.y);
 }
 
-/* LF, and IND — down a row, scrolling the screen if there is nowhere to go.
- *
- * The column does not change, which is what distinguishes a line feed from a
- * new line: a terminal in its default state answers LF with the cursor
- * directly below where it was, and it is the CR that brings it back. */
-inline bool terminal_linefeed(Terminal *t) {
-    return screen_cursor_down_scroll(t->active);
-}
-
-/* RI — up a row. At the top of the screen the display scrolls down and a
- * blank line appears above, which is what makes a program able to insert a
- * line at the top without redrawing everything below it. */
-inline bool terminal_reverse_index(Terminal *t) {
-    Screen *s = t->active;
-    if (s->cursor.y > 0) {
-        screen_cursor_up(s, 1);
-        return true;
-    }
-
-    /* Everything on the screen moves down one, and the top row is blank.
-     * Unlike a line feed this loses the bottom row rather than putting it in
-     * the scrollback: it never left the top of the screen. */
-    for (CellCountInt y = (CellCountInt)(t->rows - 1); y > 0; y--) {
-        Pin dst = page_list_active_pin(&s->pages, 0, y);
-        Pin src = page_list_active_pin(&s->pages, 0, (CellCountInt)(y - 1));
-        if (!dst.valid() || !src.valid()) return false;
-        if (!page_clone_row(&dst.node->page, dst.y, &src.node->page, src.y)) {
-            return false;
-        }
-    }
-
-    screen_cursor_absolute(s, s->cursor.x, 0);
-    screen_clear_cells(s, 0, 0, t->cols, false);
-    screen_cursor_reload(s);
-    return true;
-}
-
 /* BS — back one column, stopping at the left margin. */
 inline void terminal_backspace(Terminal *t) {
     screen_cursor_left(t->active, 1);
@@ -357,6 +337,219 @@ inline void terminal_reverse_tab(Terminal *t, CellCountInt n) {
     }
 }
 
+
+/* ─── the scroll region ──────────────────────────────────────────────────── */
+
+/* DECSTBM — the rows a scroll moves.
+ *
+ * Both bounds are inclusive and counted from the top of the screen. A region
+ * is what lets a program keep a status line still while the rest of the
+ * display scrolls, and it is why a line feed cannot simply mean "move down or
+ * grow the list".
+ *
+ * Both bounds are counted from zero, like every other coordinate here. The
+ * escape sequence numbers its rows from one; converting is the job of
+ * whatever parses it, and doing it here would mean one of the two bounds
+ * being in different units from the cursor beside it.
+ *
+ * Setting a region homes the cursor, which is in the standard and is relied
+ * on: programs set the region and then draw from the top without a separate
+ * positioning sequence. A region that makes no sense — bottom above top, or
+ * off the screen — is ignored entirely rather than clamped, which is what
+ * every real terminal does. */
+inline bool terminal_set_scroll_region(Terminal *t, CellCountInt top,
+                                       CellCountInt bot) {
+    if (bot >= t->rows) bot = (CellCountInt)(t->rows - 1);
+    if (top >= bot) return false;
+
+    t->scroll_top = top;
+    t->scroll_bot = bot;
+
+    terminal_cursor_position(t, 0, 0);
+    return true;
+}
+
+/* Whether the region is the whole screen.
+ *
+ * This is the distinction a line feed turns on. With the whole screen
+ * scrolling, the row leaving the top is the oldest thing the terminal has
+ * shown and belongs in the scrollback. With a region set, the row leaving the
+ * top of the region is being scrolled past by a program that is managing its
+ * own display, and it has not left the screen at all — the rows below the
+ * region are still showing. Putting it in the scrollback would fill the
+ * history with the middle frames of a progress bar. */
+inline bool terminal_region_is_whole_screen(const Terminal *t) {
+    return t->scroll_top == 0 && t->scroll_bot == (CellCountInt)(t->rows - 1);
+}
+
+/* Where row 0 is as far as the cursor is concerned.
+ *
+ * DECOM makes positioning relative to the region, so a program that sets a
+ * region can address it from 1 without knowing where on the screen it put it.
+ * With the mode off the screen is addressed as a whole, region or not. */
+inline CellCountInt terminal_origin_row(const Terminal *t) {
+    return t->modes.origin ? t->scroll_top : 0;
+}
+
+inline CellCountInt terminal_origin_bottom(const Terminal *t) {
+    return t->modes.origin ? t->scroll_bot : (CellCountInt)(t->rows - 1);
+}
+
+/* CUP — put the cursor somewhere, in whatever coordinates are in force. */
+inline bool terminal_cursor_position(Terminal *t, CellCountInt x,
+                                     CellCountInt y) {
+    const CellCountInt base = terminal_origin_row(t);
+    const CellCountInt last = terminal_origin_bottom(t);
+
+    size_t row = (size_t)base + y;
+    if (row > (size_t)last) row = last;
+    if (x >= t->cols) x = (CellCountInt)(t->cols - 1);
+
+    return screen_cursor_absolute(t->active, x, (CellCountInt)row);
+}
+
+/* ─── line feeds inside a region ─────────────────────────────────────────── */
+
+/* LF and IND, now that a region can exist.
+ *
+ * Three cases, and they are genuinely different. At the bottom of a region
+ * that is not the whole screen the region scrolls and the departing row is
+ * dropped. At the bottom of a full-screen region the list grows and the
+ * departing row becomes scrollback. Anywhere else the cursor just moves
+ * down — including below the region, where a cursor that has been left
+ * outside is not scrolling anything. */
+inline bool terminal_linefeed(Terminal *t) {
+    Screen *s = t->active;
+
+    if (s->cursor.y == t->scroll_bot) {
+        if (terminal_region_is_whole_screen(t)) {
+            return screen_cursor_down_scroll(s);
+        }
+        if (!screen_scroll_region_up(s, t->scroll_top, t->scroll_bot, 1)) {
+            return false;
+        }
+        return screen_cursor_absolute(s, s->cursor.x, s->cursor.y);
+    }
+
+    if (s->cursor.y + 1 >= t->rows) return true;
+    screen_cursor_down(s, 1);
+    return true;
+}
+
+/* RI — the same in reverse, at the top of the region. */
+inline bool terminal_reverse_index(Terminal *t) {
+    Screen *s = t->active;
+
+    if (s->cursor.y != t->scroll_top) {
+        if (s->cursor.y > 0) screen_cursor_up(s, 1);
+        return true;
+    }
+
+    /* Unlike a line feed there is no scrollback case: the row falling off the
+     * bottom of the region never left the top of the screen, so it was never
+     * history. */
+    if (!screen_scroll_region_down(s, t->scroll_top, t->scroll_bot, 1)) {
+        return false;
+    }
+    return screen_cursor_absolute(s, s->cursor.x, s->cursor.y);
+}
+
+/* ─── inserting and deleting lines ───────────────────────────────────────── */
+
+/* IL — open n blank lines here, pushing the rest of the region down.
+ *
+ * A cursor outside the region does nothing at all, which is the standard and
+ * is what stops a program that has left the cursor somewhere else from
+ * disturbing a display it is not addressing. */
+inline bool terminal_insert_lines(Terminal *t, CellCountInt n) {
+    Screen *s = t->active;
+    if (n == 0) n = 1;
+    if (s->cursor.y < t->scroll_top || s->cursor.y > t->scroll_bot) return true;
+
+    /* The region being scrolled is from the cursor down, not the whole one:
+     * what is above the cursor stays where it is. */
+    if (!screen_scroll_region_down(s, s->cursor.y, t->scroll_bot, n)) {
+        return false;
+    }
+
+    /* Both of these leave the cursor at the left margin, which is in the
+     * standard and which programs rely on. */
+    return screen_cursor_absolute(s, 0, s->cursor.y);
+}
+
+/* DL — remove n lines here, pulling the rest of the region up. */
+inline bool terminal_delete_lines(Terminal *t, CellCountInt n) {
+    Screen *s = t->active;
+    if (n == 0) n = 1;
+    if (s->cursor.y < t->scroll_top || s->cursor.y > t->scroll_bot) return true;
+
+    if (!screen_scroll_region_up(s, s->cursor.y, t->scroll_bot, n)) {
+        return false;
+    }
+    return screen_cursor_absolute(s, 0, s->cursor.y);
+}
+
+/* ─── inserting and deleting characters ──────────────────────────────────── */
+
+/* ICH — open n blank cells at the cursor, pushing the rest of the line right.
+ * What falls off the end is gone. */
+inline bool terminal_insert_chars(Terminal *t, CellCountInt n) {
+    Screen *s = t->active;
+    if (n == 0) n = 1;
+
+    const CellCountInt x = s->cursor.x;
+    if ((size_t)x + n >= (size_t)t->cols) {
+        return screen_clear_cells(s, s->cursor.y, x,
+                                  (CellCountInt)(t->cols - x), false);
+    }
+
+    Pin p = page_list_active_pin(&s->pages, 0, s->cursor.y);
+    if (!p.valid()) return false;
+    Page *page = &p.node->page;
+
+    for (size_t i = t->cols; i-- > (size_t)x + n;) {
+        page_erase_cell(page, (CellCountInt)i, p.y);
+        if (!page_clone_cell(page, (CellCountInt)i, p.y, page,
+                             (CellCountInt)(i - n), p.y)) {
+            return false;
+        }
+    }
+
+    const bool ok = screen_clear_cells(s, s->cursor.y, x, n, false);
+    screen_cursor_reload(s);
+    return ok;
+}
+
+/* DCH — remove n cells at the cursor, pulling the rest of the line left and
+ * blanking what is vacated at the right. */
+inline bool terminal_delete_chars(Terminal *t, CellCountInt n) {
+    Screen *s = t->active;
+    if (n == 0) n = 1;
+
+    const CellCountInt x = s->cursor.x;
+    if ((size_t)x + n >= (size_t)t->cols) {
+        return screen_clear_cells(s, s->cursor.y, x,
+                                  (CellCountInt)(t->cols - x), false);
+    }
+
+    Pin p = page_list_active_pin(&s->pages, 0, s->cursor.y);
+    if (!p.valid()) return false;
+    Page *page = &p.node->page;
+
+    for (size_t i = x; i + n < (size_t)t->cols; i++) {
+        page_erase_cell(page, (CellCountInt)i, p.y);
+        if (!page_clone_cell(page, (CellCountInt)i, p.y, page,
+                             (CellCountInt)(i + n), p.y)) {
+            return false;
+        }
+    }
+
+    const bool ok = screen_clear_cells(s, s->cursor.y,
+                                       (CellCountInt)(t->cols - n), n, false);
+    screen_cursor_reload(s);
+    return ok;
+}
+
 /* ─── resizing ───────────────────────────────────────────────────────────── */
 
 /* Resize both screens.
@@ -384,6 +577,12 @@ inline bool terminal_resize(Terminal *t, CellCountInt cols, CellCountInt rows) {
 
     t->cols = cols;
     t->rows = rows;
+
+    /* The region goes back to the whole screen. Its bounds are row numbers,
+     * and a region that referred to rows the screen no longer has would leave
+     * a program scrolling something it cannot see. */
+    t->scroll_top = 0;
+    t->scroll_bot = (CellCountInt)(rows - 1);
     return true;
 }
 
