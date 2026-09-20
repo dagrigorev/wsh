@@ -22,8 +22,8 @@
  * buffer, which is what the application currently runs on. This is the ported
  * one, built on the ported page list, and the two are unrelated for now.
  *
- * PARTIAL PORT. The screen, the cursor, its movement and writing text are
- * here. Erasing, selections, the alternate screen and the saved cursor are
+ * PARTIAL PORT. The screen, the cursor, its movement, writing text and
+ * erasing are here. Selections, the alternate screen and the saved cursor are
  * not, so the ledger records Screen.zig as `wip`.
  */
 
@@ -422,6 +422,196 @@ inline bool screen_write_ascii(Screen *s, const char *text, size_t len) {
             return false;
         }
     }
+    return true;
+}
+
+
+/* ─── erasing ────────────────────────────────────────────────────────────── */
+
+/* What an erased cell looks like.
+ *
+ * Erasing is not quite blanking. A program that sets a background colour and
+ * then clears the screen expects the screen to be that colour, so an erased
+ * cell carries the current background — which is why erasing with a colour
+ * set paints rather than empties.
+ *
+ * The colour goes straight into the cell rather than through a style. Cell
+ * has tags for exactly this, and a screenful of erased cells is the case they
+ * were added for: a page's style set is small and an erase touching every
+ * cell would otherwise want a slot for a style whose only content is a
+ * background. */
+inline Cell screen_erased_cell(const Screen *s) {
+    Cell c;
+    s->cursor.style.bg_cell(&c);
+    return c;
+}
+
+/* Erase a run of cells on one screen row.
+ *
+ * selective honours the protection bit, which is what DECSCA marks cells with
+ * and what the selective erases are for. Ordinary erases ignore it.
+ *
+ * The range is widened to whole wide characters at both ends. Erasing one
+ * half of a pair and leaving the other is the same broken state that writing
+ * over one half would produce, and it is no more acceptable for arriving by a
+ * different route. */
+inline bool screen_clear_cells(Screen *s, CellCountInt y, CellCountInt x,
+                               CellCountInt count, bool selective) {
+    if (y >= s->pages.rows || count == 0) return false;
+
+    Pin p = page_list_active_pin(&s->pages, 0, y);
+    if (!p.valid()) return false;
+
+    Page *page = &p.node->page;
+    const CellCountInt cols = s->pages.cols;
+    if (x >= cols) return false;
+
+    size_t from = x;
+    size_t to = (size_t)x + count;
+    if (to > (size_t)cols) to = cols;
+
+    if (from > 0 && page->get_cell((CellCountInt)from, p.y)->wide() ==
+                        Wide::spacer_tail) {
+        from--;
+    }
+    if (to < (size_t)cols && page->get_cell((CellCountInt)(to - 1), p.y)->wide() ==
+                                 Wide::wide) {
+        to++;
+    }
+
+    const Cell blank = screen_erased_cell(s);
+
+    for (size_t i = from; i < to; i++) {
+        Cell *c = page->get_cell((CellCountInt)i, p.y);
+        if (selective && c->protect()) continue;
+
+        page_erase_cell(page, (CellCountInt)i, p.y);
+        *page->get_cell((CellCountInt)i, p.y) = blank;
+    }
+
+    Row *row = page->get_row(p.y);
+    row->set_dirty(true);
+
+    /* An erase that reaches the end of the row ends the line there: what it
+     * continued into is gone. The next row's continuation flag is left as it
+     * was, since nothing reads it — a reflow follows the wrap flag on the row
+     * that wraps, not the mark on the row that was wrapped into. */
+    if (to >= (size_t)cols && !selective) row->set_wrap(false);
+
+    return true;
+}
+
+/* Erase whole screen rows, top to bot inclusive. */
+inline void screen_clear_rows(Screen *s, CellCountInt top, CellCountInt bot,
+                              bool selective) {
+    if (bot >= s->pages.rows) bot = (CellCountInt)(s->pages.rows - 1);
+    for (CellCountInt y = top; y <= bot; y++) {
+        screen_clear_cells(s, y, 0, s->pages.cols, selective);
+    }
+}
+
+/* EL — erase in line.
+ *
+ * 0 erases from the cursor to the end of the row, 1 from the start of the row
+ * to the cursor, 2 the whole row. All three include the cell the cursor is
+ * on, which is what the standard says and what every program expects. */
+inline bool screen_erase_line(Screen *s, int mode, bool selective) {
+    const CellCountInt cols = s->pages.cols;
+    const CellCountInt x = s->cursor.x;
+    const CellCountInt y = s->cursor.y;
+
+    bool ok;
+    switch (mode) {
+        case 0:
+            ok = screen_clear_cells(s, y, x, (CellCountInt)(cols - x), selective);
+            break;
+        case 1:
+            ok = screen_clear_cells(s, y, 0, (CellCountInt)(x + 1), selective);
+            break;
+        case 2:
+            ok = screen_clear_cells(s, y, 0, cols, selective);
+            break;
+        default:
+            return false;
+    }
+
+    /* Erasing where the cursor sits gives it somewhere to write again, so a
+     * wrap it was waiting to do is no longer pending. */
+    if (ok) s->cursor.pending_wrap = false;
+
+    screen_cursor_reload(s);
+    return ok;
+}
+
+/* ECH — erase n characters from the cursor, without moving it.
+ *
+ * Unlike EL this does not end the line: it clears a hole in the middle of
+ * one, and what follows the hole is still part of the same line. */
+inline bool screen_erase_chars(Screen *s, CellCountInt n, bool selective) {
+    if (n == 0) n = 1;
+
+    const CellCountInt cols = s->pages.cols;
+    const CellCountInt x = s->cursor.x;
+    const size_t count = (size_t)n > (size_t)(cols - x) ? (size_t)(cols - x) : n;
+
+    Pin p = page_list_active_pin(&s->pages, 0, s->cursor.y);
+    if (!p.valid()) return false;
+    const bool wrapped = p.row()->wrap();
+
+    const bool ok = screen_clear_cells(s, s->cursor.y, x, (CellCountInt)count,
+                                       selective);
+    if (ok) {
+        if (wrapped) p.row()->set_wrap(true);
+        s->cursor.pending_wrap = false;
+    }
+
+    screen_cursor_reload(s);
+    return ok;
+}
+
+/* ED — erase in display.
+ *
+ * 0 erases from the cursor to the bottom of the screen, 1 from the top to the
+ * cursor, 2 the whole screen. 3 is the xterm extension that throws away the
+ * scrollback as well, and it is the only one that destroys anything a user
+ * could still have scrolled back to see. */
+inline bool screen_erase_display(Screen *s, int mode, bool selective) {
+    const CellCountInt rows = s->pages.rows;
+    const CellCountInt cols = s->pages.cols;
+    const CellCountInt y = s->cursor.y;
+
+    switch (mode) {
+        case 0:
+            screen_clear_cells(s, y, s->cursor.x,
+                               (CellCountInt)(cols - s->cursor.x), selective);
+            if (y + 1 < rows) {
+                screen_clear_rows(s, (CellCountInt)(y + 1),
+                                  (CellCountInt)(rows - 1), selective);
+            }
+            break;
+
+        case 1:
+            if (y > 0) screen_clear_rows(s, 0, (CellCountInt)(y - 1), selective);
+            screen_clear_cells(s, y, 0, (CellCountInt)(s->cursor.x + 1),
+                               selective);
+            break;
+
+        case 2:
+            screen_clear_rows(s, 0, (CellCountInt)(rows - 1), selective);
+            break;
+
+        case 3:
+            /* The screen itself is left alone; only what has scrolled off it
+             * goes. */
+            page_list_erase_scrollback(&s->pages);
+            break;
+
+        default:
+            return false;
+    }
+
+    s->cursor.pending_wrap = false;
+    screen_cursor_reload(s);
     return true;
 }
 

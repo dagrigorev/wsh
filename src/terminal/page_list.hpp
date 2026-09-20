@@ -841,6 +841,31 @@ inline PageNode *page_list_split(PageList *l, PageNode *node, CellCountInt at) {
     return tail;
 }
 
+/* Throw away everything above the active area.
+ *
+ * This is ED 3, the one erase that destroys something a user could still have
+ * scrolled back to see. The screen itself is untouched.
+ *
+ * The active area rarely begins where a page does, so the page it begins in
+ * is split first and the pages before the tail are then dropped whole. That
+ * is what splitting was for: without it the choice would be between keeping a
+ * page of scrollback that was supposed to be gone and rebuilding the list. */
+inline void page_list_erase_scrollback(PageList *l) {
+    if (page_list_max_scroll(l) == 0) return;
+
+    Pin start = page_list_active_start(l);
+    if (!start.valid()) return;
+
+    PageNode *keep = start.node;
+    if (start.y > 0) {
+        PageNode *tail = page_list_split(l, start.node, start.y);
+        if (!tail) return;
+        keep = tail;
+    }
+
+    while (l->first && l->first != keep) page_list_drop_first(l);
+}
+
 /* ─── resizing ───────────────────────────────────────────────────────────── */
 
 /* Change the screen's height without touching its contents.

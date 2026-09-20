@@ -871,3 +871,457 @@ TEST(write, a_wide_character_on_a_one_column_screen_is_refused) {
 
     screen_deinit(&s);
 }
+
+/* ─── erasing ────────────────────────────────────────────────────────────── */
+
+static void fill_screen(Screen *s, char c) {
+    for (CellCountInt y = 0; y < s->pages.rows; y++) {
+        for (CellCountInt x = 0; x < s->pages.cols; x++) {
+            ASSERT_TRUE(screen_cursor_absolute(s, x, y));
+            ASSERT_TRUE(screen_write_codepoint(s, (uint32_t)c, 1));
+        }
+    }
+}
+
+TEST(erase, to_the_end_of_the_line) {
+    Screen s;
+    ASSERT_TRUE(screen_init(&s, 8, 3, 0));
+    ASSERT_TRUE(screen_write_ascii(&s, "abcdefgh", 8));
+    ASSERT_TRUE(screen_cursor_absolute(&s, 3, 0));
+
+    ASSERT_TRUE(screen_erase_line(&s, 0, false));
+
+    char got[32];
+    read_row(&s, 0, got, sizeof(got));
+    ASSERT_TRUE(strcmp(got, "abc") == 0);
+
+    screen_deinit(&s);
+}
+
+TEST(erase, to_the_start_of_the_line) {
+    Screen s;
+    ASSERT_TRUE(screen_init(&s, 8, 3, 0));
+    ASSERT_TRUE(screen_write_ascii(&s, "abcdefgh", 8));
+    ASSERT_TRUE(screen_cursor_absolute(&s, 3, 0));
+
+    ASSERT_TRUE(screen_erase_line(&s, 1, false));
+
+    /* The cursor's own cell goes too, which is what the standard says and
+     * what every program expects. */
+    ASSERT_EQ(screen_cell(&s, 3, 0)->codepoint(), 0u);
+    ASSERT_EQ(screen_cell(&s, 4, 0)->codepoint(), 'e');
+
+    screen_deinit(&s);
+}
+
+TEST(erase, the_whole_line) {
+    Screen s;
+    ASSERT_TRUE(screen_init(&s, 8, 3, 0));
+    ASSERT_TRUE(screen_write_ascii(&s, "abcdefgh", 8));
+    ASSERT_TRUE(screen_cursor_absolute(&s, 3, 0));
+
+    ASSERT_TRUE(screen_erase_line(&s, 2, false));
+
+    char got[32];
+    read_row(&s, 0, got, sizeof(got));
+    ASSERT_TRUE(strcmp(got, "") == 0);
+
+    screen_deinit(&s);
+}
+
+TEST(erase, characters_without_moving_the_cursor) {
+    Screen s;
+    ASSERT_TRUE(screen_init(&s, 8, 3, 0));
+    ASSERT_TRUE(screen_write_ascii(&s, "abcdefgh", 8));
+    ASSERT_TRUE(screen_cursor_absolute(&s, 2, 0));
+
+    ASSERT_TRUE(screen_erase_chars(&s, 3, false));
+
+    /* A hole in the middle, and the cursor still where it was. */
+    ASSERT_EQ(screen_cell(&s, 1, 0)->codepoint(), 'b');
+    ASSERT_EQ(screen_cell(&s, 2, 0)->codepoint(), 0u);
+    ASSERT_EQ(screen_cell(&s, 4, 0)->codepoint(), 0u);
+    ASSERT_EQ(screen_cell(&s, 5, 0)->codepoint(), 'f');
+    ASSERT_EQ(s.cursor.x, 2);
+
+    screen_deinit(&s);
+}
+
+TEST(erase, characters_past_the_end_of_the_row_is_clamped) {
+    Screen s;
+    ASSERT_TRUE(screen_init(&s, 8, 3, 0));
+    ASSERT_TRUE(screen_write_ascii(&s, "abcdefgh", 8));
+    ASSERT_TRUE(screen_cursor_absolute(&s, 6, 0));
+
+    ASSERT_TRUE(screen_erase_chars(&s, 100, false));
+
+    char got[32];
+    read_row(&s, 0, got, sizeof(got));
+    ASSERT_TRUE(strcmp(got, "abcdef") == 0);
+
+    screen_deinit(&s);
+}
+
+/* ─── the line's shape ───────────────────────────────────────────────────── */
+
+TEST(erase, to_the_end_of_a_line_ends_it) {
+    Screen s;
+    ASSERT_TRUE(screen_init(&s, 4, 3, 0));
+    ASSERT_TRUE(screen_write_ascii(&s, "abcdef", 6));
+    ASSERT_TRUE(screen_row(&s, 0)->wrap());
+
+    ASSERT_TRUE(screen_cursor_absolute(&s, 2, 0));
+    ASSERT_TRUE(screen_erase_line(&s, 0, false));
+
+    /* What the line continued into is gone, so it does not continue. Leaving
+     * the flag would have a later resize join the row to something that is
+     * no longer there. */
+    ASSERT_FALSE(screen_row(&s, 0)->wrap());
+
+    screen_deinit(&s);
+}
+
+TEST(erase, characters_do_not_end_the_line) {
+    Screen s;
+    ASSERT_TRUE(screen_init(&s, 4, 3, 0));
+    ASSERT_TRUE(screen_write_ascii(&s, "abcdef", 6));
+    ASSERT_TRUE(screen_row(&s, 0)->wrap());
+
+    ASSERT_TRUE(screen_cursor_absolute(&s, 1, 0));
+    ASSERT_TRUE(screen_erase_chars(&s, 2, false));
+
+    /* A hole in the middle of a line is still the middle of a line. */
+    ASSERT_TRUE(screen_row(&s, 0)->wrap());
+
+    screen_deinit(&s);
+}
+
+TEST(erase, clears_a_pending_wrap) {
+    Screen s;
+    ASSERT_TRUE(screen_init(&s, 4, 3, 0));
+    ASSERT_TRUE(screen_write_ascii(&s, "abcd", 4));
+    ASSERT_TRUE(s.cursor.pending_wrap);
+
+    ASSERT_TRUE(screen_erase_line(&s, 0, false));
+
+    /* There is somewhere to write again, so the wrap that was waiting is not
+     * waiting any more. */
+    ASSERT_FALSE(s.cursor.pending_wrap);
+    ASSERT_TRUE(screen_write_codepoint(&s, 'z', 1));
+    ASSERT_EQ(screen_cell(&s, 3, 0)->codepoint(), 'z');
+    ASSERT_FALSE(screen_row(&s, 0)->wrap());
+
+    screen_deinit(&s);
+}
+
+/* ─── the background ─────────────────────────────────────────────────────── */
+
+TEST(erase, an_erased_cell_takes_the_current_background) {
+    Screen s;
+    ASSERT_TRUE(screen_init(&s, 8, 3, 0));
+    ASSERT_TRUE(screen_write_ascii(&s, "abcdefgh", 8));
+
+    s.cursor.style.bg_color.tag = style::StyleColor::Tag::palette;
+    s.cursor.style.bg_color.palette = 4;
+    ASSERT_TRUE(screen_cursor_absolute(&s, 0, 0));
+    ASSERT_TRUE(screen_erase_line(&s, 2, false));
+
+    /* A program that sets a colour and clears the screen expects the screen
+     * to be that colour. */
+    Cell *c = screen_cell(&s, 2, 0);
+    ASSERT_TRUE(c->content_tag() == ContentTag::bg_color_palette);
+    ASSERT_EQ(c->color_palette(), 4);
+    ASSERT_TRUE(c->has_bg_color());
+
+    screen_deinit(&s);
+}
+
+TEST(erase, a_background_costs_no_style_slot) {
+    Screen s;
+    ASSERT_TRUE(screen_init(&s, 8, 3, 0));
+
+    s.cursor.style.bg_color.tag = style::StyleColor::Tag::rgb;
+    s.cursor.style.bg_color.rgb = RGB(10, 20, 30);
+    ASSERT_TRUE(screen_erase_display(&s, 2, false));
+
+    /* The colour goes into the cell rather than through the style set, which
+     * is what keeps an erase of the whole screen from wanting a style slot
+     * for something whose only content is a background. */
+    ASSERT_EQ(s.pages.first->page.style_count(), 0u);
+    Cell *c = screen_cell(&s, 3, 1);
+    ASSERT_TRUE(c->content_tag() == ContentTag::bg_color_rgb);
+    ASSERT_TRUE(c->color_rgb().eql(RGB(10, 20, 30)));
+
+    screen_deinit(&s);
+}
+
+TEST(erase, releases_what_the_cells_held) {
+    Screen s;
+    ASSERT_TRUE(screen_init(&s, 8, 3, 0));
+
+    s.cursor.style.fg_color.tag = style::StyleColor::Tag::palette;
+    s.cursor.style.fg_color.palette = 9;
+    ASSERT_TRUE(screen_write_ascii(&s, "abcd", 4));
+    ASSERT_TRUE(screen_append_grapheme(&s, 0x0301));
+    ASSERT_EQ(s.pages.first->page.style_count(), 1u);
+
+    s.cursor.style = style::Style();
+    ASSERT_TRUE(screen_cursor_absolute(&s, 0, 0));
+    ASSERT_TRUE(screen_erase_line(&s, 2, false));
+
+    /* Erasing is not just blanking the cells: what they referred to has to go
+     * back, or a screen cleared often enough runs its page out of styles. */
+    ASSERT_EQ(s.pages.first->page.style_count(), 0u);
+    Pin p = page_list_active_pin(&s.pages, 0, 0);
+    ASSERT_FALSE(p.node->page.get_cell(3, p.y)->has_grapheme());
+
+    screen_deinit(&s);
+}
+
+/* ─── wide characters ────────────────────────────────────────────────────── */
+
+TEST(erase, takes_both_halves_of_a_wide_character) {
+    Screen s;
+    ASSERT_TRUE(screen_init(&s, 8, 3, 0));
+    ASSERT_TRUE(screen_cursor_absolute(&s, 2, 0));
+    ASSERT_TRUE(screen_write_codepoint(&s, 0x4E2D, 2));
+
+    /* Erasing from column 3 catches the spacer, and its lead has to go with
+     * it — a spacer with nothing in front of it is the same broken state
+     * whichever way it is arrived at. */
+    ASSERT_TRUE(screen_cursor_absolute(&s, 3, 0));
+    ASSERT_TRUE(screen_erase_line(&s, 0, false));
+
+    ASSERT_EQ(screen_cell(&s, 2, 0)->codepoint(), 0u);
+    ASSERT_TRUE(screen_cell(&s, 2, 0)->wide() == Wide::narrow);
+
+    screen_deinit(&s);
+}
+
+TEST(erase, takes_the_spacer_of_a_wide_character_at_the_edge) {
+    Screen s;
+    ASSERT_TRUE(screen_init(&s, 8, 3, 0));
+    ASSERT_TRUE(screen_cursor_absolute(&s, 2, 0));
+    ASSERT_TRUE(screen_write_codepoint(&s, 0x4E2D, 2));
+
+    /* The other direction: erasing up to and including the lead must not
+     * leave its spacer behind. */
+    ASSERT_TRUE(screen_cursor_absolute(&s, 2, 0));
+    ASSERT_TRUE(screen_erase_line(&s, 1, false));
+
+    ASSERT_TRUE(screen_cell(&s, 3, 0)->wide() == Wide::narrow);
+    ASSERT_EQ(screen_cell(&s, 3, 0)->codepoint(), 0u);
+
+    screen_deinit(&s);
+}
+
+/* ─── protection ─────────────────────────────────────────────────────────── */
+
+TEST(erase, a_selective_erase_spares_protected_cells) {
+    Screen s;
+    ASSERT_TRUE(screen_init(&s, 8, 3, 0));
+    ASSERT_TRUE(screen_write_ascii(&s, "abcdefgh", 8));
+
+    Pin p = page_list_active_pin(&s.pages, 0, 0);
+    p.node->page.get_cell(2, p.y)->set_protect(true);
+    p.node->page.get_cell(3, p.y)->set_protect(true);
+
+    ASSERT_TRUE(screen_cursor_absolute(&s, 0, 0));
+    ASSERT_TRUE(screen_erase_line(&s, 2, true));
+
+    char got[32];
+    read_row(&s, 0, got, sizeof(got));
+    ASSERT_TRUE(strcmp(got, "  cd") == 0);
+
+    screen_deinit(&s);
+}
+
+TEST(erase, an_ordinary_erase_ignores_protection) {
+    Screen s;
+    ASSERT_TRUE(screen_init(&s, 8, 3, 0));
+    ASSERT_TRUE(screen_write_ascii(&s, "abcdefgh", 8));
+
+    Pin p = page_list_active_pin(&s.pages, 0, 0);
+    p.node->page.get_cell(2, p.y)->set_protect(true);
+
+    ASSERT_TRUE(screen_cursor_absolute(&s, 0, 0));
+    ASSERT_TRUE(screen_erase_line(&s, 2, false));
+
+    char got[32];
+    read_row(&s, 0, got, sizeof(got));
+    ASSERT_TRUE(strcmp(got, "") == 0);
+
+    screen_deinit(&s);
+}
+
+/* ─── the display ────────────────────────────────────────────────────────── */
+
+TEST(erase, display_to_the_bottom) {
+    Screen s;
+    ASSERT_TRUE(screen_init(&s, 4, 4, 0));
+    fill_screen(&s, 'x');
+    ASSERT_TRUE(screen_cursor_absolute(&s, 2, 1));
+
+    ASSERT_TRUE(screen_erase_display(&s, 0, false));
+
+    char got[32];
+    read_row(&s, 0, got, sizeof(got));
+    ASSERT_TRUE(strcmp(got, "xxxx") == 0);
+    read_row(&s, 1, got, sizeof(got));
+    ASSERT_TRUE(strcmp(got, "xx") == 0);
+    read_row(&s, 2, got, sizeof(got));
+    ASSERT_TRUE(strcmp(got, "") == 0);
+    read_row(&s, 3, got, sizeof(got));
+    ASSERT_TRUE(strcmp(got, "") == 0);
+
+    screen_deinit(&s);
+}
+
+TEST(erase, display_to_the_top) {
+    Screen s;
+    ASSERT_TRUE(screen_init(&s, 4, 4, 0));
+    fill_screen(&s, 'x');
+    ASSERT_TRUE(screen_cursor_absolute(&s, 1, 2));
+
+    ASSERT_TRUE(screen_erase_display(&s, 1, false));
+
+    char got[32];
+    read_row(&s, 0, got, sizeof(got));
+    ASSERT_TRUE(strcmp(got, "") == 0);
+    read_row(&s, 2, got, sizeof(got));
+    ASSERT_TRUE(strcmp(got, "  xx") == 0);
+    read_row(&s, 3, got, sizeof(got));
+    ASSERT_TRUE(strcmp(got, "xxxx") == 0);
+
+    screen_deinit(&s);
+}
+
+TEST(erase, the_whole_display) {
+    Screen s;
+    ASSERT_TRUE(screen_init(&s, 4, 4, 0));
+    fill_screen(&s, 'x');
+
+    ASSERT_TRUE(screen_erase_display(&s, 2, false));
+
+    for (CellCountInt y = 0; y < 4; y++) {
+        char got[32];
+        read_row(&s, y, got, sizeof(got));
+        ASSERT_TRUE(strcmp(got, "") == 0);
+    }
+
+    screen_deinit(&s);
+}
+
+TEST(erase, the_display_keeps_the_scrollback) {
+    Screen s;
+    ASSERT_TRUE(screen_init(&s, 4, 3, 0));
+
+    ASSERT_TRUE(screen_write_ascii(&s, "old", 3));
+    for (int i = 0; i < 5; i++) {
+        ASSERT_TRUE(screen_cursor_absolute(&s, 0, s.cursor.y));
+        ASSERT_TRUE(screen_cursor_down_scroll(&s));
+    }
+    const size_t before = page_list_max_scroll(&s.pages);
+    ASSERT_TRUE(before > 0u);
+
+    ASSERT_TRUE(screen_erase_display(&s, 2, false));
+
+    /* Clearing the screen does not throw away what scrolled off it. */
+    ASSERT_EQ(page_list_max_scroll(&s.pages), before);
+    Pin old = page_list_pin(&s.pages, 0);
+    old.x = 0;
+    ASSERT_EQ(old.cell()->codepoint(), 'o');
+
+    screen_deinit(&s);
+}
+
+/* ─── the scrollback ─────────────────────────────────────────────────────── */
+
+TEST(erase, the_scrollback_and_nothing_else) {
+    Screen s;
+    ASSERT_TRUE(screen_init(&s, 4, 3, 0));
+
+    for (int i = 0; i < 10; i++) {
+        ASSERT_TRUE(screen_cursor_absolute(&s, 0, s.cursor.y));
+        ASSERT_TRUE(screen_write_codepoint(&s, (uint32_t)('0' + i), 1));
+        ASSERT_TRUE(screen_cursor_down_scroll(&s));
+    }
+    ASSERT_TRUE(page_list_max_scroll(&s.pages) > 0u);
+
+    ASSERT_TRUE(screen_erase_display(&s, 3, false));
+
+    /* Nothing above the screen is left, and the screen is untouched. */
+    ASSERT_EQ(page_list_max_scroll(&s.pages), 0u);
+    ASSERT_EQ(s.pages.row_count, 3u);
+    ASSERT_EQ(screen_cell(&s, 0, 0)->codepoint(), '8');
+    ASSERT_EQ(screen_cell(&s, 0, 1)->codepoint(), '9');
+
+    screen_deinit(&s);
+}
+
+TEST(erase, the_scrollback_leaves_the_cursor_working) {
+    Screen s;
+    ASSERT_TRUE(screen_init(&s, 4, 3, 0));
+    for (int i = 0; i < 10; i++) {
+        ASSERT_TRUE(screen_cursor_absolute(&s, 0, s.cursor.y));
+        ASSERT_TRUE(screen_cursor_down_scroll(&s));
+    }
+
+    ASSERT_TRUE(screen_cursor_absolute(&s, 1, 1));
+    ASSERT_TRUE(screen_erase_display(&s, 3, false));
+
+    /* Pages were freed, and the cursor's cached pointers were addresses
+     * inside them. */
+    ASSERT_TRUE(s.cursor.page_cell != nullptr);
+    ASSERT_TRUE(screen_write_codepoint(&s, 'k', 1));
+    ASSERT_EQ(screen_cell(&s, 1, 1)->codepoint(), 'k');
+
+    screen_deinit(&s);
+}
+
+TEST(erase, the_scrollback_when_there_is_none) {
+    Screen s;
+    ASSERT_TRUE(screen_init(&s, 4, 3, 0));
+    ASSERT_TRUE(screen_write_ascii(&s, "ab", 2));
+
+    ASSERT_TRUE(screen_erase_display(&s, 3, false));
+
+    ASSERT_EQ(s.pages.row_count, 3u);
+    ASSERT_EQ(screen_cell(&s, 0, 0)->codepoint(), 'a');
+
+    screen_deinit(&s);
+}
+
+TEST(erase, an_unknown_mode_is_refused) {
+    Screen s;
+    ASSERT_TRUE(screen_init(&s, 4, 3, 0));
+    fill_screen(&s, 'x');
+
+    ASSERT_FALSE(screen_erase_display(&s, 9, false));
+    ASSERT_FALSE(screen_erase_line(&s, 9, false));
+
+    char got[32];
+    read_row(&s, 0, got, sizeof(got));
+    ASSERT_TRUE(strcmp(got, "xxxx") == 0);
+
+    screen_deinit(&s);
+}
+
+TEST(erase, characters_to_the_end_of_a_wrapped_row_keep_the_wrap) {
+    Screen s;
+    ASSERT_TRUE(screen_init(&s, 4, 3, 0));
+    ASSERT_TRUE(screen_write_ascii(&s, "abcdef", 6));
+    ASSERT_TRUE(screen_row(&s, 0)->wrap());
+
+    /* ECH reaching the right edge still is not the end of the line: the row
+     * below carries on from it, and a resize must still join them. */
+    ASSERT_TRUE(screen_cursor_absolute(&s, 1, 0));
+    ASSERT_TRUE(screen_erase_chars(&s, 10, false));
+
+    ASSERT_TRUE(screen_row(&s, 0)->wrap());
+    ASSERT_EQ(screen_cell(&s, 0, 0)->codepoint(), 'a');
+    ASSERT_EQ(screen_cell(&s, 3, 0)->codepoint(), 0u);
+    ASSERT_EQ(screen_cell(&s, 0, 1)->codepoint(), 'e');
+
+    screen_deinit(&s);
+}
