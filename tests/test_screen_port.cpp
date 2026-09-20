@@ -1325,3 +1325,388 @@ TEST(erase, characters_to_the_end_of_a_wrapped_row_keep_the_wrap) {
 
     screen_deinit(&s);
 }
+
+/* ─── selections ─────────────────────────────────────────────────────────── */
+
+/* Write text at the cursor, wrapping the way output does. */
+static void put_line(Screen *s, CellCountInt y, const char *text) {
+    ASSERT_TRUE(screen_cursor_absolute(s, 0, y));
+    ASSERT_TRUE(screen_write_ascii(s, text, strlen(text)));
+}
+
+static Pin at(Screen *s, CellCountInt x, CellCountInt y) {
+    return page_list_active_pin(&s->pages, x, y);
+}
+
+TEST(selection, selecting_and_clearing) {
+    Screen s;
+    ASSERT_TRUE(screen_init(&s, 10, 4, 0));
+
+    ASSERT_FALSE(s.selection.active);
+    screen_select(&s, at(&s, 1, 0), at(&s, 4, 1), false);
+
+    ASSERT_TRUE(s.selection.active);
+    /* Both ends are tracked, so the list will maintain them. */
+    ASSERT_TRUE(s.pages.tracked != nullptr);
+
+    screen_select_clear(&s);
+    ASSERT_FALSE(s.selection.active);
+
+    screen_deinit(&s);
+}
+
+TEST(selection, contains_a_run_across_rows) {
+    Screen s;
+    ASSERT_TRUE(screen_init(&s, 10, 4, 0));
+    screen_select(&s, at(&s, 3, 0), at(&s, 5, 2), false);
+
+    ASSERT_FALSE(screen_selection_contains(&s, at(&s, 2, 0)));
+    ASSERT_TRUE(screen_selection_contains(&s, at(&s, 3, 0)));
+    ASSERT_TRUE(screen_selection_contains(&s, at(&s, 9, 0)));
+
+    /* A middle row is selected end to end. */
+    ASSERT_TRUE(screen_selection_contains(&s, at(&s, 0, 1)));
+    ASSERT_TRUE(screen_selection_contains(&s, at(&s, 9, 1)));
+
+    ASSERT_TRUE(screen_selection_contains(&s, at(&s, 5, 2)));
+    ASSERT_FALSE(screen_selection_contains(&s, at(&s, 6, 2)));
+    ASSERT_FALSE(screen_selection_contains(&s, at(&s, 0, 3)));
+
+    screen_deinit(&s);
+}
+
+TEST(selection, dragging_upwards_selects_the_same_thing) {
+    Screen s;
+    ASSERT_TRUE(screen_init(&s, 10, 4, 0));
+
+    /* Selecting upwards is ordinary, so the ends arrive the other way round
+     * and everything that needs them in order asks for them in order. */
+    screen_select(&s, at(&s, 5, 2), at(&s, 3, 0), false);
+
+    Pin tl, br;
+    ASSERT_TRUE(screen_selection_ordered(&s, &tl, &br));
+    ASSERT_EQ(tl.x, 3);
+    ASSERT_EQ(br.x, 5);
+    ASSERT_TRUE(screen_selection_contains(&s, at(&s, 0, 1)));
+    ASSERT_FALSE(screen_selection_contains(&s, at(&s, 2, 0)));
+
+    screen_deinit(&s);
+}
+
+TEST(selection, a_rectangle_keeps_its_columns) {
+    Screen s;
+    ASSERT_TRUE(screen_init(&s, 10, 4, 0));
+    screen_select(&s, at(&s, 2, 0), at(&s, 5, 2), true);
+
+    /* A block is the columns between its edges on every row, not everything
+     * from one corner to the other. */
+    ASSERT_TRUE(screen_selection_contains(&s, at(&s, 2, 1)));
+    ASSERT_TRUE(screen_selection_contains(&s, at(&s, 5, 1)));
+    ASSERT_FALSE(screen_selection_contains(&s, at(&s, 1, 1)));
+    ASSERT_FALSE(screen_selection_contains(&s, at(&s, 6, 1)));
+    ASSERT_FALSE(screen_selection_contains(&s, at(&s, 9, 0)));
+
+    screen_deinit(&s);
+}
+
+TEST(selection, a_rectangle_dragged_leftwards_still_covers_its_columns) {
+    Screen s;
+    ASSERT_TRUE(screen_init(&s, 10, 4, 0));
+    screen_select(&s, at(&s, 6, 0), at(&s, 2, 2), true);
+
+    ASSERT_TRUE(screen_selection_contains(&s, at(&s, 4, 1)));
+    ASSERT_FALSE(screen_selection_contains(&s, at(&s, 7, 1)));
+
+    screen_deinit(&s);
+}
+
+/* ─── reading it out ─────────────────────────────────────────────────────── */
+
+TEST(selection, text_of_one_row) {
+    Screen s;
+    ASSERT_TRUE(screen_init(&s, 20, 4, 0));
+    put_line(&s, 0, "hello world");
+
+    screen_select(&s, at(&s, 0, 0), at(&s, 4, 0), false);
+
+    char got[64];
+    ASSERT_EQ(screen_selection_text(&s, got, sizeof(got)), 5u);
+    ASSERT_TRUE(strcmp(got, "hello") == 0);
+
+    screen_deinit(&s);
+}
+
+TEST(selection, text_across_hard_line_ends) {
+    Screen s;
+    ASSERT_TRUE(screen_init(&s, 20, 4, 0));
+    put_line(&s, 0, "one");
+    put_line(&s, 1, "two");
+
+    screen_select(&s, at(&s, 0, 0), at(&s, 2, 1), false);
+
+    char got[64];
+    screen_selection_text(&s, got, sizeof(got));
+    ASSERT_TRUE(strcmp(got, "one\ntwo") == 0);
+
+    screen_deinit(&s);
+}
+
+TEST(selection, a_soft_wrap_is_not_a_line_ending) {
+    Screen s;
+    ASSERT_TRUE(screen_init(&s, 5, 4, 0));
+
+    /* Written as one line, broken across rows by the screen's width. Pasting
+     * it back should give what the program printed, not the shape the screen
+     * happened to break it into. */
+    put_line(&s, 0, "abcdefghij");
+    ASSERT_TRUE(screen_row(&s, 0)->wrap());
+
+    screen_select(&s, at(&s, 0, 0), at(&s, 4, 1), false);
+
+    char got[64];
+    screen_selection_text(&s, got, sizeof(got));
+    ASSERT_TRUE(strcmp(got, "abcdefghij") == 0);
+
+    screen_deinit(&s);
+}
+
+TEST(selection, trailing_blanks_are_dropped) {
+    Screen s;
+    ASSERT_TRUE(screen_init(&s, 20, 4, 0));
+    put_line(&s, 0, "short");
+    put_line(&s, 1, "next");
+
+    screen_select(&s, at(&s, 0, 0), at(&s, 19, 1), false);
+
+    /* The blanks after a line are the rest of the screen, not spaces anybody
+     * typed. */
+    char got[64];
+    screen_selection_text(&s, got, sizeof(got));
+    ASSERT_TRUE(strcmp(got, "short\nnext") == 0);
+
+    screen_deinit(&s);
+}
+
+TEST(selection, a_blank_row_between_lines_is_kept) {
+    Screen s;
+    ASSERT_TRUE(screen_init(&s, 20, 4, 0));
+    put_line(&s, 0, "a");
+    put_line(&s, 2, "b");
+
+    screen_select(&s, at(&s, 0, 0), at(&s, 0, 2), false);
+
+    char got[64];
+    screen_selection_text(&s, got, sizeof(got));
+    ASSERT_TRUE(strcmp(got, "a\n\nb") == 0);
+
+    screen_deinit(&s);
+}
+
+TEST(selection, a_rectangle_is_all_line_endings) {
+    Screen s;
+    ASSERT_TRUE(screen_init(&s, 5, 4, 0));
+    put_line(&s, 0, "abcdefghij");
+
+    /* Its rows are not joined to each other in any sense, whatever the wrap
+     * flags say, because the shape is what the user asked for. */
+    screen_select(&s, at(&s, 1, 0), at(&s, 3, 1), true);
+
+    char got[64];
+    screen_selection_text(&s, got, sizeof(got));
+    ASSERT_TRUE(strcmp(got, "bcd\nghi") == 0);
+
+    screen_deinit(&s);
+}
+
+TEST(selection, text_includes_combining_marks) {
+    Screen s;
+    ASSERT_TRUE(screen_init(&s, 20, 4, 0));
+    ASSERT_TRUE(screen_cursor_absolute(&s, 0, 0));
+    ASSERT_TRUE(screen_write_codepoint(&s, 'e', 1));
+    ASSERT_TRUE(screen_append_grapheme(&s, 0x0301));
+
+    screen_select(&s, at(&s, 0, 0), at(&s, 0, 0), false);
+
+    /* The rest of a cluster lives in the page rather than the cell, and it is
+     * as much a part of the character as the codepoint that does not. */
+    char got[64];
+    ASSERT_EQ(screen_selection_text(&s, got, sizeof(got)), 3u);
+    ASSERT_TRUE(strcmp(got, "e\xcc\x81") == 0);
+
+    screen_deinit(&s);
+}
+
+TEST(selection, text_of_a_wide_character_is_one_character) {
+    Screen s;
+    ASSERT_TRUE(screen_init(&s, 20, 4, 0));
+    ASSERT_TRUE(screen_cursor_absolute(&s, 0, 0));
+    ASSERT_TRUE(screen_write_codepoint(&s, 0x4E2D, 2));
+
+    screen_select(&s, at(&s, 0, 0), at(&s, 1, 0), false);
+
+    /* Two cells, one character: the spacer is not text. */
+    char got[64];
+    ASSERT_EQ(screen_selection_text(&s, got, sizeof(got)), 3u);
+    ASSERT_TRUE(strcmp(got, "\xe4\xb8\xad") == 0);
+
+    screen_deinit(&s);
+}
+
+TEST(selection, text_stops_at_the_buffer_it_was_given) {
+    Screen s;
+    ASSERT_TRUE(screen_init(&s, 20, 4, 0));
+    put_line(&s, 0, "abcdefghij");
+    screen_select(&s, at(&s, 0, 0), at(&s, 9, 0), false);
+
+    char got[5];
+    const size_t n = screen_selection_text(&s, got, sizeof(got));
+    ASSERT_TRUE(n < sizeof(got));
+    ASSERT_EQ(got[n], '\0');
+    ASSERT_TRUE(strncmp(got, "abcd", n) == 0);
+
+    screen_deinit(&s);
+}
+
+TEST(selection, no_selection_gives_nothing) {
+    Screen s;
+    ASSERT_TRUE(screen_init(&s, 20, 4, 0));
+    put_line(&s, 0, "text");
+
+    char got[64];
+    ASSERT_EQ(screen_selection_text(&s, got, sizeof(got)), 0u);
+    ASSERT_TRUE(strcmp(got, "") == 0);
+    ASSERT_FALSE(screen_selection_contains(&s, at(&s, 0, 0)));
+
+    screen_deinit(&s);
+}
+
+/* ─── selecting by line ──────────────────────────────────────────────────── */
+
+TEST(selection, a_line_is_what_was_printed) {
+    Screen s;
+    ASSERT_TRUE(screen_init(&s, 5, 4, 0));
+    put_line(&s, 0, "abcdefghijkl");
+
+    /* Three rows on screen, one line as far as anyone printing it was
+     * concerned. Selecting from the middle row takes the whole thing. */
+    ASSERT_TRUE(screen_select_line(&s, at(&s, 2, 1)));
+
+    char got[64];
+    screen_selection_text(&s, got, sizeof(got));
+    ASSERT_TRUE(strcmp(got, "abcdefghijkl") == 0);
+
+    screen_deinit(&s);
+}
+
+TEST(selection, a_line_stops_at_a_hard_end) {
+    Screen s;
+    ASSERT_TRUE(screen_init(&s, 20, 4, 0));
+    put_line(&s, 0, "before");
+    put_line(&s, 1, "middle");
+    put_line(&s, 2, "after");
+
+    ASSERT_TRUE(screen_select_line(&s, at(&s, 1, 1)));
+
+    char got[64];
+    screen_selection_text(&s, got, sizeof(got));
+    ASSERT_TRUE(strcmp(got, "middle") == 0);
+
+    screen_deinit(&s);
+}
+
+TEST(selection, selecting_everything_includes_the_scrollback) {
+    Screen s;
+    ASSERT_TRUE(screen_init(&s, 20, 3, 0));
+    for (int i = 0; i < 5; i++) {
+        ASSERT_TRUE(screen_cursor_absolute(&s, 0, s.cursor.y));
+        ASSERT_TRUE(screen_write_codepoint(&s, (uint32_t)('a' + i), 1));
+        ASSERT_TRUE(screen_cursor_down_scroll(&s));
+    }
+    ASSERT_TRUE(page_list_max_scroll(&s.pages) > 0u);
+
+    ASSERT_TRUE(screen_select_all(&s));
+
+    char got[128];
+    screen_selection_text(&s, got, sizeof(got));
+    ASSERT_TRUE(strncmp(got, "a\nb\nc\nd\ne", 9) == 0);
+
+    screen_deinit(&s);
+}
+
+/* ─── what a selection survives ──────────────────────────────────────────── */
+
+TEST(selection, survives_output_scrolling_under_it) {
+    Screen s;
+    ASSERT_TRUE(screen_init(&s, 20, 4, 0));
+    put_line(&s, 0, "keep me");
+    screen_select(&s, at(&s, 0, 0), at(&s, 6, 0), false);
+
+    /* A selection is made and then sits there while output arrives. Screen
+     * coordinates would be pointing at a different line by now. */
+    for (int i = 0; i < 10; i++) {
+        ASSERT_TRUE(screen_cursor_absolute(&s, 0, s.pages.rows - 1));
+        ASSERT_TRUE(screen_cursor_down_scroll(&s));
+    }
+
+    char got[64];
+    screen_selection_text(&s, got, sizeof(got));
+    ASSERT_TRUE(strcmp(got, "keep me") == 0);
+
+    screen_deinit(&s);
+}
+
+TEST(selection, survives_a_resize) {
+    Screen s;
+    ASSERT_TRUE(screen_init(&s, 20, 4, 0));
+    put_line(&s, 0, "the quick brown fox");
+
+    screen_select(&s, at(&s, 4, 0), at(&s, 8, 0), false);
+    char before[64];
+    screen_selection_text(&s, before, sizeof(before));
+    ASSERT_TRUE(strcmp(before, "quick") == 0);
+
+    ASSERT_TRUE(screen_resize(&s, 7, 4));
+
+    /* Both ends are tracked pins, so the reflow moved them with their
+     * characters. */
+    char got[64];
+    screen_selection_text(&s, got, sizeof(got));
+    ASSERT_TRUE(strcmp(got, "quick") == 0);
+
+    screen_deinit(&s);
+}
+
+TEST(selection, is_released_with_the_screen) {
+    Screen s;
+    ASSERT_TRUE(screen_init(&s, 20, 4, 0));
+    screen_select(&s, at(&s, 0, 0), at(&s, 3, 0), false);
+
+    screen_deinit(&s);
+
+    /* The pins the list was maintaining are given back, and nothing is left
+     * naming a page that has gone. */
+    ASSERT_FALSE(s.selection.start_pin.pin.valid());
+    ASSERT_FALSE(s.selection.end_pin.pin.valid());
+}
+
+TEST(selection, selecting_again_replaces_the_old_one) {
+    Screen s;
+    ASSERT_TRUE(screen_init(&s, 20, 4, 0));
+    put_line(&s, 0, "first");
+    put_line(&s, 1, "second");
+
+    screen_select(&s, at(&s, 0, 0), at(&s, 4, 0), false);
+    screen_select(&s, at(&s, 0, 1), at(&s, 5, 1), false);
+
+    char got[64];
+    screen_selection_text(&s, got, sizeof(got));
+    ASSERT_TRUE(strcmp(got, "second") == 0);
+
+    /* And the pins of the old one were given back rather than left tracked
+     * forever. */
+    size_t tracked = 0;
+    for (TrackedPin *t = s.pages.tracked; t; t = t->next) tracked++;
+    ASSERT_EQ(tracked, 3u);   /* the cursor, and the two ends */
+
+    screen_deinit(&s);
+}

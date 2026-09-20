@@ -22,9 +22,9 @@
  * buffer, which is what the application currently runs on. This is the ported
  * one, built on the ported page list, and the two are unrelated for now.
  *
- * PARTIAL PORT. The screen, the cursor, its movement, writing text and
- * erasing are here. Selections, the alternate screen and the saved cursor are
- * not, so the ledger records Screen.zig as `wip`.
+ * PARTIAL PORT. The screen, the cursor, its movement, writing text, erasing
+ * and selections are here. The alternate screen and the saved cursor are not,
+ * so the ledger records Screen.zig as `wip`.
  */
 
 #pragma once
@@ -80,6 +80,31 @@ struct Cursor {
           style(), pending_wrap(false) {}
 };
 
+/* ─── selections ─────────────────────────────────────────────────────────── */
+
+/* A selected region of the text.
+ *
+ * Both ends are tracked pins, and they have to be: a selection is made by a
+ * user and then sits there while output arrives, the screen scrolls and the
+ * window is resized. Screen coordinates would be wrong within a line of
+ * output; the pins keep pointing at the characters that were selected.
+ *
+ * start and end are where the drag began and where it ended, in that order,
+ * which is not necessarily top-to-bottom — selecting upwards is ordinary.
+ * Anything that needs them the other way round asks for them ordered. */
+struct Selection {
+    TrackedPin start_pin;
+    TrackedPin end_pin;
+
+    /* A block selection: the columns between the two ends on every row,
+     * rather than everything from one end to the other. */
+    bool rectangle;
+
+    bool active;
+
+    Selection() : start_pin(), end_pin(), rectangle(false), active(false) {}
+};
+
 /* ─── the screen ─────────────────────────────────────────────────────────── */
 
 struct Screen {
@@ -96,8 +121,32 @@ struct Screen {
      * silently picking one behaviour would be worse than naming it. */
     bool auto_wrap;
 
-    Screen() : pages(), cursor(), auto_wrap(true) {}
+    /* What the user has selected, if anything. See the selections section
+     * below. */
+    struct Selection selection;
+
+    Screen();
 };
+
+inline Screen::Screen()
+    : pages(), cursor(), auto_wrap(true), selection() {}
+
+/* Forget the selection, releasing the pins the list was maintaining. */
+inline void screen_select_clear(Screen *s) {
+    if (!s->selection.active) return;
+    page_list_untrack(&s->pages, &s->selection.start_pin);
+    page_list_untrack(&s->pages, &s->selection.end_pin);
+
+    /* Emptied as well as untracked. Untracking on its own only stops them
+     * being maintained, and a forgotten selection still holding the last
+     * place it was is a pin naming a page that can now be freed with nobody
+     * left to fix it up. */
+    s->selection.start_pin.pin = Pin();
+    s->selection.end_pin.pin = Pin();
+
+    s->selection.active = false;
+    s->selection.rectangle = false;
+}
 
 /* Point the cursor's cached row and cell at whatever its pin now names.
  *
@@ -159,6 +208,7 @@ inline bool screen_init(Screen *s, CellCountInt cols, CellCountInt rows,
 }
 
 inline void screen_deinit(Screen *s) {
+    screen_select_clear(s);
     page_list_untrack(&s->pages, &s->cursor.page_pin);
     page_list_deinit(&s->pages);
     s->cursor.page_row = nullptr;
@@ -703,6 +753,238 @@ inline bool screen_resize(Screen *s, CellCountInt cols, CellCountInt rows) {
     if (x >= s->pages.cols) x = (CellCountInt)(s->pages.cols - 1);
 
     return screen_cursor_absolute(s, x, y);
+}
+
+/* ─── selections ────────────────────────────────────────────────────── */
+/* Select from one pin to another. */
+inline void screen_select(Screen *s, const Pin &start, const Pin &end,
+                          bool rectangle) {
+    if (!start.valid() || !end.valid()) return;
+
+    screen_select_clear(s);
+
+    page_list_track(&s->pages, &s->selection.start_pin, start);
+    page_list_track(&s->pages, &s->selection.end_pin, end);
+    s->selection.rectangle = rectangle;
+    s->selection.active = true;
+}
+
+/* The two ends, top-left first.
+ *
+ * For a rectangle the columns are ordered too, since a block dragged leftwards
+ * still covers the columns between its edges. For a linear selection the
+ * column belongs to its own row and is left alone. */
+inline bool screen_selection_ordered(Screen *s, Pin *tl, Pin *br) {
+    if (!s->selection.active) return false;
+
+    Pin a = s->selection.start_pin.pin;
+    Pin b = s->selection.end_pin.pin;
+    if (!a.valid() || !b.valid()) return false;
+
+    const size_t ia = page_list_row_index(&s->pages, a);
+    const size_t ib = page_list_row_index(&s->pages, b);
+    if (ia == (size_t)-1 || ib == (size_t)-1) return false;
+
+    const bool swap = ib < ia || (ia == ib && b.x < a.x);
+    *tl = swap ? b : a;
+    *br = swap ? a : b;
+
+    if (s->selection.rectangle && tl->x > br->x) {
+        const CellCountInt t = tl->x;
+        tl->x = br->x;
+        br->x = t;
+    }
+
+    return true;
+}
+
+/* Whether a cell is inside the selection. This is what a renderer asks, once
+ * per cell, so it answers from row indices rather than by walking. */
+inline bool screen_selection_contains(Screen *s, const Pin &p) {
+    Pin tl, br;
+    if (!screen_selection_ordered(s, &tl, &br)) return false;
+    if (!p.valid()) return false;
+
+    const size_t at = page_list_row_index(&s->pages, p);
+    if (at == (size_t)-1) return false;
+
+    const size_t top = page_list_row_index(&s->pages, tl);
+    const size_t bot = page_list_row_index(&s->pages, br);
+    if (at < top || at > bot) return false;
+
+    if (s->selection.rectangle) return p.x >= tl.x && p.x <= br.x;
+
+    if (at == top && p.x < tl.x) return false;
+    if (at == bot && p.x > br.x) return false;
+    return true;
+}
+
+/* Extend a selection over the whole soft-wrapped line a pin is on.
+ *
+ * A line is what the program printed, not what the screen happened to break
+ * it into, so this walks the wrap flags in both directions. */
+inline bool screen_select_line(Screen *s, const Pin &p) {
+    if (!p.valid()) return false;
+
+    Pin start = p;
+    while (true) {
+        Pin above = start;
+        if (!above.up(1)) break;
+        if (!above.row()->wrap()) break;
+        start = above;
+    }
+
+    Pin end = p;
+    while (end.row()->wrap()) {
+        Pin below = end;
+        if (!below.down(1)) break;
+        end = below;
+    }
+
+    start.x = 0;
+    end.x = (CellCountInt)(s->pages.cols - 1);
+    screen_select(s, start, end, false);
+    return true;
+}
+
+/* Select everything the list holds, scrollback included. */
+inline bool screen_select_all(Screen *s) {
+    Pin start = page_list_pin(&s->pages, 0);
+    if (!start.valid() || s->pages.row_count == 0) return false;
+
+    Pin end = page_list_pin(&s->pages, s->pages.row_count - 1);
+    if (!end.valid()) return false;
+
+    start.x = 0;
+    end.x = (CellCountInt)(s->pages.cols - 1);
+    screen_select(s, start, end, false);
+    return true;
+}
+
+/* ─── reading a selection out ────────────────────────────────────────────── */
+
+/* Encode one codepoint as UTF-8, returning how many bytes it took. */
+inline size_t screen_utf8_encode(uint32_t cp, char *out) {
+    if (cp < 0x80) {
+        out[0] = (char)cp;
+        return 1;
+    }
+    if (cp < 0x800) {
+        out[0] = (char)(0xC0 | (cp >> 6));
+        out[1] = (char)(0x80 | (cp & 0x3F));
+        return 2;
+    }
+    if (cp < 0x10000) {
+        out[0] = (char)(0xE0 | (cp >> 12));
+        out[1] = (char)(0x80 | ((cp >> 6) & 0x3F));
+        out[2] = (char)(0x80 | (cp & 0x3F));
+        return 3;
+    }
+    out[0] = (char)(0xF0 | (cp >> 18));
+    out[1] = (char)(0x80 | ((cp >> 12) & 0x3F));
+    out[2] = (char)(0x80 | ((cp >> 6) & 0x3F));
+    out[3] = (char)(0x80 | (cp & 0x3F));
+    return 4;
+}
+
+/* The selected text, as UTF-8.
+ *
+ * The rule that matters is the newlines. A line too long for the screen is
+ * several rows joined by a wrap flag, and pasting it back should give what
+ * the program printed — one line — not the shape the screen happened to break
+ * it into. So a newline goes in at a hard line end and nowhere else. This is
+ * the same distinction reflow turns on, used for the thing a user actually
+ * notices.
+ *
+ * Trailing blanks on a row are dropped, since they are the rest of the screen
+ * rather than spaces anybody typed. A rectangle keeps its columns as they are:
+ * the whole point of a block selection is the shape.
+ *
+ * Returns the number of bytes written, and writes nothing beyond cap. */
+inline size_t screen_selection_text(Screen *s, char *out, size_t cap) {
+    size_t n = 0;
+    if (cap == 0) return 0;
+    out[0] = '\0';
+
+    Pin tl, br;
+    if (!screen_selection_ordered(s, &tl, &br)) return 0;
+
+    const size_t top = page_list_row_index(&s->pages, tl);
+    const size_t bot = page_list_row_index(&s->pages, br);
+    if (top == (size_t)-1 || bot == (size_t)-1) return 0;
+
+    const CellCountInt cols = s->pages.cols;
+    Pin row = tl;
+
+    for (size_t at = top; at <= bot; at++) {
+        Page *page = &row.node->page;
+
+        CellCountInt from = 0;
+        CellCountInt to = cols;
+
+        if (s->selection.rectangle) {
+            from = tl.x;
+            to = (CellCountInt)(br.x + 1);
+        } else {
+            if (at == top) from = tl.x;
+            if (at == bot) to = (CellCountInt)(br.x + 1);
+        }
+
+        /* Trailing blanks are the rest of the screen, not text. */
+        CellCountInt width = to;
+        while (width > from &&
+               page_cell_is_blank(page->get_cell((CellCountInt)(width - 1),
+                                                 row.y))) {
+            width--;
+        }
+
+        for (CellCountInt x = from; x < width; x++) {
+            Cell *c = page->get_cell(x, row.y);
+            if (c->wide() == Wide::spacer_tail ||
+                c->wide() == Wide::spacer_head) {
+                continue;
+            }
+
+            const uint32_t cp = c->codepoint();
+            if (cp == 0) {
+                if (n + 1 < cap) out[n++] = ' ';
+                continue;
+            }
+
+            char buf[4];
+            const size_t len = screen_utf8_encode(cp, buf);
+            if (n + len >= cap) break;
+            for (size_t i = 0; i < len; i++) out[n++] = buf[i];
+
+            /* A cluster's remaining codepoints live in the page, not the
+             * cell, and they are as much a part of the character as the one
+             * that is. */
+            const uint32_t *extra = nullptr;
+            uint32_t extra_len = 0;
+            if (c->has_grapheme() &&
+                page_grapheme_codepoints(page, x, row.y, &extra, &extra_len)) {
+                for (uint32_t i = 0; i < extra_len; i++) {
+                    const size_t elen = screen_utf8_encode(extra[i], buf);
+                    if (n + elen >= cap) break;
+                    for (size_t j = 0; j < elen; j++) out[n++] = buf[j];
+                }
+            }
+        }
+
+        /* A soft wrap is not a line ending — the row below is the same line,
+         * and a newline here is the shape of the screen leaking into the
+         * text. A rectangle is all line endings, since its rows are not
+         * joined to each other in any sense. */
+        const bool last = at == bot;
+        const bool soft = !s->selection.rectangle && row.row()->wrap();
+        if (!last && !soft && n + 1 < cap) out[n++] = '\n';
+
+        if (last) break;
+        if (!row.down(1)) break;
+    }
+
+    out[n] = '\0';
+    return n;
 }
 
 /* ─── reading ────────────────────────────────────────────────────────────── */
