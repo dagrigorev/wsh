@@ -67,12 +67,12 @@ TEST(page_list, a_wide_screen_still_gets_its_rows) {
 
 /* ─── growing ────────────────────────────────────────────────────────────── */
 
-TEST(page_list, grow_appends_and_links_both_ways) {
+TEST(page_list, appending_links_both_ways) {
     PageList l;
     ASSERT_TRUE(page_list_init(&l, 80, 24, 0));
     PageNode *first = l.first;
 
-    PageNode *second = page_list_grow(&l);
+    PageNode *second = page_list_append(&l, 5);
     ASSERT_TRUE(second != nullptr);
 
     ASSERT_EQ(l.page_count, 2u);
@@ -343,10 +343,12 @@ TEST(page_list, growing_past_the_limit_trims_as_it_goes) {
     ASSERT_TRUE(page_list_init(&l, 80, 24, 0));
     l.max_size = l.first->page.size * 3;
 
-    for (int i = 0; i < 20; i++) ASSERT_TRUE(page_list_grow(&l) != nullptr);
+    /* Ten pages worth of rows against a three-page limit. This is the steady
+     * state a long session settles into: pages are recycled off the front as
+     * fast as they are filled at the back. */
+    const size_t per_page = (size_t)page_list_rows_per_page(80, 24);
+    ASSERT_EQ(page_list_grow_rows(&l, per_page * 10), per_page * 10);
 
-    /* The steady state a long session settles into: pages are recycled off
-     * the front as fast as they are added to the back. */
     ASSERT_EQ(l.page_count, 3u);
     ASSERT_TRUE(l.bytes <= l.max_size);
 
@@ -606,5 +608,200 @@ TEST(viewport, row_index_finds_a_pin_and_rejects_a_stranger) {
     ASSERT_EQ(page_list_row_index(&l, Pin()), (size_t)-1);
 
     page_list_deinit(&other);
+    page_list_deinit(&l);
+}
+
+/* ─── scrolling the screen ───────────────────────────────────────────────── */
+
+/* A newline at the bottom of the screen is one grow. Everything about
+ * scrollback follows from that: the active area is the last `rows` rows, so
+ * adding a row at the end pushes the oldest one out of it without moving
+ * anything. */
+
+TEST(scrolling, a_fresh_list_has_no_scrollback) {
+    PageList l;
+    ASSERT_TRUE(page_list_init(&l, 80, 24, 0));
+
+    /* A page holds hundreds of rows, but a terminal that has printed nothing
+     * has no scrollback however large the page it was handed. */
+    ASSERT_EQ(l.row_count, 24u);
+    ASSERT_EQ(page_list_max_scroll(&l), 0u);
+    ASSERT_TRUE(l.first->page.capacity.rows > l.first->rows_used);
+
+    page_list_deinit(&l);
+}
+
+TEST(scrolling, growing_adds_one_row_not_one_page) {
+    PageList l;
+    ASSERT_TRUE(page_list_init(&l, 80, 24, 0));
+
+    Pin p = page_list_grow(&l);
+    ASSERT_TRUE(p.valid());
+    ASSERT_EQ(l.row_count, 25u);
+    ASSERT_EQ(l.page_count, 1u);
+    ASSERT_TRUE(p.node == l.first);
+    ASSERT_EQ(p.y, 24);
+
+    page_list_deinit(&l);
+}
+
+TEST(scrolling, the_oldest_row_becomes_scrollback) {
+    PageList l;
+    ASSERT_TRUE(page_list_init(&l, 80, 24, 0));
+
+    Pin top = page_list_active_start(&l);
+    ASSERT_EQ(page_list_row_index(&l, top), 0u);
+
+    page_list_grow(&l);
+
+    /* Row 0 did not move. The active area did. */
+    ASSERT_EQ(page_list_row_index(&l, page_list_active_start(&l)), 1u);
+    ASSERT_EQ(page_list_max_scroll(&l), 1u);
+    ASSERT_TRUE(page_list_pin(&l, 0) == top);
+
+    page_list_deinit(&l);
+}
+
+TEST(scrolling, text_stays_where_it_was_written) {
+    PageList l;
+    ASSERT_TRUE(page_list_init(&l, 80, 24, 0));
+
+    Pin first = page_list_pin(&l, 0);
+    first.x = 0;
+    first.cell()->set_codepoint('q');
+
+    ASSERT_EQ(page_list_grow_rows(&l, 100), 100u);
+
+    /* A hundred lines later the pin still reads what was written through it.
+     * Scrolling a terminal copies nothing. */
+    ASSERT_EQ(first.cell()->codepoint(), 'q');
+    ASSERT_EQ(page_list_pin(&l, 0).node, first.node);
+
+    page_list_deinit(&l);
+}
+
+TEST(scrolling, a_full_page_hands_over_to_a_new_one) {
+    PageList l;
+    ASSERT_TRUE(small_list(&l, 10, 4, 5, 1));
+    l.first->rows_used = 4;
+    l.row_count = 4;
+
+    ASSERT_TRUE(page_list_grow(&l).valid());
+    ASSERT_EQ(l.page_count, 1u);   /* the fifth row fits */
+
+    /* The sixth does not, so a new page takes over and the old one keeps
+     * every row it already held. */
+    Pin p = page_list_grow(&l);
+    ASSERT_TRUE(p.valid());
+    ASSERT_EQ(l.page_count, 2u);
+    ASSERT_TRUE(p.node == l.last);
+    ASSERT_EQ(p.y, 0);
+    ASSERT_EQ(l.first->rows_used, 5);
+    ASSERT_EQ(l.last->rows_used, 1);
+    ASSERT_EQ(l.row_count, 6u);
+
+    page_list_deinit(&l);
+}
+
+TEST(scrolling, rows_are_continuous_across_the_handover) {
+    PageList l;
+    ASSERT_TRUE(small_list(&l, 10, 2, 3, 1));
+    l.first->rows_used = 2;
+    l.row_count = 2;
+
+    /* Write a running count through the pins grow hands back, then read it
+     * off by index. A seam that lost or duplicated a row shows up here. */
+    for (size_t i = 0; i < 2; i++) {
+        Pin p = page_list_pin(&l, i);
+        p.x = 0;
+        p.cell()->set_codepoint((uint32_t)('0' + i));
+    }
+    for (size_t i = 2; i < 12; i++) {
+        Pin p = page_list_grow(&l);
+        ASSERT_TRUE(p.valid());
+        p.x = 0;
+        p.cell()->set_codepoint((uint32_t)('0' + i));
+    }
+
+    ASSERT_EQ(l.row_count, 12u);
+    for (size_t i = 0; i < 12; i++) {
+        Pin p = page_list_pin(&l, i);
+        p.x = 0;
+        ASSERT_EQ(p.cell()->codepoint(), (uint32_t)('0' + i));
+    }
+
+    page_list_deinit(&l);
+}
+
+TEST(scrolling, a_new_row_arrives_blank) {
+    PageList l;
+    ASSERT_TRUE(small_list(&l, 10, 2, 5, 1));
+    l.first->rows_used = 2;
+    l.row_count = 2;
+
+    /* Dirty the row grow is about to hand out, the way a page reused after
+     * trimming would be. */
+    l.first->page.get_cell(0, 2)->set_codepoint('x');
+    l.first->page.get_row(2)->set_wrap(true);
+
+    Pin p = page_list_grow(&l);
+    ASSERT_TRUE(p.valid());
+    ASSERT_EQ(p.cell()->codepoint(), 0u);
+    ASSERT_FALSE(p.row()->wrap());
+
+    page_list_deinit(&l);
+}
+
+TEST(scrolling, an_active_viewport_follows_the_output) {
+    PageList l;
+    ASSERT_TRUE(page_list_init(&l, 80, 24, 0));
+
+    ASSERT_EQ(page_list_grow_rows(&l, 50), 50u);
+
+    /* The user has not scrolled, so they are still looking at the newest
+     * output — and nothing had to be told about it. */
+    ASSERT_TRUE(l.viewport == ViewportTag::active);
+    ASSERT_EQ(page_list_viewport_offset(&l), 0u);
+    ASSERT_EQ(page_list_row_index(&l, page_list_viewport_start(&l)), 50u);
+
+    page_list_deinit(&l);
+}
+
+TEST(scrolling, a_pinned_viewport_drifts_away_from_the_output) {
+    PageList l;
+    ASSERT_TRUE(page_list_init(&l, 80, 24, 0));
+    ASSERT_EQ(page_list_grow_rows(&l, 50), 50u);
+
+    page_list_scroll_delta(&l, -10);
+    ASSERT_EQ(page_list_viewport_offset(&l), 10u);
+
+    /* More output arrives while the user is reading something older. The
+     * screen must not move under them, so the distance grows. */
+    ASSERT_EQ(page_list_grow_rows(&l, 5), 5u);
+    ASSERT_EQ(page_list_viewport_offset(&l), 15u);
+
+    page_list_scroll_active(&l);
+    ASSERT_EQ(page_list_viewport_offset(&l), 0u);
+
+    page_list_deinit(&l);
+}
+
+TEST(scrolling, scrollback_is_bounded_by_the_limit) {
+    PageList l;
+    ASSERT_TRUE(page_list_init(&l, 80, 24, 0));
+    l.max_size = l.first->page.size * 2;
+
+    const size_t per_page = (size_t)page_list_rows_per_page(80, 24);
+    ASSERT_EQ(page_list_grow_rows(&l, per_page * 6), per_page * 6);
+
+    /* Old rows are forgotten, but never so many that the screen goes with
+     * them, and the row count stays consistent with the pages. */
+    ASSERT_TRUE(l.row_count >= 24u);
+    ASSERT_TRUE(l.bytes <= l.max_size);
+
+    size_t counted = 0;
+    for (PageNode *n = l.first; n; n = n->next) counted += n->rows_used;
+    ASSERT_EQ(counted, l.row_count);
+
     page_list_deinit(&l);
 }

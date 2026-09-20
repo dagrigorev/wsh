@@ -18,9 +18,9 @@
  * not a separate structure to copy into — it is the pages nobody is looking at
  * any more, and forgetting it is freeing the page at the front.
  *
- * PARTIAL PORT. The list itself, page allocation, growth and trimming, pins
- * and the viewport are here. Scrolling between pages, reflow across a resize
- * and page splitting are not, so the ledger records PageList.zig as `wip`.
+ * PARTIAL PORT. The list itself, page allocation, growth and trimming, pins,
+ * the viewport and scrolling are here. Reflow across a resize and page
+ * splitting are not, so the ledger records PageList.zig as `wip`.
  */
 
 #pragma once
@@ -61,10 +61,21 @@ struct PageNode {
     PageNode *prev;
     PageNode *next;
 
+    /* How many of the page's rows hold anything.
+     *
+     * A page's capacity is how many rows it *could* hold; this is how many it
+     * does. They are not the same thing and treating them as one would mean a
+     * fresh 500-row page claiming 500 rows of scrollback the moment it was
+     * allocated, when the terminal has printed nothing. Only the last page in
+     * the list is ever partly filled — that is where growth happens — so the
+     * distinction costs one field and nothing else. */
+    CellCountInt rows_used;
+
     /* What malloc returned, which is not where the page begins. */
     void *alloc;
 
-    PageNode() : page(), prev(nullptr), next(nullptr), alloc(nullptr) {}
+    PageNode()
+        : page(), prev(nullptr), next(nullptr), rows_used(0), alloc(nullptr) {}
 };
 
 /* How many rows a page of about PAGE_TARGET_BYTES holds at this width.
@@ -153,7 +164,7 @@ struct Pin {
         PageNode *cur = node;
         size_t cy = y;
         while (cur) {
-            const size_t left = (size_t)cur->page.capacity.rows - cy - 1;
+            const size_t left = (size_t)cur->rows_used - cy - 1;
             if (n <= left) {
                 node = cur;
                 y = (CellCountInt)(cy + n);
@@ -179,7 +190,7 @@ struct Pin {
             n -= cy + 1;
             cur = cur->prev;
             if (!cur) return false;
-            cy = (size_t)(cur->page.capacity.rows - 1);
+            cy = (size_t)(cur->rows_used - 1);
         }
         return false;
     }
@@ -233,12 +244,16 @@ struct PageList {
           viewport(ViewportTag::active), viewport_pin() {}
 };
 
-/* Append a page to the end of the list. Returns null if the allocation
- * failed; the list is unchanged in that case. */
-inline PageNode *page_list_append(PageList *l, CellCountInt page_rows) {
-    Capacity cap(l->cols, page_rows);
+/* Append a page holding used_rows rows of a cap_rows page. Returns null if
+ * the allocation failed; the list is unchanged in that case. */
+inline PageNode *page_list_append_partial(PageList *l, CellCountInt cap_rows,
+                                          CellCountInt used_rows) {
+    if (used_rows > cap_rows) used_rows = cap_rows;
+
+    Capacity cap(l->cols, cap_rows);
     PageNode *node = page_node_create(cap);
     if (!node) return nullptr;
+    node->rows_used = used_rows;
 
     node->prev = l->last;
     if (l->last) {
@@ -249,9 +264,14 @@ inline PageNode *page_list_append(PageList *l, CellCountInt page_rows) {
     l->last = node;
 
     l->page_count++;
-    l->row_count += page_rows;
+    l->row_count += used_rows;
     l->bytes += node->page.size;
     return node;
+}
+
+/* Append a page that is entirely in use. */
+inline PageNode *page_list_append(PageList *l, CellCountInt page_rows) {
+    return page_list_append_partial(l, page_rows, page_rows);
 }
 
 /* Drop the oldest page.
@@ -270,7 +290,7 @@ inline void page_list_drop_first(PageList *l) {
     }
 
     l->page_count--;
-    l->row_count -= node->page.capacity.rows;
+    l->row_count -= node->rows_used;
     l->bytes -= node->page.size;
 
     /* A viewport pinned into the page being freed would be left pointing at
@@ -295,19 +315,54 @@ inline void page_list_trim(PageList *l) {
     if (l->max_size == 0) return;
 
     while (l->bytes > l->max_size && l->first && l->first != l->last) {
-        const size_t dropping = (size_t)l->first->page.capacity.rows;
+        const size_t dropping = (size_t)l->first->rows_used;
         if (l->row_count - dropping < (size_t)l->rows) break;
         page_list_drop_first(l);
     }
 }
 
-/* Add a page at the end, trimming the front if that puts the list over its
- * limit. This is what a page filling up calls. */
-inline PageNode *page_list_grow(PageList *l) {
-    PageNode *node = page_list_append(l, page_list_rows_per_page(l->cols, l->rows));
-    if (!node) return nullptr;
+/* Add one row to the end of the list, returning a pin to it.
+ *
+ * This is what a newline at the bottom of the screen calls, and it is the
+ * only place a page ever runs out. Most calls cost nothing but an increment:
+ * the last page has room, so the row it already owns is simply declared to be
+ * in use. Only when that page is full does a new one get allocated, and the
+ * rows before it stay exactly where they were written — which is the whole
+ * reason the list exists.
+ *
+ * Returns an invalid pin if a new page was needed and could not be
+ * allocated. The list is unchanged in that case. */
+inline Pin page_list_grow(PageList *l) {
+    PageNode *node = l->last;
+
+    if (node && node->rows_used < node->page.capacity.rows) {
+        const CellCountInt y = node->rows_used;
+        node->rows_used++;
+        l->row_count++;
+        page_clear_row(&node->page, y);
+        page_list_trim(l);
+        return Pin(node, y, 0);
+    }
+
+    /* The last page is full, so the text stays in it and a new page takes
+     * over. Nothing is copied. */
+    PageNode *fresh = page_list_append_partial(
+        l, page_list_rows_per_page(l->cols, l->rows), 1);
+    if (!fresh) return Pin();
+
+    page_clear_row(&fresh->page, 0);
     page_list_trim(l);
-    return node;
+    return Pin(fresh, 0, 0);
+}
+
+/* Add n rows, returning how many were actually added. Fewer than asked for
+ * means an allocation failed partway. */
+inline size_t page_list_grow_rows(PageList *l, size_t n) {
+    size_t done = 0;
+    for (; done < n; done++) {
+        if (!page_list_grow(l).valid()) break;
+    }
+    return done;
 }
 
 /* Build a list able to show rows rows at cols columns.
@@ -322,9 +377,12 @@ inline bool page_list_init(PageList *l, CellCountInt cols, CellCountInt rows,
     l->rows = rows;
     l->max_size = max_size;
 
-    /* One page is enough to start: it is sized to hold at least the screen,
-     * and the rest arrives as the screen scrolls. */
-    return page_list_append(l, page_list_rows_per_page(cols, rows)) != nullptr;
+    /* One page is enough to start, sized to hold at least the screen but
+     * holding only the screen's rows to begin with. A terminal that has
+     * printed nothing has no scrollback, however large the page it was given
+     * happens to be. */
+    return page_list_append_partial(l, page_list_rows_per_page(cols, rows),
+                                    rows) != nullptr;
 }
 
 inline void page_list_deinit(PageList *l) {
@@ -347,7 +405,7 @@ inline void page_list_deinit(PageList *l) {
 inline Pin page_list_pin(const PageList *l, size_t row_index) {
     PageNode *node = l->first;
     while (node) {
-        const size_t n = (size_t)node->page.capacity.rows;
+        const size_t n = (size_t)node->rows_used;
         if (row_index < n) return Pin(node, (CellCountInt)row_index, 0);
         row_index -= n;
         node = node->next;
@@ -380,7 +438,7 @@ inline size_t page_list_row_index(const PageList *l, const Pin &p) {
     size_t index = 0;
     for (PageNode *node = l->first; node; node = node->next) {
         if (node == p.node) return index + (size_t)p.y;
-        index += (size_t)node->page.capacity.rows;
+        index += (size_t)node->rows_used;
     }
     return (size_t)-1;
 }
