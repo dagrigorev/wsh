@@ -341,3 +341,130 @@ TEST(page, bg_cell_builds_a_background_only_cell) {
     Cell c3;
     ASSERT_FALSE(none_set.bg_cell(&c3));
 }
+
+/* ─── capacity and layout ────────────────────────────────────────────────── */
+
+TEST(page, layout_regions_do_not_overlap) {
+    /* Every region must be disjoint and inside the total. An overlap would
+     * have two structures writing the same bytes, which no round-trip test of
+     * a single structure would catch. */
+    Capacity cap(80, 24);
+    PageLayout l = PageLayout::init(cap);
+
+    struct Region { size_t start, size; };
+    const Region regions[] = {
+        { l.rows_start,           l.rows_size },
+        { l.cells_start,          l.cells_size },
+        { l.styles_start,         l.styles_layout.total_size },
+        { l.grapheme_alloc_start, l.grapheme_alloc_layout.total_size },
+        { l.grapheme_map_start,   l.grapheme_map_layout.total_size },
+        { l.string_alloc_start,   l.string_alloc_layout.total_size },
+    };
+    const size_t n = sizeof(regions) / sizeof(regions[0]);
+
+    for (size_t i = 0; i < n; i++) {
+        /* Inside the allocation. */
+        ASSERT_TRUE(regions[i].start + regions[i].size <= l.total_size);
+
+        for (size_t j = i + 1; j < n; j++) {
+            const size_t a0 = regions[i].start, a1 = a0 + regions[i].size;
+            const size_t b0 = regions[j].start, b1 = b0 + regions[j].size;
+            /* Disjoint: one ends before the other begins. */
+            ASSERT_TRUE(a1 <= b0 || b1 <= a0);
+        }
+    }
+}
+
+TEST(page, layout_regions_are_in_order) {
+    /* rows, then cells, then the metadata block. */
+    Capacity cap(80, 24);
+    PageLayout l = PageLayout::init(cap);
+
+    ASSERT_EQ(l.rows_start, 0);
+    ASSERT_TRUE(l.cells_start >= l.rows_start + l.rows_size);
+    ASSERT_TRUE(l.styles_start >= l.cells_start + l.cells_size);
+    ASSERT_TRUE(l.grapheme_alloc_start >= l.styles_start);
+    ASSERT_TRUE(l.string_alloc_start >= l.grapheme_map_start);
+}
+
+TEST(page, cell_array_is_cache_line_aligned) {
+    /* The point of the alignment: a row's cells must never start mid-line. */
+    for (CellCountInt rows = 1; rows < 40; rows++) {
+        Capacity cap(80, rows);
+        PageLayout l = PageLayout::init(cap);
+        ASSERT_EQ(l.cells_start % CELLS_ALIGN, 0);
+    }
+}
+
+TEST(page, layout_sizes_match_the_capacity) {
+    Capacity cap(100, 50);
+    PageLayout l = PageLayout::init(cap);
+
+    ASSERT_EQ(l.rows_size, 50 * sizeof(Row));
+    ASSERT_EQ(l.cells_size, 100 * 50 * sizeof(Cell));
+    ASSERT_TRUE(l.total_size > l.cells_size);
+}
+
+TEST(page, larger_capacity_needs_more_memory) {
+    const size_t small = PageLayout::init(Capacity(80, 24)).total_size;
+    const size_t wider = PageLayout::init(Capacity(160, 24)).total_size;
+    const size_t taller = PageLayout::init(Capacity(80, 48)).total_size;
+
+    ASSERT_TRUE(wider > small);
+    ASSERT_TRUE(taller > small);
+}
+
+TEST(page, zero_capacity_still_lays_out) {
+    /* Degenerate but valid; must not divide by zero or produce overlap. */
+    Capacity cap(0, 0);
+    PageLayout l = PageLayout::init(cap);
+
+    ASSERT_EQ(l.rows_size, 0);
+    ASSERT_EQ(l.cells_size, 0);
+    /* The metadata block still exists. */
+    ASSERT_TRUE(l.total_size > 0);
+}
+
+TEST(page, grid_bytes_is_rows_plus_cells) {
+    Capacity cap(80, 24);
+    PageLayout l = PageLayout::init(cap);
+    ASSERT_EQ(PageLayout::grid_bytes(cap), l.rows_size + l.cells_size);
+}
+
+TEST(page, max_cols_fits_within_the_grid) {
+    Capacity cap(80, 24);
+    const CellCountInt max = capacity_max_cols(cap);
+
+    ASSERT_TRUE(max > 0);
+    /* It must actually fit: one row header plus that many cells. */
+    const size_t needed = align_forward(sizeof(Row), CELLS_ALIGN) +
+                          (size_t)max * sizeof(Cell);
+    ASSERT_TRUE(needed <= PageLayout::grid_bytes(cap));
+}
+
+TEST(page, adjust_cols_never_grows_the_allocation) {
+    /* The contract: refitting to a new width must not need more memory, which
+     * is what makes a resize in place possible. */
+    Capacity cap(80, 24);
+    const size_t original = PageLayout::init(cap).total_size;
+
+    const CellCountInt widths[] = { 20, 40, 79, 81, 120, 160 };
+    for (size_t i = 0; i < sizeof(widths) / sizeof(widths[0]); i++) {
+        Capacity adjusted;
+        if (!capacity_adjust_cols(cap, widths[i], &adjusted)) continue;
+
+        ASSERT_EQ(adjusted.cols, widths[i]);
+        ASSERT_TRUE(adjusted.rows > 0);
+        ASSERT_TRUE(PageLayout::init(adjusted).total_size <= original);
+    }
+}
+
+TEST(page, adjust_to_a_wider_grid_trades_away_rows) {
+    Capacity cap(80, 24);
+    Capacity wider;
+    ASSERT_TRUE(capacity_adjust_cols(cap, 160, &wider));
+
+    ASSERT_EQ(wider.cols, 160);
+    /* Twice the width in the same memory means fewer rows. */
+    ASSERT_TRUE(wider.rows < cap.rows);
+}

@@ -42,6 +42,8 @@
 #include "size.hpp"
 #include "color.hpp"
 #include "style.hpp"
+#include "bitmap_allocator.hpp"
+#include "hash_map.hpp"
 
 namespace wisp {
 namespace terminal {
@@ -314,6 +316,207 @@ private:
         bits = (bits & ~((uint64_t)1 << shift)) | ((uint64_t)(v ? 1 : 0) << shift);
     }
 };
+
+/* ─── page storage ───────────────────────────────────────────────────────── */
+
+/* The cell array starts on a cache line so that a row's cells never begin
+ * mid-line and straddle an extra one. */
+static const size_t CELLS_ALIGN =
+    alignof(Cell) > 64 ? alignof(Cell) : 64;
+
+/* Grapheme codepoints past the first are stored as u32s, so a 4-byte chunk
+ * wastes nothing. */
+typedef BitmapAllocator<4> GraphemeAlloc;
+
+/* Byte storage for hyperlink URIs and other page strings. */
+typedef BitmapAllocator<8> StringAlloc;
+
+/* Where a cell's extra grapheme codepoints live within grapheme_alloc. */
+struct GraphemeSlice {
+    OffsetInt offset;
+    uint32_t  len;
+
+    GraphemeSlice() : offset(0), len(0) {}
+    bool operator==(const GraphemeSlice &o) const {
+        return offset == o.offset && len == o.len;
+    }
+};
+
+/* Maps a cell — keyed by its offset from the page base — to its grapheme
+ * data. Keyed by raw offset rather than Offset<Cell> because the key only
+ * needs to compare equal, and a plain integer does that without dragging
+ * operator== onto Offset. */
+typedef OffsetHashMap<OffsetInt, GraphemeSlice> GraphemeMap;
+
+/* Default sizes for the variable-length regions. Each is a starting point
+ * that a page grows past by being reallocated at a larger capacity, not a
+ * hard ceiling on what a terminal can display. */
+static const GraphemeBytesInt GRAPHEME_BYTES_DEFAULT = 512;
+static const StringBytesInt   STRING_BYTES_DEFAULT = 512;
+static const HyperlinkCountInt HYPERLINK_BYTES_DEFAULT = 512;
+
+/* How much of a page is given over to each thing. */
+struct Capacity {
+    CellCountInt cols;
+    CellCountInt rows;
+
+    /* Distinct styles usable on this page. */
+    StyleCountInt styles;
+
+    /* Rough byte budget for hyperlinks. Actual usage runs higher, since
+     * hyperlinks also consume string bytes and lookup metadata. */
+    HyperlinkCountInt hyperlink_bytes;
+
+    GraphemeBytesInt grapheme_bytes;
+    StringBytesInt   string_bytes;
+
+    Capacity()
+        : cols(0), rows(0), styles(16),
+          hyperlink_bytes(HYPERLINK_BYTES_DEFAULT),
+          grapheme_bytes(GRAPHEME_BYTES_DEFAULT),
+          string_bytes(STRING_BYTES_DEFAULT) {}
+
+    Capacity(CellCountInt c, CellCountInt r) : Capacity() { cols = c; rows = r; }
+};
+
+/* The memory layout of a page.
+ *
+ * Laid out as row headers, then the cell array, then the metadata block:
+ *
+ *   [rows][cells][styles, graphemes, strings]
+ *
+ * Row headers start at offset zero and the cell array is cache-line aligned.
+ * Only the row headers need initializing: cells and every metadata member
+ * treat all-zero as their empty state, so the pages behind everything past
+ * the row headers stay untouched until first use.
+ *
+ * PARTIAL. The hyperlink map and set regions are not laid out yet, pending
+ * the hyperlink.zig port — it and page.zig are the other cycle that
+ * docs/GHOSTTY_PORT_ORDER.md flags, since a hyperlink entry stores offsets
+ * into this page's string storage. Adding them will move the total size, so
+ * a page built now is not layout-compatible with one built later.
+ */
+struct PageLayout {
+    size_t total_size;
+
+    size_t rows_start;
+    size_t rows_size;
+
+    size_t cells_start;
+    size_t cells_size;
+
+    size_t              styles_start;
+    style::Set::Layout  styles_layout;
+
+    size_t                 grapheme_alloc_start;
+    GraphemeAlloc::Layout  grapheme_alloc_layout;
+
+    size_t             grapheme_map_start;
+    GraphemeMap::Layout grapheme_map_layout;
+
+    size_t              string_alloc_start;
+    StringAlloc::Layout string_alloc_layout;
+
+    Capacity capacity;
+
+    static PageLayout init(const Capacity &cap) {
+        PageLayout l;
+        l.capacity = cap;
+
+        l.rows_start = 0;
+        l.rows_size = (size_t)cap.rows * sizeof(Row);
+        const size_t rows_end = l.rows_start + l.rows_size;
+
+        l.cells_start = align_forward(rows_end, CELLS_ALIGN);
+        l.cells_size = (size_t)cap.rows * (size_t)cap.cols * sizeof(Cell);
+        const size_t cells_end = l.cells_start + l.cells_size;
+
+        /* The metadata block. Each member publishes its own layout, and each
+         * starts aligned for what it holds. */
+        l.styles_layout = style::Set::Layout::init(
+            style::Set::capacity_for_count(cap.styles));
+        l.styles_start = align_forward(cells_end, style::Set::base_align);
+        const size_t styles_end = l.styles_start + l.styles_layout.total_size;
+
+        l.grapheme_alloc_layout = GraphemeAlloc::layout(cap.grapheme_bytes);
+        l.grapheme_alloc_start = align_forward(styles_end, GraphemeAlloc::base_align);
+        const size_t grapheme_alloc_end =
+            l.grapheme_alloc_start + l.grapheme_alloc_layout.total_size;
+
+        /* One grapheme map entry per cell that could carry graphemes, bounded
+         * by what the grapheme bytes could actually describe. */
+        l.grapheme_map_layout = GraphemeMap::Layout::init(
+            GraphemeMap::capacity_for_count(cap.grapheme_bytes / 4));
+        l.grapheme_map_start = align_forward(grapheme_alloc_end, alignof(uint64_t));
+        const size_t grapheme_map_end =
+            l.grapheme_map_start + l.grapheme_map_layout.total_size;
+
+        l.string_alloc_layout = StringAlloc::layout(cap.string_bytes);
+        l.string_alloc_start = align_forward(grapheme_map_end, StringAlloc::base_align);
+        const size_t string_alloc_end =
+            l.string_alloc_start + l.string_alloc_layout.total_size;
+
+        l.total_size = string_alloc_end;
+        return l;
+    }
+
+    /* Bytes the grid occupies — the row headers plus the cell array. Used
+     * when refitting a capacity into a fixed allocation. */
+    static size_t grid_bytes(const Capacity &cap) {
+        const PageLayout l = init(cap);
+        return l.rows_size + l.cells_size;
+    }
+};
+
+/* The widest grid that fits this capacity without growing it, or 0 if not
+ * even one column fits.
+ *
+ * A single row's header takes a whole cell-aligned region ahead of the cells,
+ * so that comes off the top before dividing what is left by the cell size. */
+inline CellCountInt capacity_max_cols(const Capacity &cap) {
+    const PageLayout l = PageLayout::init(cap);
+    const size_t grid = l.rows_size + l.cells_size;
+
+    const size_t row_region = align_forward(sizeof(Row), CELLS_ALIGN);
+    if (grid <= row_region) return 0;
+
+    const size_t max_cols = (grid - row_region) / sizeof(Cell);
+    const size_t clamp = (size_t)(CellCountInt)-1;
+    return (CellCountInt)(max_cols < clamp ? max_cols : clamp);
+}
+
+/* Refit a capacity to a new column count without growing the allocation.
+ *
+ * Only the row count gives; everything else may grow. Because the cell array
+ * is cache-line aligned, the padding between the row headers and the cells
+ * depends on the row count, so rows are trimmed until the layout fits. That
+ * padding is under one cache line, so this settles in a few iterations.
+ *
+ * Returns false if no row count fits. */
+inline bool capacity_adjust_cols(const Capacity &in, CellCountInt cols, Capacity *out) {
+    const size_t total_size = PageLayout::init(in).total_size;
+
+    const PageLayout l = PageLayout::init(in);
+    const size_t grid = l.rows_size + l.cells_size;
+
+    const size_t bytes_per_row = sizeof(Row) + sizeof(Cell) * (size_t)cols;
+    if (bytes_per_row == 0) return false;
+
+    Capacity adjusted = in;
+    adjusted.cols = cols;
+
+    size_t new_rows = grid / bytes_per_row;
+    while (new_rows > 0) {
+        adjusted.rows = (CellCountInt)new_rows;
+        if (PageLayout::init(adjusted).total_size <= total_size) {
+            *out = adjusted;
+            return true;
+        }
+        new_rows--;
+    }
+
+    return false;
+}
 
 /* ─── closing the style/page cycle ───────────────────────────────────────── */
 

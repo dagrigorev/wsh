@@ -64,6 +64,11 @@ template <typename T, typename IdT, typename RefCountInt, typename Context>
 struct RefCountedSet {
     typedef IdT Id;
 
+    /* Alignment the backing memory must start on. Published so a container
+     * laying this out among other structures can align the region correctly. */
+    static const size_t base_align =
+        alignof(IdT) > alignof(T) ? alignof(IdT) : alignof(T);
+
     struct Metadata {
         /* The bucket this item is referenced from. */
         Id bucket;
