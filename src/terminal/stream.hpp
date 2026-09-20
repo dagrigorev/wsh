@@ -1,0 +1,503 @@
+/* Ported from Ghostty src/terminal/stream.zig
+ * Copyright (c) 2024 Mitchell Hashimoto, Ghostty contributors
+ * MIT License — see THIRD_PARTY_NOTICES.md
+ *
+ * Bytes from a program, turned into things happening to a terminal.
+ *
+ * The parser says what arrived; this says what it means. CSI 5 A is a
+ * csi_dispatch with a final byte of A as far as the state machine is
+ * concerned, and it is the cursor moving up five rows only here. Keeping the
+ * two apart is what makes the state machine testable without a terminal and
+ * this testable without worrying about bytes.
+ *
+ * Three things live here that have nowhere else to be:
+ *
+ * UTF-8 decoding. The parser works in bytes because the escape sequence
+ * grammar is ASCII, but what gets printed is a codepoint, so the decoding
+ * happens between the two. It has to survive being cut mid-character for the
+ * same reason the parser does.
+ *
+ * How wide a character is, which decides whether it takes one cell or two,
+ * and whether it is a combining mark that joins the character before it
+ * rather than taking a cell at all.
+ *
+ * SGR. sgr.hpp was ported early and has had no caller since; this is it. The
+ * attributes it produces are applied to the cursor's style, which is what
+ * every subsequently printed character is then written with.
+ */
+
+#pragma once
+#ifndef WISP_TERMINAL_STREAM_HPP
+#define WISP_TERMINAL_STREAM_HPP
+
+#include <stddef.h>
+#include <stdint.h>
+
+#include "terminal.hpp"
+#include "parser.hpp"
+#include "sgr.hpp"
+
+namespace wisp {
+namespace terminal {
+
+/* ─── how wide is a character ────────────────────────────────────────────── */
+
+/* Columns a codepoint occupies: 0, 1 or 2.
+ *
+ * PLACEHOLDER. The real answer is a table generated from the Unicode
+ * database, which upstream builds at compile time and which is thousands of
+ * ranges. This covers the cases that decide whether ordinary output looks
+ * right — combining marks take no cell, the CJK and emoji blocks take two,
+ * everything else takes one — and is wrong in the places a generated table
+ * exists to get right. It is deliberately one function so that replacing it
+ * is replacing one function. */
+inline int stream_codepoint_width(uint32_t cp) {
+    if (cp == 0) return 0;
+
+    /* Combining marks, which attach to the character before them. */
+    if ((cp >= 0x0300 && cp <= 0x036F) ||   /* combining diacriticals */
+        (cp >= 0x1AB0 && cp <= 0x1AFF) ||
+        (cp >= 0x1DC0 && cp <= 0x1DFF) ||
+        (cp >= 0x20D0 && cp <= 0x20FF) ||   /* combining marks for symbols */
+        (cp >= 0xFE00 && cp <= 0xFE0F) ||   /* variation selectors */
+        (cp >= 0xFE20 && cp <= 0xFE2F)) {
+        return 0;
+    }
+
+    /* Zero-width joiner and the direction marks. */
+    if (cp == 0x200B || cp == 0x200C || cp == 0x200D || cp == 0xFEFF) return 0;
+
+    if ((cp >= 0x1100 && cp <= 0x115F) ||   /* Hangul jamo */
+        (cp >= 0x2E80 && cp <= 0x303E) ||   /* CJK radicals, punctuation */
+        (cp >= 0x3041 && cp <= 0x33FF) ||   /* kana, CJK compatibility */
+        (cp >= 0x3400 && cp <= 0x4DBF) ||
+        (cp >= 0x4E00 && cp <= 0x9FFF) ||   /* CJK unified ideographs */
+        (cp >= 0xA000 && cp <= 0xA4CF) ||   /* Yi */
+        (cp >= 0xAC00 && cp <= 0xD7A3) ||   /* Hangul syllables */
+        (cp >= 0xF900 && cp <= 0xFAFF) ||
+        (cp >= 0xFE30 && cp <= 0xFE6F) ||
+        (cp >= 0xFF00 && cp <= 0xFF60) ||   /* fullwidth forms */
+        (cp >= 0xFFE0 && cp <= 0xFFE6) ||
+        (cp >= 0x1F300 && cp <= 0x1F64F) || /* emoji */
+        (cp >= 0x1F900 && cp <= 0x1F9FF) ||
+        (cp >= 0x20000 && cp <= 0x3FFFD)) {
+        return 2;
+    }
+
+    return 1;
+}
+
+/* ─── UTF-8 ──────────────────────────────────────────────────────────────── */
+
+/* A decoder that can be stopped in the middle of a character.
+ *
+ * The same problem the parser has: a read can end anywhere, including between
+ * the bytes of one character. So the partial state is a field rather than a
+ * local. */
+struct Utf8 {
+    uint32_t cp;         /* what has been accumulated */
+    uint8_t  remaining;  /* continuation bytes still expected */
+
+    Utf8() : cp(0), remaining(0) {}
+};
+
+/* Feed one byte, and get back however many codepoints it completed.
+ *
+ * Usually none or one. Two happens when a byte both ends a broken character
+ * and begins a good one, which is why this returns a count rather than a
+ * bool: an ASCII byte interrupting a half-finished sequence is two separate
+ * pieces of news.
+ *
+ * Invalid input yields U+FFFD, the replacement character, rather than being
+ * dropped — including a sequence that was cut short by something other than
+ * its own continuation bytes. A terminal that silently swallowed bad bytes
+ * would leave a user staring at output with a hole in it and no reason for
+ * it; the replacement at least says something arrived that could not be
+ * read. */
+inline int utf8_next(Utf8 *u, uint8_t b, uint32_t out[2]) {
+    if (u->remaining > 0) {
+        if ((b & 0xC0) != 0x80) {
+            /* Not a continuation byte, so the character was truncated. What
+             * was collected is unreadable and says so, and the byte that
+             * interrupted it is not part of it — it starts a new character,
+             * which is decoded here rather than pushed back. */
+            u->remaining = 0;
+            u->cp = 0;
+
+            out[0] = 0xFFFD;
+            if (b < 0x80) {
+                out[1] = b;
+                return 2;
+            }
+
+            /* The interrupting byte begins a sequence of its own. */
+            return 1 + utf8_next(u, b, out + 1);
+        }
+
+        u->cp = (u->cp << 6) | (uint32_t)(b & 0x3F);
+        u->remaining--;
+        if (u->remaining > 0) return 0;
+
+        out[0] = u->cp;
+        u->cp = 0;
+        return 1;
+    }
+
+    if (b < 0x80) {
+        out[0] = b;
+        return 1;
+    }
+    if ((b & 0xE0) == 0xC0) {
+        u->cp = (uint32_t)(b & 0x1F);
+        u->remaining = 1;
+        return 0;
+    }
+    if ((b & 0xF0) == 0xE0) {
+        u->cp = (uint32_t)(b & 0x0F);
+        u->remaining = 2;
+        return 0;
+    }
+    if ((b & 0xF8) == 0xF0) {
+        u->cp = (uint32_t)(b & 0x07);
+        u->remaining = 3;
+        return 0;
+    }
+
+    /* A continuation byte with nothing to continue, or a length nobody
+     * defines. */
+    out[0] = 0xFFFD;
+    return 1;
+}
+
+/* ─── the stream ─────────────────────────────────────────────────────────── */
+
+struct Stream {
+    Terminal *terminal;
+    parser::Parser parser;
+    Utf8 utf8;
+
+    Stream() : terminal(nullptr), parser(), utf8() {}
+};
+
+inline void stream_init(Stream *s, Terminal *t) {
+    *s = Stream();
+    s->terminal = t;
+}
+
+/* ─── SGR ────────────────────────────────────────────────────────────────── */
+
+/* Apply one SGR attribute to the cursor's style.
+ *
+ * The style is the cursor's rather than the screen's because it is a property
+ * of what will be written next, not of anything already on the screen. */
+inline void stream_apply_sgr(Terminal *t, const Attribute &a) {
+    style::Style &st = t->active->cursor.style;
+
+    switch (a.tag) {
+        case AttributeTag::unset:
+            st = style::Style();
+            break;
+
+        case AttributeTag::bold: st.flags.bold = true; break;
+        case AttributeTag::reset_bold:
+            /* SGR 22 turns off both, which is a quirk of the standard rather
+             * than an oversight here. */
+            st.flags.bold = false;
+            st.flags.faint = false;
+            break;
+        case AttributeTag::faint: st.flags.faint = true; break;
+        case AttributeTag::italic: st.flags.italic = true; break;
+        case AttributeTag::reset_italic: st.flags.italic = false; break;
+
+        case AttributeTag::underline:
+            st.flags.underline = a.underline;
+            break;
+        case AttributeTag::underline_color:
+            st.underline_color.tag = style::StyleColor::Tag::rgb;
+            st.underline_color.rgb = a.rgb;
+            break;
+        case AttributeTag::underline_color_256:
+            st.underline_color.tag = style::StyleColor::Tag::palette;
+            st.underline_color.palette = a.idx;
+            break;
+        case AttributeTag::reset_underline_color:
+            st.underline_color.tag = style::StyleColor::Tag::none;
+            break;
+
+        case AttributeTag::overline: st.flags.overline = true; break;
+        case AttributeTag::reset_overline: st.flags.overline = false; break;
+        case AttributeTag::blink: st.flags.blink = true; break;
+        case AttributeTag::reset_blink: st.flags.blink = false; break;
+        case AttributeTag::inverse: st.flags.inverse = true; break;
+        case AttributeTag::reset_inverse: st.flags.inverse = false; break;
+        case AttributeTag::invisible: st.flags.invisible = true; break;
+        case AttributeTag::reset_invisible:
+            st.flags.invisible = false;
+            break;
+        case AttributeTag::strikethrough:
+            st.flags.strikethrough = true;
+            break;
+        case AttributeTag::reset_strikethrough:
+            st.flags.strikethrough = false;
+            break;
+
+        case AttributeTag::direct_color_fg:
+            st.fg_color.tag = style::StyleColor::Tag::rgb;
+            st.fg_color.rgb = a.rgb;
+            break;
+        case AttributeTag::direct_color_bg:
+            st.bg_color.tag = style::StyleColor::Tag::rgb;
+            st.bg_color.rgb = a.rgb;
+            break;
+
+        case AttributeTag::fg_8:
+        case AttributeTag::bright_fg_8:
+        case AttributeTag::fg_256:
+            st.fg_color.tag = style::StyleColor::Tag::palette;
+            st.fg_color.palette = a.idx;
+            break;
+
+        case AttributeTag::bg_8:
+        case AttributeTag::bright_bg_8:
+        case AttributeTag::bg_256:
+            st.bg_color.tag = style::StyleColor::Tag::palette;
+            st.bg_color.palette = a.idx;
+            break;
+
+        case AttributeTag::reset_fg:
+            st.fg_color.tag = style::StyleColor::Tag::none;
+            break;
+        case AttributeTag::reset_bg:
+            st.bg_color.tag = style::StyleColor::Tag::none;
+            break;
+
+        case AttributeTag::unknown:
+            /* Something nobody here implements. Ignored rather than guessed
+             * at, and not a reason to abandon the rest of the sequence: a
+             * program setting one attribute this does not know still meant
+             * the others. */
+            break;
+    }
+}
+
+/* ─── dispatch ───────────────────────────────────────────────────────────── */
+
+inline void stream_execute(Terminal *t, uint8_t b) {
+    switch (b) {
+        case 0x07: break;                      /* BEL: nothing visual */
+        case 0x08: terminal_backspace(t); break;
+        case 0x09: terminal_horizontal_tab(t, 1); break;
+        case 0x0A:                             /* LF */
+        case 0x0B:                             /* VT, which acts as LF */
+        case 0x0C:                             /* FF, likewise */
+            terminal_linefeed(t);
+            break;
+        case 0x0D: terminal_carriage_return(t); break;
+        default: break;
+    }
+}
+
+inline void stream_csi(Terminal *t, const parser::Action &a) {
+    using parser::action_param;
+    using parser::action_param_raw;
+
+    Screen *s = t->active;
+
+    /* Private sequences are a different namespace: CSI ? 25 h has nothing to
+     * do with CSI 25 h. */
+    if (a.private_marker == '?') {
+        const bool set = a.final_byte == 'h';
+        if (a.final_byte != 'h' && a.final_byte != 'l') return;
+
+        for (size_t i = 0; i < a.param_count; i++) {
+            switch (a.params[i]) {
+                case 1: t->modes.cursor_keys = set; break;
+                case 6:
+                    t->modes.origin = set;
+                    /* Changing the origin homes the cursor, since the
+                     * coordinates it was at mean something else now. */
+                    terminal_cursor_position(t, 0, 0);
+                    break;
+                case 7:
+                    t->modes.wraparound = set;
+                    terminal_apply_modes(t);
+                    break;
+                case 1047:
+                case 1049:
+                    if (set) {
+                        terminal_alt_screen_enter(t);
+                    } else {
+                        terminal_alt_screen_leave(t);
+                    }
+                    break;
+                default: break;
+            }
+        }
+        return;
+    }
+
+    if (a.private_marker != 0) return;
+
+    switch (a.final_byte) {
+        case '@': terminal_insert_chars(t, action_param(a, 0, 1)); break;
+        case 'A': screen_cursor_up(s, action_param(a, 0, 1)); break;
+        case 'B': screen_cursor_down(s, action_param(a, 0, 1)); break;
+        case 'C': screen_cursor_right(s, action_param(a, 0, 1)); break;
+        case 'D': screen_cursor_left(s, action_param(a, 0, 1)); break;
+
+        case 'G':
+            /* CHA: a column, counted from one. */
+            terminal_cursor_position(t, (CellCountInt)(action_param(a, 0, 1) - 1),
+                                     s->cursor.y);
+            break;
+
+        case 'H':
+        case 'f':
+            terminal_cursor_position(t, (CellCountInt)(action_param(a, 1, 1) - 1),
+                                     (CellCountInt)(action_param(a, 0, 1) - 1));
+            break;
+
+        case 'J': screen_erase_display(s, action_param_raw(a, 0, 0), false); break;
+        case 'K': screen_erase_line(s, action_param_raw(a, 0, 0), false); break;
+        case 'L': terminal_insert_lines(t, action_param(a, 0, 1)); break;
+        case 'M': terminal_delete_lines(t, action_param(a, 0, 1)); break;
+        case 'P': terminal_delete_chars(t, action_param(a, 0, 1)); break;
+        case 'X': screen_erase_chars(s, action_param(a, 0, 1), false); break;
+        case 'Z': terminal_reverse_tab(t, action_param(a, 0, 1)); break;
+
+        case 'd':
+            /* VPA: a row, counted from one. */
+            terminal_cursor_position(t, s->cursor.x,
+                                     (CellCountInt)(action_param(a, 0, 1) - 1));
+            break;
+
+        case 'g': terminal_tab_clear(t, action_param_raw(a, 0, 0)); break;
+
+        case 'h':
+        case 'l': {
+            const bool set = a.final_byte == 'h';
+            for (size_t i = 0; i < a.param_count; i++) {
+                if (a.params[i] == 4) t->modes.insert = set;
+            }
+            break;
+        }
+
+        case 'm': {
+            /* The colon flags are a bitmask here and one byte per parameter
+             * there, because sgr.hpp was written before the parser existed
+             * and takes what was convenient to give it then. */
+            uint8_t colons[parser::MAX_PARAMS];
+            for (size_t i = 0; i < parser::MAX_PARAMS; i++) {
+                colons[i] = parser::action_param_is_sub(a, i) ? 1 : 0;
+            }
+
+            SgrParser p(a.params, a.param_count, colons);
+            Attribute attr;
+            while (p.next(&attr)) stream_apply_sgr(t, attr);
+            break;
+        }
+
+        case 'r':
+            terminal_set_scroll_region(
+                t, (CellCountInt)(action_param(a, 0, 1) - 1),
+                (CellCountInt)(action_param(a, 1, (uint16_t)t->rows) - 1));
+            break;
+
+        default: break;
+    }
+}
+
+inline void stream_esc(Terminal *t, const parser::Action &a) {
+    if (a.intermediate_count > 0) {
+        /* Character set selection and the rest. Nothing here implements
+         * them, and doing nothing is right until something does — guessing
+         * would corrupt output rather than merely not improving it. */
+        return;
+    }
+
+    switch (a.final_byte) {
+        case '7': screen_save_cursor(t->active); break;
+        case '8': screen_restore_cursor(t->active); break;
+        case 'D': terminal_linefeed(t); break;
+        case 'E':
+            terminal_carriage_return(t);
+            terminal_linefeed(t);
+            break;
+        case 'H': terminal_tab_set(t); break;
+        case 'M': terminal_reverse_index(t); break;
+        default: break;
+    }
+}
+
+/* ─── feeding it ─────────────────────────────────────────────────────────── */
+
+inline void stream_print(Stream *s, uint32_t cp) {
+    Terminal *t = s->terminal;
+    const int width = stream_codepoint_width(cp);
+
+    if (width == 0) {
+        /* A combining mark joins the character before it rather than taking a
+         * cell. A mark with nothing to join is dropped: it has nothing to
+         * modify, and a cell of its own would render as a stray accent. */
+        terminal_print_combining(t, cp);
+        return;
+    }
+
+    terminal_print(t, cp, width);
+}
+
+/* Feed bytes. Everything that can go wrong in here has already been decided
+ * somewhere lower down, so this reports nothing: a terminal's whole job is to
+ * keep going. */
+inline void stream_feed(Stream *s, const uint8_t *data, size_t len) {
+    for (size_t i = 0; i < len; i++) {
+        parser::Actions acts = parser::parser_next(&s->parser, data[i]);
+
+        for (uint8_t j = 0; j < acts.count; j++) {
+            const parser::Action &a = acts.list[j];
+
+            switch (a.tag) {
+                case parser::ActionTag::print: {
+                    uint32_t cps[2] = {0, 0};
+                    const int n = utf8_next(&s->utf8, a.byte, cps);
+                    for (int k = 0; k < n; k++) stream_print(s, cps[k]);
+                    break;
+                }
+
+                case parser::ActionTag::execute:
+                    /* A control byte in the middle of a character means the
+                     * character was never finished. The control still
+                     * happens — it is what it is regardless — but the partial
+                     * codepoint is abandoned rather than completed with
+                     * whatever comes next. */
+                    s->utf8 = Utf8();
+                    stream_execute(s->terminal, a.byte);
+                    break;
+
+                case parser::ActionTag::csi_dispatch:
+                    stream_csi(s->terminal, a);
+                    break;
+
+                case parser::ActionTag::esc_dispatch:
+                    stream_esc(s->terminal, a);
+                    break;
+
+                case parser::ActionTag::osc_dispatch:
+                case parser::ActionTag::dcs_hook:
+                case parser::ActionTag::dcs_put:
+                case parser::ActionTag::dcs_unhook:
+                case parser::ActionTag::none:
+                    break;
+            }
+        }
+    }
+}
+
+inline void stream_feed_text(Stream *s, const char *text, size_t len) {
+    stream_feed(s, (const uint8_t *)text, len);
+}
+
+} /* namespace terminal */
+} /* namespace wisp */
+
+#endif /* WISP_TERMINAL_STREAM_HPP */
