@@ -16,7 +16,7 @@ License: MIT, (c) 2024 Mitchell Hashimoto and Ghostty contributors
 | Ported | - | 5370 |
 | Not applicable to a Windows port | - | 37082 |
 | Remaining | - | 299949 |
-| ...of which partially ported | - | 7231 |
+| ...of which partially ported | - | 7471 |
 
 Status values: `todo`, `wip`, `done`, `n/a`. A `wip` file counts
 toward *remaining*, not ported — a partially ported file is not
@@ -107,7 +107,7 @@ whole file's length.
 | `terminal/mem.zig` | 260 | todo |
 | `terminal/clipboard.zig` | 256 | todo |
 | `terminal/paste.zig` | 247 | todo |
-| `terminal/hyperlink.zig` | 240 | todo |
+| `terminal/hyperlink.zig` | 240 | wip |
 | `terminal/device_attributes.zig` | 227 | todo |
 | `terminal/size.zig` | 227 | done |
 | `terminal/highlight.zig` | 213 | todo |

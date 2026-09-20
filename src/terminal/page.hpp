@@ -4,10 +4,10 @@
  *
  * Cell and Row, the storage primitives a Page is built from.
  *
- * PARTIAL PORT. Cell, Row and their enums are here, together with the
- * definitions that close the style/page cycle. The Page struct itself — its
- * capacity calculation, layout, and the operations over it — is still to come.
- * The ledger records page.zig as `wip`.
+ * PARTIAL PORT. Cell, Row, Capacity, the layout, and the Page struct's
+ * storage layer are here, along with the definitions that close the style and
+ * hyperlink cycles. The larger operations — resize, clone, scrolling, grapheme
+ * management — are still to come, so the ledger records page.zig as `wip`.
  *
  * BIT LAYOUT. Both Cell and Row are exactly 64 bits, and the field order
  * matters: it is what lets a row of cells be memcpy'd and a page be relocated
@@ -44,6 +44,7 @@
 #include "style.hpp"
 #include "bitmap_allocator.hpp"
 #include "hash_map.hpp"
+#include "hyperlink.hpp"
 
 namespace wisp {
 namespace terminal {
@@ -390,11 +391,10 @@ struct Capacity {
  * treat all-zero as their empty state, so the pages behind everything past
  * the row headers stay untouched until first use.
  *
- * PARTIAL. The hyperlink map and set regions are not laid out yet, pending
- * the hyperlink.zig port — it and page.zig are the other cycle that
- * docs/GHOSTTY_PORT_ORDER.md flags, since a hyperlink entry stores offsets
- * into this page's string storage. Adding them will move the total size, so
- * a page built now is not layout-compatible with one built later.
+ * The hyperlink regions sit at the end. A cell that is part of a link carries
+ * only a bit; the map turns that cell's offset into a link ID, and the set
+ * holds the link data itself so a run of cells under one OSC 8 sequence
+ * shares one entry.
  */
 struct PageLayout {
     size_t total_size;
@@ -416,6 +416,12 @@ struct PageLayout {
 
     size_t              string_alloc_start;
     StringAlloc::Layout string_alloc_layout;
+
+    size_t                 hyperlink_map_start;
+    hyperlink::Map::Layout hyperlink_map_layout;
+
+    size_t                 hyperlink_set_start;
+    hyperlink::Set::Layout hyperlink_set_layout;
 
     Capacity capacity;
 
@@ -456,7 +462,36 @@ struct PageLayout {
         const size_t string_alloc_end =
             l.string_alloc_start + l.string_alloc_layout.total_size;
 
-        l.total_size = string_alloc_end;
+        /* Many cells can share one link, so the map scales with cells while
+         * the set scales with the byte budget. Sizing the map to every cell
+         * would roughly double a page for something almost no cell uses, so
+         * it is bounded at an eighth of them with a floor — a page with more
+         * distinct linked cells than that refuses the extra links rather
+         * than growing, and the text still renders. */
+        {
+            const size_t cells = (size_t)cap.rows * (size_t)cap.cols;
+            size_t map_entries = cells / 8;
+            if (map_entries < 64) map_entries = 64;
+
+            l.hyperlink_map_layout = hyperlink::Map::Layout::init(
+                hyperlink::Map::capacity_for_count((uint32_t)map_entries));
+            l.hyperlink_map_start = align_forward(string_alloc_end, alignof(uint64_t));
+            const size_t hyperlink_map_end =
+                l.hyperlink_map_start + l.hyperlink_map_layout.total_size;
+
+            /* A link needs a URI, so the byte budget bounds how many can
+             * exist. Sixteen bytes is a short but plausible URI. */
+            size_t set_entries = (size_t)cap.hyperlink_bytes / 16;
+            if (set_entries < 8) set_entries = 8;
+
+            l.hyperlink_set_layout = hyperlink::Set::Layout::init(
+                hyperlink::Set::capacity_for_count(set_entries));
+            l.hyperlink_set_start =
+                align_forward(hyperlink_map_end, hyperlink::Set::base_align);
+
+            l.total_size = l.hyperlink_set_start + l.hyperlink_set_layout.total_size;
+        }
+
         return l;
     }
 
@@ -549,6 +584,11 @@ struct Page {
     GraphemeMap   grapheme_map;
     StringAlloc   string_alloc;
 
+    /* Cells that are part of a link, and the link data itself. A cell holds
+       only a bit, so the map turns a linked cell's offset into an ID. */
+    hyperlink::Map hyperlink_map;
+    hyperlink::Set hyperlink_set;
+
     Capacity capacity;
     size_t   size;
 
@@ -580,6 +620,12 @@ struct Page {
             base.add(l.grapheme_map_start), l.grapheme_map_layout);
         p.string_alloc = StringAlloc::init_assume_zeroed(
             base.add(l.string_alloc_start), l.string_alloc_layout);
+
+        p.hyperlink_map = hyperlink::Map::init_assume_zeroed(
+            base.add(l.hyperlink_map_start), l.hyperlink_map_layout);
+        p.hyperlink_set = hyperlink::Set::init_assume_zeroed(
+            base.add(l.hyperlink_set_start), l.hyperlink_set_layout,
+            hyperlink::Context());
 
         /* Point each row at its slice of the cell array. This is the one thing
          * a zeroed buffer cannot express, since row 0's cells are not at
@@ -683,6 +729,173 @@ struct Page {
     /* Number of distinct styles currently interned. */
     size_t style_count() const { return styles.count(); }
 };
+
+/* ─── closing the hyperlink/page cycle ───────────────────────────────────── */
+
+/* Declared in hyperlink.hpp against a forward-declared Page. */
+inline void hyperlink::PageEntry::free(Page *page) const {
+    if (!page) return;
+
+    /* An explicit ID is its own allocation; an implicit one is just a
+     * counter and owns nothing. */
+    if (kind == IdKind::explicit_id && explicit_id.len > 0) {
+        page->string_alloc.free(page->memory,
+                                explicit_id.offset.ptr(page->memory),
+                                explicit_id.len);
+    }
+    if (uri.len > 0) {
+        page->string_alloc.free(page->memory, uri.offset.ptr(page->memory), uri.len);
+    }
+}
+
+/* ─── page hyperlink operations ──────────────────────────────────────────── */
+
+/* Hash for the hyperlink map's keys, which are cell offsets.
+ *
+ * A cell offset is always a multiple of sizeof(Cell), so its low bits are
+ * zero. The map takes its bucket index from the low bits of the hash, so
+ * using the offset directly would leave most buckets unreachable and pile
+ * every key into a fraction of the table. Mixing first spreads them. */
+struct PageHyperlinkHash {
+    uint64_t operator()(OffsetInt off) const {
+        uint64_t x = (uint64_t)off + 0x9E3779B97F4A7C15ULL;
+        x = (x ^ (x >> 30)) * 0xBF58476D1CE4E5B9ULL;
+        x = (x ^ (x >> 27)) * 0x94D049BB133111EBULL;
+        return x ^ (x >> 31);
+    }
+};
+
+inline uint64_t page_hyperlink_hash(OffsetInt off) {
+    return PageHyperlinkHash()(off);
+}
+
+/* Copy bytes into the page's string storage, returning a slice.
+ * Returns false if there is no room. */
+inline bool page_alloc_string(Page *p, const char *s, size_t len,
+                              Offset<uint8_t>::Slice *out) {
+    out->len = 0;
+    out->offset.offset = 0;
+    if (len == 0) return true;
+
+    uint8_t *dst = p->string_alloc.alloc<uint8_t>(p->memory, len);
+    if (!dst) return false;
+
+    memcpy(dst, s, len);
+    out->offset = get_offset<uint8_t>(p->memory, dst);
+    out->len = len;
+    return true;
+}
+
+/* Attach a hyperlink to a cell.
+ *
+ * `id` may be null, in which case `implicit` distinguishes this link from
+ * others — that is what keeps two separate OSC 8 runs to the same URI from
+ * being treated as one link.
+ *
+ * Returns false and changes nothing if the strings or the map have no room.
+ * The text still renders; only the link is dropped. */
+inline bool page_set_cell_hyperlink(Page *p, CellCountInt x, CellCountInt y,
+                                    const char *uri, size_t uri_len,
+                                    const char *id, size_t id_len,
+                                    OffsetInt implicit) {
+    if (!p || !uri || uri_len == 0) return false;
+
+    /* The set resolves offsets through the page, so it needs to know which
+     * page before any lookup or insert. */
+    p->hyperlink_set.context.base = p->memory;
+    p->hyperlink_set.context.src_base = nullptr;
+    p->hyperlink_set.context.page = p;
+
+    hyperlink::PageEntry entry;
+    if (!page_alloc_string(p, uri, uri_len, &entry.uri)) return false;
+
+    if (id && id_len > 0) {
+        entry.kind = hyperlink::PageEntry::IdKind::explicit_id;
+        if (!page_alloc_string(p, id, id_len, &entry.explicit_id)) {
+            /* Undo the URI, or it leaks for the page's lifetime. */
+            p->string_alloc.free(p->memory, entry.uri.offset.ptr(p->memory),
+                                 entry.uri.len);
+            return false;
+        }
+    } else {
+        entry.kind = hyperlink::PageEntry::IdKind::implicit_id;
+        entry.implicit_id = implicit;
+    }
+
+    /* If an identical link is already interned, add() reports it through the
+     * context's deleted hook, which releases the strings just allocated. */
+    hyperlink::Id link_id = 0;
+    if (p->hyperlink_set.add(p->memory, entry, &link_id) != AddResult::ok) {
+        entry.free(p);
+        return false;
+    }
+
+    Cell *c = p->get_cell(x, y);
+    const OffsetInt cell_off = get_offset<Cell>(p->memory, c).offset;
+
+    if (!p->hyperlink_map.put(p->memory, page_hyperlink_hash(cell_off),
+                              cell_off, link_id)) {
+        p->hyperlink_set.release(p->memory, link_id);
+        return false;
+    }
+
+    c->set_hyperlink(true);
+    p->get_row(y)->set_hyperlink(true);
+    return true;
+}
+
+/* The URI attached to a cell, or false if it has none.
+ *
+ * The returned pointer is into page memory and is invalidated by anything
+ * that frees the link. */
+inline bool page_get_cell_hyperlink(Page *p, CellCountInt x, CellCountInt y,
+                                    const uint8_t **uri, size_t *uri_len) {
+    if (!p) return false;
+
+    Cell *c = p->get_cell(x, y);
+    if (!c->hyperlink()) return false;
+
+    const OffsetInt cell_off = get_offset<Cell>(p->memory, c).offset;
+    hyperlink::Id *link_id = p->hyperlink_map.get(
+        p->memory, page_hyperlink_hash(cell_off), cell_off);
+    if (!link_id) return false;
+
+    p->hyperlink_set.context.base = p->memory;
+    p->hyperlink_set.context.src_base = nullptr;
+    p->hyperlink_set.context.page = p;
+
+    hyperlink::PageEntry *e = p->hyperlink_set.get(p->memory, *link_id);
+    if (!e) return false;
+
+    *uri = e->uri.offset.ptr(p->memory);
+    *uri_len = e->uri.len;
+    return true;
+}
+
+/* Detach a cell's hyperlink, releasing the link if this was its last cell. */
+inline void page_clear_cell_hyperlink(Page *p, CellCountInt x, CellCountInt y) {
+    if (!p) return;
+
+    Cell *c = p->get_cell(x, y);
+    if (!c->hyperlink()) return;
+
+    const OffsetInt cell_off = get_offset<Cell>(p->memory, c).offset;
+    const uint64_t h = page_hyperlink_hash(cell_off);
+
+    hyperlink::Id *link_id = p->hyperlink_map.get(p->memory, h, cell_off);
+    if (link_id) {
+        p->hyperlink_set.context.base = p->memory;
+        p->hyperlink_set.context.src_base = nullptr;
+        p->hyperlink_set.context.page = p;
+
+        p->hyperlink_set.release(p->memory, *link_id);
+        p->hyperlink_map.remove(p->memory, h, cell_off, PageHyperlinkHash());
+    }
+
+    /* The row's hyperlink flag is a false-positive-only hint like styled, so
+     * it is deliberately not cleared here. */
+    c->set_hyperlink(false);
+}
 
 /* ─── closing the style/page cycle ───────────────────────────────────────── */
 
