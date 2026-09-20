@@ -1127,12 +1127,102 @@ inline bool page_clone_cell_hyperlink(Page *dst, Page *src,
     return true;
 }
 
-/* Copy a single row from one page to another.
+/* Copy a single cell from one page to another, translating everything it
+ * refers to.
  *
  * Everything a cell points at is page-relative, so a clone is not a memcpy:
- * style IDs index the source's style set, hyperlink IDs the source's link
- * set, and grapheme runs live in the source's storage. Each has to be
- * re-interned in the destination, which may hand back different IDs.
+ * the style ID indexes the source's style set, the hyperlink ID the source's
+ * link set, and the grapheme run lives in the source's storage. Each has to
+ * be re-interned in the destination, which may hand back a different ID.
+ *
+ * The destination cell is erased first, so this may be used to overwrite a
+ * cell that already holds something. On failure it is erased again and false
+ * returned, leaving no half-translated cell behind.
+ *
+ * Cells rather than rows are the unit here because reflow moves cells to
+ * different columns and different rows than they came from. */
+inline bool page_clone_cell(Page *dst, CellCountInt dst_x, CellCountInt dst_y,
+                            Page *src, CellCountInt src_x, CellCountInt src_y) {
+    if (!dst || !src) return false;
+    if (dst_x >= dst->capacity.cols || dst_y >= dst->capacity.rows) return false;
+    if (src_x >= src->capacity.cols || src_y >= src->capacity.rows) return false;
+
+    page_erase_cell(dst, dst_x, dst_y);
+
+    Cell *sc = src->get_cell(src_x, src_y);
+    Cell *dc = dst->get_cell(dst_x, dst_y);
+    Row *dst_row = dst->get_row(dst_y);
+    *dc = *sc;
+
+    if (sc->style_id() != style::DEFAULT_ID) {
+        style::Style *s = src->styles.get(src->memory, sc->style_id());
+        if (!s) {
+            page_erase_cell(dst, dst_x, dst_y);
+            return false;
+        }
+        style::Id new_id = style::DEFAULT_ID;
+        if (dst->styles.add(dst->memory, *s, &new_id) != AddResult::ok) {
+            page_erase_cell(dst, dst_x, dst_y);
+            return false;
+        }
+        dc->set_style_id(new_id);
+        dst_row->set_styled(true);
+    }
+
+    if (sc->has_grapheme()) {
+        const uint32_t *cps = nullptr;
+        uint32_t len = 0;
+        /* Reset the tag first: the copied cell claims a cluster the
+         * destination has not stored yet, and append sets it back. */
+        dc->set_content_tag(ContentTag::codepoint);
+        if (page_grapheme_codepoints(src, src_x, src_y, &cps, &len)) {
+            for (uint32_t i = 0; i < len; i++) {
+                if (!page_append_grapheme(dst, dst_x, dst_y, cps[i])) {
+                    page_erase_cell(dst, dst_x, dst_y);
+                    return false;
+                }
+            }
+        }
+    }
+
+    if (sc->hyperlink()) {
+        const OffsetInt src_off = get_offset<Cell>(src->memory, sc).offset;
+        hyperlink::Id *src_id = src->hyperlink_map.get(
+            src->memory, page_cell_key_hash(src_off), src_off);
+
+        /* The bit is only a hint that the map may have an entry; a cell whose
+         * link has gone simply arrives without one. */
+        dc->set_hyperlink(false);
+        if (!src_id) return true;
+
+        src->hyperlink_set.context.base = src->memory;
+        src->hyperlink_set.context.src_base = nullptr;
+        src->hyperlink_set.context.page = src;
+        hyperlink::PageEntry *se = src->hyperlink_set.get(src->memory, *src_id);
+        if (!se) return true;
+
+        hyperlink::Id new_id = 0;
+        if (!page_clone_cell_hyperlink(dst, src, *se, &new_id)) {
+            page_erase_cell(dst, dst_x, dst_y);
+            return false;
+        }
+
+        const OffsetInt dst_off = get_offset<Cell>(dst->memory, dc).offset;
+        if (!dst->hyperlink_map.put(dst->memory, page_cell_key_hash(dst_off),
+                                    dst_off, new_id)) {
+            dst->hyperlink_set.release(dst->memory, new_id);
+            page_erase_cell(dst, dst_x, dst_y);
+            return false;
+        }
+
+        dc->set_hyperlink(true);
+        dst_row->set_hyperlink(true);
+    }
+
+    return true;
+}
+
+/* Copy a single row from one page to another.
  *
  * On failure the destination row is erased and false returned, so a caller
  * that runs out of destination capacity is left with a clean row rather than
@@ -1155,79 +1245,10 @@ inline bool page_clone_row(Page *dst, CellCountInt dst_y,
     dst_row->set_cells(dst_cells_off);
     dst_row->set_dirty(true);
 
-    Cell *dst_cells = dst->get_cells(dst_y);
-    Cell *src_cells = src->get_cells(src_y);
-
     for (CellCountInt x = 0; x < src->capacity.cols; x++) {
-        Cell *sc = &src_cells[x];
-        dst_cells[x] = *sc;
-
-        if (sc->style_id() != style::DEFAULT_ID) {
-            style::Style *s = src->styles.get(src->memory, sc->style_id());
-            if (!s) {
-                page_erase_row(dst, dst_y);
-                return false;
-            }
-            style::Id new_id = style::DEFAULT_ID;
-            if (dst->styles.add(dst->memory, *s, &new_id) != AddResult::ok) {
-                page_erase_row(dst, dst_y);
-                return false;
-            }
-            dst_cells[x].set_style_id(new_id);
-            dst_row->set_styled(true);
-        }
-
-        if (sc->has_grapheme()) {
-            const uint32_t *cps = nullptr;
-            uint32_t len = 0;
-            /* Reset the tag first: the copied cell claims a cluster the
-             * destination has not stored yet, and append sets it back. */
-            dst_cells[x].set_content_tag(ContentTag::codepoint);
-            if (page_grapheme_codepoints(src, x, src_y, &cps, &len)) {
-                for (uint32_t i = 0; i < len; i++) {
-                    if (!page_append_grapheme(dst, x, dst_y, cps[i])) {
-                        page_erase_row(dst, dst_y);
-                        return false;
-                    }
-                }
-            }
-        }
-
-        if (sc->hyperlink()) {
-            const OffsetInt src_off = get_offset<Cell>(src->memory, sc).offset;
-            hyperlink::Id *src_id = src->hyperlink_map.get(
-                src->memory, page_cell_key_hash(src_off), src_off);
-
-            /* The bit is only a hint that the map may have an entry; a cell
-             * whose link has gone simply arrives without one. */
-            dst_cells[x].set_hyperlink(false);
-            if (!src_id) continue;
-
-            src->hyperlink_set.context.base = src->memory;
-            src->hyperlink_set.context.src_base = nullptr;
-            src->hyperlink_set.context.page = src;
-            hyperlink::PageEntry *se =
-                src->hyperlink_set.get(src->memory, *src_id);
-            if (!se) continue;
-
-            hyperlink::Id new_id = 0;
-            if (!page_clone_cell_hyperlink(dst, src, *se, &new_id)) {
-                page_erase_row(dst, dst_y);
-                return false;
-            }
-
-            const OffsetInt dst_off =
-                get_offset<Cell>(dst->memory, &dst_cells[x]).offset;
-            if (!dst->hyperlink_map.put(dst->memory,
-                                        page_cell_key_hash(dst_off), dst_off,
-                                        new_id)) {
-                dst->hyperlink_set.release(dst->memory, new_id);
-                page_erase_row(dst, dst_y);
-                return false;
-            }
-
-            dst_cells[x].set_hyperlink(true);
-            dst_row->set_hyperlink(true);
+        if (!page_clone_cell(dst, x, dst_y, src, x, src_y)) {
+            page_erase_row(dst, dst_y);
+            return false;
         }
     }
 
@@ -1249,6 +1270,207 @@ inline CellCountInt page_clone_rows(Page *dst, CellCountInt dst_y,
         }
     }
     return done;
+}
+
+/* ─── resize and reflow ──────────────────────────────────────────────────── */
+
+/* True if a cell holds nothing worth keeping.
+ *
+ * Trailing cells like this are dropped when a soft-wrapped line is re-laid,
+ * since they describe where the old width happened to fall rather than
+ * anything the program wrote. A cell holding a space is not blank: the
+ * program asked for that space, and erasing it would change a line that used
+ * spaces for alignment. */
+inline bool page_cell_is_blank(const Cell *c) {
+    return !c->has_text() && !c->has_bg_color() && !c->hyperlink() &&
+           c->style_id() == style::DEFAULT_ID && c->wide() == Wide::narrow;
+}
+
+/* How much of a row is content.
+ *
+ * A soft-wrapped row is normally full — it wrapped because the text ran off
+ * the end — so trimming it usually finds nothing. Trimming anyway costs a
+ * scan of an already-full row and means a row carrying a wrap flag it should
+ * not have does not drag a tail of blanks through the reflow. */
+inline CellCountInt page_row_used_width(Page *p, CellCountInt y) {
+    Cell *cells = p->get_cells(y);
+    CellCountInt w = p->capacity.cols;
+    while (w > 0 && page_cell_is_blank(&cells[w - 1])) w--;
+    return w;
+}
+
+/* The result of a reflow: how much of the destination was filled and how much
+ * of the source was read.
+ *
+ * Both are needed because neither implies the other — a narrower destination
+ * turns one source row into several, a wider one merges several into one, and
+ * either can run out first. */
+struct ReflowResult {
+    CellCountInt rows_written;
+    CellCountInt src_rows_consumed;
+
+    /* False if a cell could not be copied — the destination's style, link or
+     * grapheme storage filled up. What was written before that stands. */
+    bool ok;
+
+    ReflowResult() : rows_written(0), src_rows_consumed(0), ok(true) {}
+};
+
+/* Re-lay a page's contents at the destination's width.
+ *
+ * This is the resize that matters. A terminal's rows are not independent: a
+ * line too long for the screen is stored as several rows joined by the wrap
+ * flag, and changing the width means taking those runs apart and laying them
+ * out again. Rows the user hard-ended with a newline are left alone, which is
+ * the whole purpose of distinguishing a soft wrap from a hard one.
+ *
+ * Reflow works in cells rather than rows because a cell rarely lands on the
+ * column it came from. Wide characters make that concrete: one will not
+ * straddle the new right edge, so if a single column is left the destination
+ * gets a spacer_head there and the pair moves to the next row. Reading the
+ * source, spacer_head cells are dropped — they record where the *old* width
+ * fell and say nothing about the text.
+ *
+ * Stops when the destination runs out of rows, reporting how far into the
+ * source it got so a caller can continue into another page. src_rows bounds
+ * how much of the source is read, except that a wrapped run at the boundary
+ * is followed to its end — a line is reflowed whole or not at all. */
+inline ReflowResult page_reflow_into(Page *dst, CellCountInt dst_y,
+                                     Page *src, CellCountInt src_y,
+                                     CellCountInt src_rows) {
+    ReflowResult r;
+    if (!dst || !src) {
+        r.ok = false;
+        return r;
+    }
+
+    const CellCountInt dst_cols = dst->capacity.cols;
+    const CellCountInt dst_rows = dst->capacity.rows;
+    /* Reading past the source's own rows would reflow whatever the page was
+     * initialized with. */
+    CellCountInt src_end = (CellCountInt)(src_y + src_rows);
+    if (src_end > src->capacity.rows) src_end = src->capacity.rows;
+    if (dst_cols == 0) {
+        r.ok = false;
+        return r;
+    }
+
+    CellCountInt dy = dst_y;
+    CellCountInt dx = 0;
+    bool row_started = false;
+
+    /* Step onto a destination row, erasing what was there. */
+    struct Local {
+        static bool begin_row(Page *dst, CellCountInt dy, bool continuation) {
+            page_erase_row(dst, dy);
+            Row *row = dst->get_row(dy);
+            row->set_wrap(false);
+            row->set_wrap_continuation(continuation);
+            row->set_dirty(true);
+            return true;
+        }
+    };
+
+    CellCountInt sy = src_y;
+    while (sy < src_end) {
+        if (dy >= dst_rows) break;
+
+        /* One logical line: the source rows joined by wrap flags. */
+        const CellCountInt line_start = sy;
+        CellCountInt line_end = sy;
+        /* A wrapped run is followed to its end even past src_rows: a line is
+         * reflowed whole or not at all. */
+        while (line_end + 1 < src->capacity.rows &&
+               src->get_row(line_end)->wrap()) {
+            line_end++;
+        }
+
+        if (!row_started) {
+            Local::begin_row(dst, dy, false);
+            r.rows_written++;
+            /* Prompt marks belong to the line, so they follow its first row. */
+            dst->get_row(dy)->set_semantic_prompt(
+                src->get_row(line_start)->semantic_prompt());
+            row_started = true;
+        }
+
+        bool out_of_rows = false;
+
+        for (CellCountInt y = line_start; y <= line_end && !out_of_rows; y++) {
+            const CellCountInt width = page_row_used_width(src, y);
+            Cell *src_cells = src->get_cells(y);
+
+            for (CellCountInt x = 0; x < width; x++) {
+                Cell *sc = &src_cells[x];
+
+                /* Artifacts of the old width, not content. */
+                if (sc->wide() == Wide::spacer_head) continue;
+                if (sc->wide() == Wide::spacer_tail) continue;
+
+                const CellCountInt units = sc->wide() == Wide::wide ? 2 : 1;
+
+                if ((CellCountInt)(dx + units) > dst_cols) {
+                    /* A wide character will not be split across the edge. The
+                     * leftover column gets a spacer_head, which is exactly what
+                     * that state is for. */
+                    if (units == 2 && dx < dst_cols) {
+                        Cell *pad = dst->get_cell(dx, dy);
+                        *pad = Cell();
+                        pad->set_wide(Wide::spacer_head);
+                    }
+
+                    dst->get_row(dy)->set_wrap(true);
+                    dy++;
+                    dx = 0;
+                    if (dy >= dst_rows) {
+                        out_of_rows = true;
+                        break;
+                    }
+                    Local::begin_row(dst, dy, true);
+                    r.rows_written++;
+
+                }
+
+                if (!page_clone_cell(dst, dx, dy, src, x, y)) {
+                    r.ok = false;
+                    r.src_rows_consumed = (CellCountInt)(line_start - src_y);
+                    return r;
+                }
+                dx++;
+
+                /* A wide character's tail travels with it, so the pair is
+                 * never separated by the move. */
+                if (units == 2 && (CellCountInt)(x + 1) < width &&
+                    src_cells[x + 1].wide() == Wide::spacer_tail) {
+                    if (!page_clone_cell(dst, dx, dy, src, (CellCountInt)(x + 1), y)) {
+                        r.ok = false;
+                        r.src_rows_consumed = (CellCountInt)(line_start - src_y);
+                        return r;
+                    }
+                    dx++;
+                    x++;
+                }
+            }
+        }
+
+        if (out_of_rows) {
+            /* The line did not fit. Report the source as consumed only up to
+             * the start of it, so a caller continuing into another page picks
+             * the whole line up again rather than splitting it. */
+            r.src_rows_consumed = (CellCountInt)(line_start - src_y);
+            return r;
+        }
+
+        /* The logical line ended here, hard. */
+        dst->get_row(dy)->set_wrap(false);
+        dy++;
+        dx = 0;
+        row_started = false;
+        sy = (CellCountInt)(line_end + 1);
+    }
+
+    r.src_rows_consumed = (CellCountInt)(sy - src_y);
+    return r;
 }
 
 /* ─── closing the style/page cycle ───────────────────────────────────────── */
