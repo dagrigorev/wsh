@@ -1047,6 +1047,210 @@ inline void page_erase_row(Page *p, CellCountInt y) {
     row->set_dirty(true);
 }
 
+/* ─── cloning ────────────────────────────────────────────────────────────── */
+
+/* Copy a hyperlink entry's strings into another page. Declared in
+ * hyperlink.hpp; defined here because it needs Page and the string storage. */
+inline bool hyperlink::PageEntry::dupe(const uint8_t *self_base, Page *dst,
+                                       PageEntry *out) const {
+    if (!dst || !out) return false;
+
+    PageEntry copy;
+    copy.kind = kind;
+    copy.implicit_id = implicit_id;
+
+    if (!page_alloc_string(dst, (const char *)uri.offset.ptr(self_base),
+                           uri.len, &copy.uri)) {
+        return false;
+    }
+
+    if (kind == IdKind::explicit_id && explicit_id.len > 0) {
+        if (!page_alloc_string(dst,
+                               (const char *)explicit_id.offset.ptr(self_base),
+                               explicit_id.len, &copy.explicit_id)) {
+            /* Leave the destination exactly as it was rather than stranding a
+             * URI nothing points at. */
+            dst->string_alloc.free(dst->memory, copy.uri.offset.ptr(dst->memory),
+                                   copy.uri.len);
+            return false;
+        }
+    }
+
+    *out = copy;
+    return true;
+}
+
+/* Copy one cell's hyperlink from another page, interning it in the
+ * destination's set and returning the destination's ID for it.
+ *
+ * The lookup runs before the strings are duplicated, using the source page as
+ * the hash and comparison base — that is what src_base on the context is for.
+ * A link shared by a run of cells therefore costs one copy of its strings, not
+ * one per cell. */
+inline bool page_clone_cell_hyperlink(Page *dst, Page *src,
+                                      const hyperlink::PageEntry &src_entry,
+                                      hyperlink::Id *out_id) {
+    dst->hyperlink_set.context.base = dst->memory;
+    dst->hyperlink_set.context.src_base = src->memory;
+    dst->hyperlink_set.context.page = dst;
+
+    if (dst->hyperlink_set.lookup(dst->memory, src_entry) != 0) {
+        /* Already interned here. add() takes the reference through the one
+         * code path that knows about resurrecting a dead entry, so it is used
+         * rather than touching the count directly. It cannot insert the
+         * source's entry verbatim, since the lookup it repeats just found a
+         * match. */
+        hyperlink::Id id = 0;
+        const AddResult r = dst->hyperlink_set.add(dst->memory, src_entry, &id);
+        dst->hyperlink_set.context.src_base = nullptr;
+        if (r != AddResult::ok) return false;
+        *out_id = id;
+        return true;
+    }
+
+    /* Genuinely new here, so the strings have to exist in the destination
+     * before the entry describing them does. */
+    hyperlink::PageEntry copy;
+    if (!src_entry.dupe(src->memory, dst, &copy)) {
+        dst->hyperlink_set.context.src_base = nullptr;
+        return false;
+    }
+
+    dst->hyperlink_set.context.src_base = nullptr;
+    hyperlink::Id id = 0;
+    if (dst->hyperlink_set.add(dst->memory, copy, &id) != AddResult::ok) {
+        copy.free(dst);
+        return false;
+    }
+
+    *out_id = id;
+    return true;
+}
+
+/* Copy a single row from one page to another.
+ *
+ * Everything a cell points at is page-relative, so a clone is not a memcpy:
+ * style IDs index the source's style set, hyperlink IDs the source's link
+ * set, and grapheme runs live in the source's storage. Each has to be
+ * re-interned in the destination, which may hand back different IDs.
+ *
+ * On failure the destination row is erased and false returned, so a caller
+ * that runs out of destination capacity is left with a clean row rather than
+ * a half-translated one. */
+inline bool page_clone_row(Page *dst, CellCountInt dst_y,
+                           Page *src, CellCountInt src_y) {
+    if (!dst || !src) return false;
+    if (dst_y >= dst->capacity.rows || src_y >= src->capacity.rows) return false;
+    if (dst->capacity.cols < src->capacity.cols) return false;
+
+    page_erase_row(dst, dst_y);
+
+    Row *dst_row = dst->get_row(dst_y);
+    const Row *src_row = src->get_row(src_y);
+
+    /* The row's flags come across, but its cells offset belongs to the
+     * destination's own allocation and must not. */
+    const Offset<Cell> dst_cells_off = dst_row->cells();
+    *dst_row = *src_row;
+    dst_row->set_cells(dst_cells_off);
+    dst_row->set_dirty(true);
+
+    Cell *dst_cells = dst->get_cells(dst_y);
+    Cell *src_cells = src->get_cells(src_y);
+
+    for (CellCountInt x = 0; x < src->capacity.cols; x++) {
+        Cell *sc = &src_cells[x];
+        dst_cells[x] = *sc;
+
+        if (sc->style_id() != style::DEFAULT_ID) {
+            style::Style *s = src->styles.get(src->memory, sc->style_id());
+            if (!s) {
+                page_erase_row(dst, dst_y);
+                return false;
+            }
+            style::Id new_id = style::DEFAULT_ID;
+            if (dst->styles.add(dst->memory, *s, &new_id) != AddResult::ok) {
+                page_erase_row(dst, dst_y);
+                return false;
+            }
+            dst_cells[x].set_style_id(new_id);
+            dst_row->set_styled(true);
+        }
+
+        if (sc->has_grapheme()) {
+            const uint32_t *cps = nullptr;
+            uint32_t len = 0;
+            /* Reset the tag first: the copied cell claims a cluster the
+             * destination has not stored yet, and append sets it back. */
+            dst_cells[x].set_content_tag(ContentTag::codepoint);
+            if (page_grapheme_codepoints(src, x, src_y, &cps, &len)) {
+                for (uint32_t i = 0; i < len; i++) {
+                    if (!page_append_grapheme(dst, x, dst_y, cps[i])) {
+                        page_erase_row(dst, dst_y);
+                        return false;
+                    }
+                }
+            }
+        }
+
+        if (sc->hyperlink()) {
+            const OffsetInt src_off = get_offset<Cell>(src->memory, sc).offset;
+            hyperlink::Id *src_id = src->hyperlink_map.get(
+                src->memory, page_cell_key_hash(src_off), src_off);
+
+            /* The bit is only a hint that the map may have an entry; a cell
+             * whose link has gone simply arrives without one. */
+            dst_cells[x].set_hyperlink(false);
+            if (!src_id) continue;
+
+            src->hyperlink_set.context.base = src->memory;
+            src->hyperlink_set.context.src_base = nullptr;
+            src->hyperlink_set.context.page = src;
+            hyperlink::PageEntry *se =
+                src->hyperlink_set.get(src->memory, *src_id);
+            if (!se) continue;
+
+            hyperlink::Id new_id = 0;
+            if (!page_clone_cell_hyperlink(dst, src, *se, &new_id)) {
+                page_erase_row(dst, dst_y);
+                return false;
+            }
+
+            const OffsetInt dst_off =
+                get_offset<Cell>(dst->memory, &dst_cells[x]).offset;
+            if (!dst->hyperlink_map.put(dst->memory,
+                                        page_cell_key_hash(dst_off), dst_off,
+                                        new_id)) {
+                dst->hyperlink_set.release(dst->memory, new_id);
+                page_erase_row(dst, dst_y);
+                return false;
+            }
+
+            dst_cells[x].set_hyperlink(true);
+            dst_row->set_hyperlink(true);
+        }
+    }
+
+    /* Columns past the source's width belong to the destination and are not
+     * described by the copied row, so they are left erased. */
+    return true;
+}
+
+/* Copy a run of rows. Rows already written into the destination are kept on
+ * failure — the caller knows how many succeeded from the return value. */
+inline CellCountInt page_clone_rows(Page *dst, CellCountInt dst_y,
+                                    Page *src, CellCountInt src_y,
+                                    CellCountInt count) {
+    CellCountInt done = 0;
+    for (; done < count; done++) {
+        if (!page_clone_row(dst, (CellCountInt)(dst_y + done), src,
+                            (CellCountInt)(src_y + done))) {
+            break;
+        }
+    }
+    return done;
+}
+
 /* ─── closing the style/page cycle ───────────────────────────────────────── */
 
 /* These were declared in style.hpp against a forward-declared Cell. Now that

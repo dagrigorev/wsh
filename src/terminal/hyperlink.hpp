@@ -121,6 +121,17 @@ struct PageEntry {
      * Defined in page.hpp, where Page is complete. */
     void free(Page *page) const;
 
+    /* Copy this entry into another page, allocating its strings there.
+     *
+     * An entry is only meaningful next to the page its slices point into, so
+     * moving a link between pages means materializing its strings in the
+     * destination. self_base is this entry's page, since the source is by
+     * definition not the destination.
+     *
+     * Returns false with nothing allocated if the destination's string
+     * storage is full. Defined in page.hpp, where Page is complete. */
+    bool dupe(const uint8_t *self_base, Page *dst, PageEntry *out) const;
+
 private:
     static uint64_t mix_byte(uint64_t h, uint8_t b) {
         h ^= (uint64_t)b;
