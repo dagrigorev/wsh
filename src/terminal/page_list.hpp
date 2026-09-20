@@ -19,9 +19,9 @@
  * any more, and forgetting it is freeing the page at the front.
  *
  * PARTIAL PORT. The list itself, page allocation, growth and trimming, pins,
- * the viewport, scrolling and resizing are here. Page splitting and pin
- * tracking across a reflow are not, so the ledger records PageList.zig as
- * `wip`.
+ * the viewport, scrolling, resizing, page replacement and splitting are
+ * here. Tracking pins across a reflow is not, so the ledger records
+ * PageList.zig as `wip`.
  */
 
 #pragma once
@@ -547,6 +547,202 @@ inline void page_list_scroll_delta(PageList *l, long delta) {
     page_list_scroll_to_pin(l, p);
 }
 
+
+
+/* ─── replacing and splitting pages ──────────────────────────────────────── */
+
+/* Which of a page's fixed budgets to enlarge.
+ *
+ * A page runs out in two quite different ways. It can run out of rows, which
+ * the list answers by handing over to a new page — that is scrolling, and the
+ * old rows stay where they are. Or it can run out of one of the budgets set
+ * when it was laid out: distinct styles, bytes of hyperlink text, grapheme
+ * codepoints. Those cannot be answered by a new page, because the rows that
+ * need them are in *this* one. The only answer is a roomier page with the
+ * same contents. */
+enum class PageBudget : uint8_t {
+    styles = 0,
+    hyperlink_bytes = 1,
+    grapheme_bytes = 2,
+    string_bytes = 3,
+};
+
+/* Move a node's pins and list bookkeeping onto a replacement node. */
+inline void page_list_replace_node(PageList *l, PageNode *old_node,
+                                   PageNode *fresh) {
+    fresh->prev = old_node->prev;
+    fresh->next = old_node->next;
+
+    if (fresh->prev) {
+        fresh->prev->next = fresh;
+    } else {
+        l->first = fresh;
+    }
+    if (fresh->next) {
+        fresh->next->prev = fresh;
+    } else {
+        l->last = fresh;
+    }
+
+    /* Row i of the old page is row i of the new one, so a viewport pinned
+     * into it is still looking at the same line. */
+    if (l->viewport == ViewportTag::pin && l->viewport_pin.node == old_node) {
+        l->viewport_pin.node = fresh;
+    }
+
+    l->bytes -= old_node->page.size;
+    l->bytes += fresh->page.size;
+    page_node_destroy(old_node);
+}
+
+/* Replace a page with one laid out to a different capacity, keeping its rows.
+ *
+ * This is the answer to a page running out of styles or of link text. The
+ * rows are cloned into the new page, which re-interns everything they refer
+ * to — so the style IDs and link IDs are not the same afterwards, and neither
+ * is the page's memory. Anything holding a raw pointer into the old page is
+ * stale, which is why pins name a node rather than an address.
+ *
+ * Returns the new node, or null if it could not be built. The list is
+ * untouched in that case: the new page is filled completely before the old
+ * one is given up. */
+inline PageNode *page_list_adjust_capacity(PageList *l, PageNode *node,
+                                           const Capacity &cap) {
+    if (!l || !node) return nullptr;
+    if (cap.cols != node->page.capacity.cols) return nullptr;
+    if (cap.rows < node->rows_used) return nullptr;
+
+    PageNode *fresh = page_node_create(cap);
+    if (!fresh) return nullptr;
+
+    for (CellCountInt y = 0; y < node->rows_used; y++) {
+        if (!page_clone_row(&fresh->page, y, &node->page, y)) {
+            page_node_destroy(fresh);
+            return nullptr;
+        }
+    }
+    fresh->rows_used = node->rows_used;
+
+    page_list_replace_node(l, node, fresh);
+    return fresh;
+}
+
+/* Enlarge one of a page's budgets, doubling it.
+ *
+ * Doubling rather than adding a fixed amount matters: a page that needs more
+ * styles once usually needs more again, and growing by a constant would mean
+ * cloning the whole page every few styles. Doubling makes the total cloning
+ * work linear in the size the page ends up at, however many times it grows.
+ *
+ * Returns null if the budget cannot be doubled any further — the field would
+ * overflow, or the page would no longer fit — in which case the caller has a
+ * genuinely full page and should hand over to a new one. */
+inline PageNode *page_list_grow_budget(PageList *l, PageNode *node,
+                                       PageBudget which) {
+    if (!l || !node) return nullptr;
+
+    Capacity cap = node->page.capacity;
+
+    switch (which) {
+        case PageBudget::styles: {
+            const size_t want = (size_t)cap.styles * 2;
+            const size_t ceiling = (size_t)(StyleCountInt)-1;
+            if (want > ceiling || want == 0) return nullptr;
+            cap.styles = (StyleCountInt)want;
+            break;
+        }
+        case PageBudget::hyperlink_bytes: {
+            const size_t want = (size_t)cap.hyperlink_bytes * 2;
+            const size_t ceiling = (size_t)(HyperlinkCountInt)-1;
+            if (want > ceiling || want == 0) return nullptr;
+            cap.hyperlink_bytes = (HyperlinkCountInt)want;
+            break;
+        }
+        case PageBudget::grapheme_bytes: {
+            const size_t want = (size_t)cap.grapheme_bytes * 2;
+            const size_t ceiling = (size_t)(GraphemeBytesInt)-1;
+            if (want > ceiling || want == 0) return nullptr;
+            cap.grapheme_bytes = (GraphemeBytesInt)want;
+            break;
+        }
+        case PageBudget::string_bytes: {
+            const size_t want = (size_t)cap.string_bytes * 2;
+            const size_t ceiling = (size_t)(StringBytesInt)-1;
+            if (want > ceiling || want == 0) return nullptr;
+            cap.string_bytes = (StringBytesInt)want;
+            break;
+        }
+    }
+
+    return page_list_adjust_capacity(l, node, cap);
+}
+
+/* Split a page in two at a row, leaving the rows before it where they are and
+ * moving the rest into a new page that follows.
+ *
+ * Nothing about the list's rows changes — the same rows are in the same
+ * order, and a row index still finds the same line. Only which page holds
+ * them does.
+ *
+ * This is what makes room in the middle of a list that is otherwise only ever
+ * appended to. A page that has to hold more than it can, somewhere other than
+ * at the end, can give its tail away instead of being rebuilt wholesale.
+ *
+ * Returns the new node holding the tail, or null if it could not be built, in
+ * which case the list is untouched. */
+inline PageNode *page_list_split(PageList *l, PageNode *node, CellCountInt at) {
+    if (!l || !node) return nullptr;
+
+    /* A split at either end would produce an empty page, which is not a
+     * split — it is an allocation nobody asked for. */
+    if (at == 0 || at >= node->rows_used) return nullptr;
+
+    const CellCountInt moving = (CellCountInt)(node->rows_used - at);
+    const CellCountInt cap_rows = page_list_rows_per_page(l->cols, moving);
+
+    Capacity cap = node->page.capacity;
+    cap.rows = cap_rows;
+
+    PageNode *tail = page_node_create(cap);
+    if (!tail) return nullptr;
+
+    for (CellCountInt i = 0; i < moving; i++) {
+        if (!page_clone_row(&tail->page, i, &node->page,
+                            (CellCountInt)(at + i))) {
+            page_node_destroy(tail);
+            return nullptr;
+        }
+    }
+    tail->rows_used = moving;
+
+    /* Everything is built, so the split can be made without a way to fail
+     * halfway through it. */
+    for (CellCountInt y = at; y < node->rows_used; y++) {
+        page_clear_row(&node->page, y);
+    }
+    node->rows_used = at;
+
+    tail->prev = node;
+    tail->next = node->next;
+    if (tail->next) {
+        tail->next->prev = tail;
+    } else {
+        l->last = tail;
+    }
+    node->next = tail;
+
+    l->page_count++;
+    l->bytes += tail->page.size;
+
+    /* A viewport pinned into the rows that moved goes with them. */
+    if (l->viewport == ViewportTag::pin && l->viewport_pin.node == node &&
+        l->viewport_pin.y >= at) {
+        l->viewport_pin.node = tail;
+        l->viewport_pin.y = (CellCountInt)(l->viewport_pin.y - at);
+    }
+
+    return tail;
+}
 
 /* ─── resizing ───────────────────────────────────────────────────────────── */
 

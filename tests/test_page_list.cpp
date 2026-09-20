@@ -1078,3 +1078,361 @@ TEST(resize, resizing_to_the_same_width_changes_nothing) {
 
     page_list_deinit(&l);
 }
+
+/* ─── replacing and splitting pages ──────────────────────────────────────── */
+
+/* A page runs out in two different ways, and only one of them is scrolling.
+ * Running out of rows is answered by a new page; running out of styles or of
+ * link text cannot be, because the rows that need them are in this page. */
+
+static style::Style style_n(uint8_t n) {
+    style::Style s;
+    s.fg_color.tag = style::StyleColor::Tag::palette;
+    s.fg_color.palette = n;
+    return s;
+}
+
+TEST(capacity, a_page_runs_out_of_styles_before_it_runs_out_of_rows) {
+    PageList l;
+    ASSERT_TRUE(page_list_init(&l, 40, 4, 0));
+    Page *p = &l.first->page;
+
+    /* The budget is small and fixed, so a page with hundreds of free rows can
+     * still refuse the next distinct style. */
+    CellCountInt wrote = 0;
+    for (CellCountInt i = 1; i < 250; i++) {
+        if (!p->set_cell_style(0, (CellCountInt)(i % 4), style_n((uint8_t)i))) break;
+        wrote++;
+    }
+
+    ASSERT_TRUE(wrote < 249);
+    ASSERT_TRUE(l.first->rows_used < l.first->page.capacity.rows);
+
+    page_list_deinit(&l);
+}
+
+TEST(capacity, growing_the_budget_keeps_the_rows) {
+    PageList l;
+    ASSERT_TRUE(page_list_init(&l, 40, 4, 0));
+
+    for (CellCountInt x = 0; x < 10; x++) {
+        l.first->page.get_cell(x, 1)->set_codepoint((uint32_t)('a' + x));
+    }
+    ASSERT_TRUE(l.first->page.set_cell_style(0, 1, style_n(200)));
+
+    const StyleCountInt before = l.first->page.capacity.styles;
+    PageNode *fresh = page_list_grow_budget(&l, l.first, PageBudget::styles);
+    ASSERT_TRUE(fresh != nullptr);
+
+    ASSERT_EQ(fresh->page.capacity.styles, (StyleCountInt)(before * 2));
+    ASSERT_EQ(fresh->rows_used, 4);
+    ASSERT_EQ(fresh->page.get_cell(3, 1)->codepoint(), 'd');
+    ASSERT_EQ(fresh->page.get_cell_style(0, 1).fg_color.palette, 200);
+
+    page_list_deinit(&l);
+}
+
+TEST(capacity, growing_the_budget_makes_room_for_more) {
+    PageList l;
+    ASSERT_TRUE(page_list_init(&l, 40, 4, 0));
+
+    CellCountInt wrote = 0;
+    for (CellCountInt i = 1; i < 250; i++) {
+        if (!l.first->page.set_cell_style(i, 0, style_n((uint8_t)i))) break;
+        wrote++;
+    }
+    ASSERT_TRUE(wrote > 0);
+
+    PageNode *fresh = page_list_grow_budget(&l, l.first, PageBudget::styles);
+    ASSERT_TRUE(fresh != nullptr);
+
+    /* The style that was refused fits now, and the ones already there are
+     * still there. */
+    ASSERT_TRUE(fresh->page.set_cell_style((CellCountInt)(wrote + 1), 0,
+                                           style_n((uint8_t)(wrote + 1))));
+    ASSERT_EQ(fresh->page.get_cell_style(1, 0).fg_color.palette, 1);
+
+    page_list_deinit(&l);
+}
+
+TEST(capacity, growing_the_budget_relinks_the_page) {
+    PageList l;
+    ASSERT_TRUE(small_list(&l, 10, 4, 5, 3));
+    PageNode *before = l.first->next;
+
+    PageNode *fresh = page_list_grow_budget(&l, before, PageBudget::styles);
+    ASSERT_TRUE(fresh != nullptr);
+    ASSERT_TRUE(fresh != before);
+
+    ASSERT_EQ(l.page_count, 3u);
+    ASSERT_TRUE(l.first->next == fresh);
+    ASSERT_TRUE(fresh->prev == l.first);
+    ASSERT_TRUE(fresh->next == l.last);
+    ASSERT_TRUE(l.last->prev == fresh);
+
+    page_list_deinit(&l);
+}
+
+TEST(capacity, growing_the_first_or_last_page_keeps_the_ends_right) {
+    PageList l;
+    ASSERT_TRUE(small_list(&l, 10, 4, 5, 2));
+
+    PageNode *new_first = page_list_grow_budget(&l, l.first, PageBudget::styles);
+    ASSERT_TRUE(new_first != nullptr);
+    ASSERT_TRUE(l.first == new_first);
+    ASSERT_TRUE(new_first->prev == nullptr);
+
+    PageNode *new_last = page_list_grow_budget(&l, l.last, PageBudget::styles);
+    ASSERT_TRUE(new_last != nullptr);
+    ASSERT_TRUE(l.last == new_last);
+    ASSERT_TRUE(new_last->next == nullptr);
+
+    page_list_deinit(&l);
+}
+
+TEST(capacity, a_pinned_viewport_follows_the_replacement) {
+    PageList l;
+    ASSERT_TRUE(small_list(&l, 10, 4, 5, 3));
+
+    page_list_scroll_to_pin(&l, page_list_pin(&l, 6));
+    ASSERT_TRUE(l.viewport_pin.node == l.first->next);
+
+    PageNode *fresh = page_list_grow_budget(&l, l.first->next,
+                                            PageBudget::styles);
+    ASSERT_TRUE(fresh != nullptr);
+
+    /* Row i of the old page is row i of the new one, so the viewport is still
+     * looking at the same line — but at a different address, which is why a
+     * pin names a node rather than a pointer into the page. */
+    ASSERT_TRUE(l.viewport_pin.node == fresh);
+    ASSERT_EQ(page_list_row_index(&l, page_list_viewport_start(&l)), 6u);
+
+    page_list_deinit(&l);
+}
+
+TEST(capacity, link_text_has_its_own_budget) {
+    PageList l;
+    ASSERT_TRUE(page_list_init(&l, 40, 4, 0));
+
+    /* The limitation the scrolling tests documented: distinct links exhaust
+     * a page's string storage. This is the answer to it. */
+    CellCountInt wrote = 0;
+    for (CellCountInt i = 0; i < 200; i++) {
+        char uri[32];
+        memcpy(uri, "https://budget.test/", 20);
+        uri[20] = (char)('a' + (i % 26));
+        uri[21] = (char)('a' + (i / 26));
+        if (!page_set_cell_hyperlink(&l.first->page, 0, (CellCountInt)(i % 4),
+                                     uri, 22, nullptr, 0, (OffsetInt)i)) {
+            break;
+        }
+        wrote++;
+    }
+    ASSERT_TRUE(wrote > 0);
+    ASSERT_TRUE(wrote < 200);
+
+    PageNode *fresh = page_list_grow_budget(&l, l.first,
+                                            PageBudget::string_bytes);
+    ASSERT_TRUE(fresh != nullptr);
+
+    char uri[32];
+    memcpy(uri, "https://budget.test/", 20);
+    uri[20] = 'z';
+    uri[21] = 'z';
+    ASSERT_TRUE(page_set_cell_hyperlink(&fresh->page, 1, 0, uri, 22,
+                                        nullptr, 0, 9999));
+
+    page_list_deinit(&l);
+}
+
+TEST(capacity, a_budget_that_cannot_double_refuses) {
+    PageList l;
+    ASSERT_TRUE(page_list_init(&l, 40, 4, 0));
+
+    Capacity cap = l.first->page.capacity;
+    cap.styles = (StyleCountInt)((size_t)(StyleCountInt)-1 / 2 + 1);
+    PageNode *big = page_list_adjust_capacity(&l, l.first, cap);
+    ASSERT_TRUE(big != nullptr);
+
+    /* Doubling from here would overflow the field, so the page says no and
+     * the caller is left to hand over to a new page instead. */
+    ASSERT_TRUE(page_list_grow_budget(&l, big, PageBudget::styles) == nullptr);
+    ASSERT_TRUE(l.first == big);
+    ASSERT_EQ(l.first->page.capacity.styles, cap.styles);
+
+    page_list_deinit(&l);
+}
+
+TEST(capacity, a_capacity_too_small_for_the_rows_is_refused) {
+    PageList l;
+    ASSERT_TRUE(small_list(&l, 10, 4, 5, 1));
+
+    Capacity cap = l.first->page.capacity;
+    cap.rows = 2;
+    ASSERT_TRUE(page_list_adjust_capacity(&l, l.first, cap) == nullptr);
+
+    /* Refused means untouched, not half-done. */
+    ASSERT_EQ(l.first->rows_used, 5);
+    ASSERT_EQ(l.page_count, 1u);
+
+    page_list_deinit(&l);
+}
+
+/* ─── splitting ──────────────────────────────────────────────────────────── */
+
+TEST(split, moves_the_tail_into_a_new_page) {
+    PageList l;
+    ASSERT_TRUE(small_list(&l, 10, 4, 6, 1));
+    for (CellCountInt y = 0; y < 6; y++) {
+        l.first->page.get_cell(0, y)->set_codepoint((uint32_t)('A' + y));
+    }
+
+    PageNode *tail = page_list_split(&l, l.first, 2);
+    ASSERT_TRUE(tail != nullptr);
+
+    ASSERT_EQ(l.page_count, 2u);
+    ASSERT_EQ(l.first->rows_used, 2);
+    ASSERT_EQ(tail->rows_used, 4);
+    ASSERT_TRUE(l.first->next == tail);
+    ASSERT_TRUE(tail->prev == l.first);
+    ASSERT_TRUE(l.last == tail);
+
+    page_list_deinit(&l);
+}
+
+TEST(split, the_rows_are_the_same_rows_in_the_same_order) {
+    PageList l;
+    ASSERT_TRUE(small_list(&l, 10, 4, 6, 1));
+    for (CellCountInt y = 0; y < 6; y++) {
+        l.first->page.get_cell(0, y)->set_codepoint((uint32_t)('A' + y));
+    }
+    const size_t before = l.row_count;
+
+    ASSERT_TRUE(page_list_split(&l, l.first, 2) != nullptr);
+
+    /* Nothing about the list's rows changed — only which page holds them. */
+    ASSERT_EQ(l.row_count, before);
+    for (size_t i = 0; i < 6; i++) {
+        Pin p = page_list_pin(&l, i);
+        p.x = 0;
+        ASSERT_EQ(p.cell()->codepoint(), (uint32_t)('A' + i));
+    }
+
+    page_list_deinit(&l);
+}
+
+TEST(split, in_the_middle_of_a_list_keeps_the_links) {
+    PageList l;
+    ASSERT_TRUE(small_list(&l, 10, 4, 6, 3));
+    PageNode *middle = l.first->next;
+    PageNode *after = l.last;
+
+    PageNode *tail = page_list_split(&l, middle, 3);
+    ASSERT_TRUE(tail != nullptr);
+
+    ASSERT_EQ(l.page_count, 4u);
+    ASSERT_TRUE(middle->next == tail);
+    ASSERT_TRUE(tail->next == after);
+    ASSERT_TRUE(after->prev == tail);
+    ASSERT_TRUE(l.last == after);
+
+    page_list_deinit(&l);
+}
+
+TEST(split, what_moved_is_cleared_from_the_page_it_left) {
+    PageList l;
+    ASSERT_TRUE(small_list(&l, 10, 4, 6, 1));
+    for (CellCountInt y = 0; y < 6; y++) {
+        l.first->page.get_cell(0, y)->set_codepoint('x');
+    }
+    ASSERT_TRUE(l.first->page.set_cell_style(0, 4, style_n(7)));
+
+    ASSERT_TRUE(page_list_split(&l, l.first, 2) != nullptr);
+
+    /* The rows that moved are not still sitting in the old page holding
+     * references nothing can reach. */
+    ASSERT_EQ(l.first->page.get_cell(0, 4)->codepoint(), 0u);
+    ASSERT_EQ(l.first->page.style_count(), 0u);
+    ASSERT_EQ(l.last->page.get_cell_style(0, 2).fg_color.palette, 7);
+
+    page_list_deinit(&l);
+}
+
+TEST(split, a_wrapped_line_keeps_its_flags_across_the_seam) {
+    PageList l;
+    ASSERT_TRUE(small_list(&l, 10, 4, 6, 1));
+
+    /* The split lands in the middle of a soft-wrapped line. The flags have to
+     * survive it or the line becomes two. */
+    l.first->page.get_row(1)->set_wrap(true);
+    l.first->page.get_row(2)->set_wrap_continuation(true);
+
+    PageNode *tail = page_list_split(&l, l.first, 2);
+    ASSERT_TRUE(tail != nullptr);
+
+    ASSERT_TRUE(l.first->page.get_row(1)->wrap());
+    ASSERT_TRUE(tail->page.get_row(0)->wrap_continuation());
+
+    page_list_deinit(&l);
+}
+
+TEST(split, a_pinned_viewport_follows_the_rows_that_moved) {
+    PageList l;
+    ASSERT_TRUE(small_list(&l, 10, 4, 6, 1));
+
+    page_list_scroll_to_pin(&l, page_list_pin(&l, 4));
+    ASSERT_TRUE(page_list_split(&l, l.first, 2) != nullptr);
+
+    /* Row 4 is now row 2 of the new page, and it is still row 4 of the
+     * list — which is the only thing the user could notice. */
+    ASSERT_TRUE(l.viewport_pin.node == l.last);
+    ASSERT_EQ(l.viewport_pin.y, 2);
+    ASSERT_EQ(page_list_row_index(&l, page_list_viewport_start(&l)), 4u);
+
+    page_list_deinit(&l);
+}
+
+TEST(split, a_pinned_viewport_above_the_split_stays) {
+    PageList l;
+    ASSERT_TRUE(small_list(&l, 10, 4, 6, 1));
+
+    PageNode *head = l.first;
+    page_list_scroll_to_pin(&l, page_list_pin(&l, 1));
+    ASSERT_TRUE(page_list_split(&l, l.first, 2) != nullptr);
+
+    ASSERT_TRUE(l.viewport_pin.node == head);
+    ASSERT_EQ(l.viewport_pin.y, 1);
+
+    page_list_deinit(&l);
+}
+
+TEST(split, at_either_end_is_refused) {
+    PageList l;
+    ASSERT_TRUE(small_list(&l, 10, 4, 6, 1));
+
+    /* Both would produce an empty page, which is not a split but an
+     * allocation nobody asked for. */
+    ASSERT_TRUE(page_list_split(&l, l.first, 0) == nullptr);
+    ASSERT_TRUE(page_list_split(&l, l.first, 6) == nullptr);
+    ASSERT_TRUE(page_list_split(&l, l.first, 99) == nullptr);
+    ASSERT_EQ(l.page_count, 1u);
+
+    page_list_deinit(&l);
+}
+
+TEST(split, then_walking_crosses_the_new_seam) {
+    PageList l;
+    ASSERT_TRUE(small_list(&l, 10, 4, 6, 1));
+    ASSERT_TRUE(page_list_split(&l, l.first, 2) != nullptr);
+
+    Pin p = page_list_pin(&l, 0);
+    ASSERT_TRUE(p.down(5));
+    ASSERT_TRUE(p.node == l.last);
+    ASSERT_EQ(p.y, 3);
+
+    ASSERT_TRUE(p.up(5));
+    ASSERT_TRUE(p.node == l.first);
+    ASSERT_EQ(p.y, 0);
+
+    page_list_deinit(&l);
+}
