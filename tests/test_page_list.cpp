@@ -805,3 +805,276 @@ TEST(scrolling, scrollback_is_bounded_by_the_limit) {
 
     page_list_deinit(&l);
 }
+
+/* ─── resizing ───────────────────────────────────────────────────────────── */
+
+/* Write text into the list, soft-wrapping at its width the way a terminal
+ * would and growing rows as it goes. */
+static size_t write_text(PageList *l, const char *text) {
+    const size_t start = l->row_count - 1;
+    Pin p = page_list_pin(l, start);
+    CellCountInt x = 0;
+
+    for (const char *c = text; *c; c++) {
+        if (x == l->cols) {
+            p.row()->set_wrap(true);
+            p = page_list_grow(l);
+            p.row()->set_wrap_continuation(true);
+            x = 0;
+        }
+        p.x = x;
+        p.cell()->set_codepoint((uint32_t)(unsigned char)*c);
+        x++;
+    }
+    return start;
+}
+
+/* Read a logical line back, following wrap flags across rows and pages. */
+static void read_line(PageList *l, size_t row, char *out, size_t out_len) {
+    size_t n = 0;
+    Pin p = page_list_pin(l, row);
+    while (p.valid()) {
+        const CellCountInt width = page_row_used_width(&p.node->page, p.y);
+        for (CellCountInt x = 0; x < width && n + 1 < out_len; x++) {
+            Cell *c = p.node->page.get_cell(x, p.y);
+            if (c->wide() == Wide::spacer_head) continue;
+            out[n++] = (char)c->codepoint();
+        }
+        if (!p.row()->wrap()) break;
+        if (!p.down(1)) break;
+    }
+    out[n] = '\0';
+}
+
+TEST(resize, height_only_moves_the_active_area) {
+    PageList l;
+    ASSERT_TRUE(page_list_init(&l, 20, 4, 0));
+    ASSERT_EQ(page_list_grow_rows(&l, 20), 20u);
+
+    Pin before = page_list_pin(&l, 0);
+    before.x = 0;
+    before.cell()->set_codepoint('t');
+
+    ASSERT_TRUE(page_list_resize(&l, 20, 10));
+
+    /* Nothing was re-laid: a taller screen simply shows rows that were
+     * already in the scrollback. */
+    ASSERT_EQ(l.rows, 10);
+    ASSERT_EQ(l.row_count, 24u);
+    ASSERT_TRUE(page_list_pin(&l, 0).node == before.node);
+    ASSERT_EQ(before.cell()->codepoint(), 't');
+
+    page_list_deinit(&l);
+}
+
+TEST(resize, a_taller_screen_than_the_list_grows_rows) {
+    PageList l;
+    ASSERT_TRUE(page_list_init(&l, 20, 4, 0));
+
+    ASSERT_TRUE(page_list_resize(&l, 20, 30));
+    ASSERT_EQ(l.row_count, 30u);
+    ASSERT_EQ(page_list_max_scroll(&l), 0u);
+
+    page_list_deinit(&l);
+}
+
+TEST(resize, narrowing_splits_a_line) {
+    PageList l;
+    ASSERT_TRUE(page_list_init(&l, 20, 4, 0));
+    const size_t start = write_text(&l, "abcdefghijklmnop");
+
+    ASSERT_TRUE(page_list_resize(&l, 8, 4));
+    ASSERT_EQ(l.cols, 8);
+
+    char got[64];
+    read_line(&l, start, got, sizeof(got));
+    ASSERT_TRUE(strcmp(got, "abcdefghijklmnop") == 0);
+
+    page_list_deinit(&l);
+}
+
+TEST(resize, widening_rejoins_a_line) {
+    PageList l;
+    ASSERT_TRUE(page_list_init(&l, 8, 4, 0));
+    const size_t start = write_text(&l, "the quick brown fox");
+
+    ASSERT_TRUE(page_list_resize(&l, 40, 4));
+
+    char got[64];
+    read_line(&l, start, got, sizeof(got));
+    ASSERT_TRUE(strcmp(got, "the quick brown fox") == 0);
+
+    page_list_deinit(&l);
+}
+
+TEST(resize, hard_ended_lines_stay_separate) {
+    PageList l;
+    ASSERT_TRUE(page_list_init(&l, 20, 4, 0));
+
+    /* Two lines the program ended itself, then a wider screen. Joining them
+     * would be a resize inventing text nobody wrote. */
+    Pin a = page_list_pin(&l, 0);
+    a.x = 0;
+    a.cell()->set_codepoint('A');
+    Pin b = page_list_pin(&l, 1);
+    b.x = 0;
+    b.cell()->set_codepoint('B');
+
+    ASSERT_TRUE(page_list_resize(&l, 60, 4));
+
+    char got[64];
+    read_line(&l, 0, got, sizeof(got));
+    ASSERT_TRUE(strcmp(got, "A") == 0);
+    read_line(&l, 1, got, sizeof(got));
+    ASSERT_TRUE(strcmp(got, "B") == 0);
+
+    page_list_deinit(&l);
+}
+
+TEST(resize, a_line_crossing_a_source_page_seam_survives) {
+    PageList l;
+    ASSERT_TRUE(small_list(&l, 10, 4, 4, 1));
+    l.first->rows_used = 1;
+    l.row_count = 1;
+
+    /* Forty characters at ten columns is four rows, and these pages hold four
+     * rows each — so the line runs off the end of one source page and into
+     * the next. A reflow that let a page boundary end a line breaks here. */
+    const char *line = "abcdefghijklmnopqrstuvwxyz0123456789"
+                       "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+    const size_t start = write_text(&l, line);
+    ASSERT_TRUE(l.page_count > 1u);
+
+    ASSERT_TRUE(page_list_resize(&l, 20, 4));
+
+    char got[128];
+    read_line(&l, start, got, sizeof(got));
+    ASSERT_TRUE(strcmp(got, line) == 0);
+
+    page_list_deinit(&l);
+}
+
+TEST(resize, a_line_crossing_a_destination_page_seam_survives) {
+    PageList l;
+    ASSERT_TRUE(page_list_init(&l, 80, 4, 0));
+
+    /* One long line at a wide width, narrowed far enough that it needs more
+     * destination rows than a destination page holds. */
+    static char text[16384];
+    for (size_t i = 0; i + 1 < sizeof(text); i++) {
+        text[i] = (char)('a' + (i % 26));
+    }
+    text[sizeof(text) - 1] = '\0';
+    const size_t start = write_text(&l, text);
+
+    ASSERT_TRUE(page_list_resize(&l, 2, 4));
+
+    /* The point of the size: at two columns this line needs more rows than
+     * one destination page holds, so it has to continue onto the next. */
+    ASSERT_TRUE(l.page_count > 1u);
+
+    static char got[16384];
+    read_line(&l, start, got, sizeof(got));
+    ASSERT_TRUE(strcmp(got, text) == 0);
+
+    page_list_deinit(&l);
+}
+
+TEST(resize, a_round_trip_gives_the_line_back) {
+    PageList l;
+    ASSERT_TRUE(page_list_init(&l, 24, 4, 0));
+    const size_t start = write_text(&l, "the quick brown fox jumps over the lazy dog");
+
+    ASSERT_TRUE(page_list_resize(&l, 7, 4));
+    ASSERT_TRUE(page_list_resize(&l, 24, 4));
+
+    char got[128];
+    read_line(&l, start, got, sizeof(got));
+    ASSERT_TRUE(strcmp(got, "the quick brown fox jumps over the lazy dog") == 0);
+
+    page_list_deinit(&l);
+}
+
+TEST(resize, styles_and_links_come_through) {
+    PageList l;
+    ASSERT_TRUE(page_list_init(&l, 20, 4, 0));
+    const size_t start = write_text(&l, "abcdefghij");
+
+    Pin p = page_list_pin(&l, start);
+    style::Style s;
+    s.fg_color.tag = style::StyleColor::Tag::palette;
+    s.fg_color.palette = 99;
+    ASSERT_TRUE(p.node->page.set_cell_style(4, p.y, s));
+    ASSERT_TRUE(page_set_cell_hyperlink(&p.node->page, 5, p.y,
+                                        "https://resize.test", 19,
+                                        nullptr, 0, 0));
+
+    ASSERT_TRUE(page_list_resize(&l, 4, 4));
+
+    /* Column 4 of twenty becomes column 0 of the second four-wide row: the
+     * style and the link follow the character, not the position. */
+    Pin moved = page_list_pin(&l, start + 1);
+    ASSERT_EQ(moved.node->page.get_cell(0, moved.y)->codepoint(), 'e');
+    ASSERT_EQ(moved.node->page.get_cell_style(0, moved.y).fg_color.palette, 99);
+
+    const uint8_t *uri = nullptr;
+    size_t len = 0;
+    ASSERT_TRUE(page_get_cell_hyperlink(&moved.node->page, 1, moved.y,
+                                        &uri, &len));
+    ASSERT_EQ(len, 19u);
+
+    page_list_deinit(&l);
+}
+
+TEST(resize, the_viewport_returns_to_the_active_area) {
+    PageList l;
+    ASSERT_TRUE(page_list_init(&l, 20, 4, 0));
+    ASSERT_EQ(page_list_grow_rows(&l, 40), 40u);
+    page_list_scroll_delta(&l, -10);
+
+    ASSERT_TRUE(page_list_resize(&l, 10, 4));
+
+    /* Pins into the old pages went with them, so the viewport cannot be left
+     * pointing at one. */
+    ASSERT_TRUE(l.viewport == ViewportTag::active);
+    ASSERT_TRUE(page_list_viewport_start(&l).valid());
+
+    page_list_deinit(&l);
+}
+
+TEST(resize, the_row_count_stays_consistent_with_the_pages) {
+    PageList l;
+    ASSERT_TRUE(page_list_init(&l, 30, 4, 0));
+    for (int i = 0; i < 12; i++) {
+        write_text(&l, "some text that wraps at narrow widths");
+        page_list_grow(&l);
+    }
+
+    ASSERT_TRUE(page_list_resize(&l, 9, 6));
+
+    size_t counted = 0;
+    for (PageNode *n = l.first; n; n = n->next) counted += n->rows_used;
+    ASSERT_EQ(counted, l.row_count);
+    ASSERT_TRUE(l.row_count >= 6u);
+    ASSERT_TRUE(page_list_pin(&l, l.row_count - 1).valid());
+    ASSERT_FALSE(page_list_pin(&l, l.row_count).valid());
+
+    page_list_deinit(&l);
+}
+
+TEST(resize, resizing_to_the_same_width_changes_nothing) {
+    PageList l;
+    ASSERT_TRUE(page_list_init(&l, 20, 4, 0));
+    write_text(&l, "unchanged");
+    const size_t before = l.row_count;
+    PageNode *node = l.first;
+
+    ASSERT_TRUE(page_list_resize(&l, 20, 4));
+
+    /* Same width means no reflow at all, so the pages are the ones that were
+     * already there. */
+    ASSERT_TRUE(l.first == node);
+    ASSERT_EQ(l.row_count, before);
+
+    page_list_deinit(&l);
+}

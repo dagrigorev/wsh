@@ -19,8 +19,9 @@
  * any more, and forgetting it is freeing the page at the front.
  *
  * PARTIAL PORT. The list itself, page allocation, growth and trimming, pins,
- * the viewport and scrolling are here. Reflow across a resize and page
- * splitting are not, so the ledger records PageList.zig as `wip`.
+ * the viewport, scrolling and resizing are here. Page splitting and pin
+ * tracking across a reflow are not, so the ledger records PageList.zig as
+ * `wip`.
  */
 
 #pragma once
@@ -544,6 +545,131 @@ inline void page_list_scroll_delta(PageList *l, long delta) {
         return;
     }
     page_list_scroll_to_pin(l, p);
+}
+
+
+/* ─── resizing ───────────────────────────────────────────────────────────── */
+
+/* Change the screen's height without touching its contents.
+ *
+ * Only the size of the active area changes. A taller screen shows rows that
+ * were already there, from the scrollback, without moving them; a shorter one
+ * pushes rows back into the scrollback. Neither needs the text disturbed,
+ * which is why this is separate from the width case below. */
+inline bool page_list_resize_rows(PageList *l, CellCountInt new_rows) {
+    l->rows = new_rows;
+
+    /* A screen taller than everything written so far needs the missing rows
+     * to exist before it can show them. */
+    if (l->row_count < (size_t)new_rows) {
+        const size_t want = (size_t)new_rows - l->row_count;
+        if (page_list_grow_rows(l, want) != want) return false;
+    }
+
+    page_list_trim(l);
+    return true;
+}
+
+/* Resize the screen, re-laying every line at the new width.
+ *
+ * Width is the hard case, and it is the reason reflow is resumable. The
+ * result is built as a second list and swapped in at the end: a line is read
+ * out of the source pages as a stream and written into destination pages as
+ * they fill, and neither side's page boundaries line up with the other's.
+ * A single logical line can start in one source page, be laid out across two
+ * destination pages, and finish in a third source page — the cursor carries
+ * the open line across every one of those seams.
+ *
+ * Building a second list rather than reflowing in place also means a failure
+ * partway leaves the terminal exactly as it was. There is no half-resized
+ * state to recover from, which for an operation this involved is worth more
+ * than the memory it costs while both lists exist.
+ *
+ * The viewport is returned to the active area. Upstream tracks pins through a
+ * reflow so a user scrolled up stays roughly where they were reading; that
+ * needs a registry of live pins, which is not ported, and moving someone to
+ * the wrong place would be worse than moving them to a place they asked for.
+ *
+ * Returns false and leaves the list untouched if an allocation failed. */
+inline bool page_list_resize(PageList *l, CellCountInt new_cols,
+                             CellCountInt new_rows) {
+    if (new_cols == 0 || new_rows == 0) return false;
+    if (new_cols == l->cols) return page_list_resize_rows(l, new_rows);
+
+    PageList out;
+    out.cols = new_cols;
+    out.rows = new_rows;
+    out.max_size = l->max_size;
+
+    const CellCountInt cap_rows = page_list_rows_per_page(new_cols, new_rows);
+
+    PageNode *dst = page_list_append_partial(&out, cap_rows, 0);
+    if (!dst) {
+        page_list_deinit(&out);
+        return false;
+    }
+
+    ReflowCursor cur(0);
+
+    for (PageNode *src = l->first; src; src = src->next) {
+        CellCountInt sy = 0;
+        CellCountInt sx = 0;
+
+        while (sy < src->rows_used) {
+            ReflowResult r = page_reflow_resume(
+                &dst->page, &cur, &src->page, sy, sx,
+                (CellCountInt)(src->rows_used - sy));
+
+            /* The cursor is the truth about how much of the destination page
+             * is now in use: it knows whether the row it is on has been
+             * started, which the row count alone cannot say. */
+            const CellCountInt used =
+                (CellCountInt)(cur.y + (cur.row_begun ? 1 : 0));
+            out.row_count += (size_t)(used - dst->rows_used);
+            dst->rows_used = used;
+
+            if (!r.ok) {
+                page_list_deinit(&out);
+                return false;
+            }
+
+            sy = r.src_y;
+            sx = r.src_x;
+
+            if (r.full) {
+                PageNode *next = page_list_append_partial(&out, cap_rows, 0);
+                if (!next) {
+                    page_list_deinit(&out);
+                    return false;
+                }
+                dst = next;
+
+                /* A new page, but not necessarily a new line. If a line was
+                 * open it stays open: the previous page's last row already
+                 * carries the wrap flag, and the line continues on row 0 of
+                 * this one. */
+                const bool open = cur.in_line;
+                cur = ReflowCursor(0);
+                cur.in_line = open;
+            }
+        }
+    }
+
+    /* A screen taller than what was reflowed needs the rest to exist. */
+    if (out.row_count < (size_t)new_rows) {
+        const size_t want = (size_t)new_rows - out.row_count;
+        if (page_list_grow_rows(&out, want) != want) {
+            page_list_deinit(&out);
+            return false;
+        }
+    }
+
+    page_list_trim(&out);
+
+    PageList old = *l;
+    *l = out;
+    page_list_deinit(&old);
+    return true;
 }
 
 } /* namespace terminal */

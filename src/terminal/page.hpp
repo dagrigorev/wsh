@@ -1273,6 +1273,24 @@ inline CellCountInt page_clone_rows(Page *dst, CellCountInt dst_y,
     return done;
 }
 
+/* Erase a row and reset the flags that described its old contents.
+ *
+ * page_erase_row leaves the flags alone, because its callers go on to
+ * overwrite them. A row scrolled into view is not overwritten — it is the
+ * blank line the user now sees — so a stale wrap flag there would join it to
+ * a line it has nothing to do with. */
+inline void page_clear_row(Page *p, CellCountInt y) {
+    if (!p || y >= p->capacity.rows) return;
+
+    page_erase_row(p, y);
+
+    Row *row = p->get_row(y);
+    const Offset<Cell> cells_off = row->cells();
+    *row = Row();
+    row->set_cells(cells_off);
+    row->set_dirty(true);
+}
+
 /* ─── resize and reflow ──────────────────────────────────────────────────── */
 
 /* True if a cell holds nothing worth keeping.
@@ -1300,178 +1318,225 @@ inline CellCountInt page_row_used_width(Page *p, CellCountInt y) {
     return w;
 }
 
-/* The result of a reflow: how much of the destination was filled and how much
- * of the source was read.
+/* Where a reflow has got to in the destination.
  *
- * Both are needed because neither implies the other — a narrower destination
- * turns one source row into several, a wider one merges several into one, and
- * either can run out first. */
+ * Reflow is resumable, and this is what makes it so. A logical line can be
+ * longer than either page involved — it can begin in one source page and end
+ * in another, and it can fill a destination page and continue on the next —
+ * so neither side's page boundary may be allowed to end a line. The cursor is
+ * the state that survives a page boundary: which destination row and column
+ * come next, and whether a line is currently open. */
+struct ReflowCursor {
+    CellCountInt y;   /* the destination row being written */
+    CellCountInt x;   /* the next column in it */
+
+    /* Row y has been cleared and had its flags set. */
+    bool row_begun;
+
+    /* A logical line is open: the next cell continues it rather than starting
+     * a new one. This is what keeps a line whole across a page boundary. */
+    bool in_line;
+
+    ReflowCursor() : y(0), x(0), row_begun(false), in_line(false) {}
+    explicit ReflowCursor(CellCountInt start_y)
+        : y(start_y), x(0), row_begun(false), in_line(false) {}
+};
+
+/* What a reflow did, and where it stopped.
+ *
+ * The stopping point is a row *and a column*, because the destination can
+ * fill in the middle of a source row. Resuming from the row alone would write
+ * its first half a second time. */
 struct ReflowResult {
-    CellCountInt rows_written;
-    CellCountInt src_rows_consumed;
+    CellCountInt rows_written;       /* destination rows begun */
+    CellCountInt src_rows_consumed;  /* source rows finished */
+
+    CellCountInt src_y;   /* resume here */
+    CellCountInt src_x;
+
+    /* The destination ran out of rows. The caller supplies another page and
+     * calls again with the same cursor. */
+    bool full;
 
     /* False if a cell could not be copied — the destination's style, link or
      * grapheme storage filled up. What was written before that stands. */
     bool ok;
 
-    ReflowResult() : rows_written(0), src_rows_consumed(0), ok(true) {}
+    ReflowResult()
+        : rows_written(0), src_rows_consumed(0), src_y(0), src_x(0),
+          full(false), ok(true) {}
 };
 
-/* Re-lay a page's contents at the destination's width.
+/* Open a destination row: clear it, and say whether it continues a line. */
+inline void page_reflow_begin_row(Page *dst, CellCountInt y, bool continuation) {
+    page_clear_row(dst, y);
+    dst->get_row(y)->set_wrap_continuation(continuation);
+}
+
+/* Re-lay source rows at the destination's width, continuing from a cursor.
  *
  * This is the resize that matters. A terminal's rows are not independent: a
  * line too long for the screen is stored as several rows joined by the wrap
  * flag, and changing the width means taking those runs apart and laying them
- * out again. Rows the user hard-ended with a newline are left alone, which is
- * the whole purpose of distinguishing a soft wrap from a hard one.
+ * out again. Rows the program hard-ended with a newline are left alone, which
+ * is the whole purpose of distinguishing a soft wrap from a hard one.
+ *
+ * Nothing looks ahead for where a logical line ends, because nothing needs
+ * to: a row whose wrap flag is set simply does not close the destination row
+ * it was writing into, and the next source row — in this page or in the next
+ * one the caller passes — carries on where it left off. That is also what
+ * makes the operation resumable at all.
  *
  * Reflow works in cells rather than rows because a cell rarely lands on the
  * column it came from. Wide characters make that concrete: one will not
  * straddle the new right edge, so if a single column is left the destination
  * gets a spacer_head there and the pair moves to the next row. Reading the
  * source, spacer_head cells are dropped — they record where the *old* width
- * fell and say nothing about the text.
- *
- * Stops when the destination runs out of rows, reporting how far into the
- * source it got so a caller can continue into another page. src_rows bounds
- * how much of the source is read, except that a wrapped run at the boundary
- * is followed to its end — a line is reflowed whole or not at all. */
-inline ReflowResult page_reflow_into(Page *dst, CellCountInt dst_y,
-                                     Page *src, CellCountInt src_y,
-                                     CellCountInt src_rows) {
+ * fell and say nothing about the text. */
+inline ReflowResult page_reflow_resume(Page *dst, ReflowCursor *cur, Page *src,
+                                       CellCountInt src_y, CellCountInt src_x,
+                                       CellCountInt src_rows) {
     ReflowResult r;
-    if (!dst || !src) {
+    r.src_y = src_y;
+    r.src_x = src_x;
+
+    if (!dst || !src || !cur || dst->capacity.cols == 0) {
         r.ok = false;
         return r;
     }
 
     const CellCountInt dst_cols = dst->capacity.cols;
     const CellCountInt dst_rows = dst->capacity.rows;
-    /* Reading past the source's own rows would reflow whatever the page was
-     * initialized with. */
+
     CellCountInt src_end = (CellCountInt)(src_y + src_rows);
     if (src_end > src->capacity.rows) src_end = src->capacity.rows;
-    if (dst_cols == 0) {
-        r.ok = false;
-        return r;
-    }
 
-    CellCountInt dy = dst_y;
-    CellCountInt dx = 0;
-    bool row_started = false;
+    for (CellCountInt y = src_y; y < src_end; y++) {
+        const CellCountInt width = page_row_used_width(src, y);
+        Cell *src_cells = src->get_cells(y);
 
-    /* Step onto a destination row, erasing what was there. */
-    struct Local {
-        static bool begin_row(Page *dst, CellCountInt dy, bool continuation) {
-            page_erase_row(dst, dy);
-            Row *row = dst->get_row(dy);
-            row->set_wrap(false);
-            row->set_wrap_continuation(continuation);
-            row->set_dirty(true);
-            return true;
-        }
-    };
+        CellCountInt x = (y == src_y) ? src_x : 0;
+        while (x < width) {
+            Cell *sc = &src_cells[x];
 
-    CellCountInt sy = src_y;
-    while (sy < src_end) {
-        if (dy >= dst_rows) break;
+            /* Artifacts of the old width, not content. A tail is emitted with
+             * its lead below, so it is skipped here too. */
+            if (sc->wide() == Wide::spacer_head ||
+                sc->wide() == Wide::spacer_tail) {
+                x++;
+                continue;
+            }
 
-        /* One logical line: the source rows joined by wrap flags. */
-        const CellCountInt line_start = sy;
-        CellCountInt line_end = sy;
-        /* A wrapped run is followed to its end even past src_rows: a line is
-         * reflowed whole or not at all. */
-        while (line_end + 1 < src->capacity.rows &&
-               src->get_row(line_end)->wrap()) {
-            line_end++;
-        }
+            const CellCountInt units = sc->wide() == Wide::wide ? 2 : 1;
 
-        if (!row_started) {
-            Local::begin_row(dst, dy, false);
-            r.rows_written++;
-            /* Prompt marks belong to the line, so they follow its first row. */
-            dst->get_row(dy)->set_semantic_prompt(
-                src->get_row(line_start)->semantic_prompt());
-            row_started = true;
-        }
+            /* A destination too narrow to hold a wide character at all. There
+             * is nowhere to put it, and trying would not terminate. */
+            if (units > dst_cols) {
+                x++;
+                continue;
+            }
 
-        bool out_of_rows = false;
-
-        for (CellCountInt y = line_start; y <= line_end && !out_of_rows; y++) {
-            const CellCountInt width = page_row_used_width(src, y);
-            Cell *src_cells = src->get_cells(y);
-
-            for (CellCountInt x = 0; x < width; x++) {
-                Cell *sc = &src_cells[x];
-
-                /* Artifacts of the old width, not content. */
-                if (sc->wide() == Wide::spacer_head) continue;
-                if (sc->wide() == Wide::spacer_tail) continue;
-
-                const CellCountInt units = sc->wide() == Wide::wide ? 2 : 1;
-
-                if ((CellCountInt)(dx + units) > dst_cols) {
-                    /* A wide character will not be split across the edge. The
-                     * leftover column gets a spacer_head, which is exactly what
-                     * that state is for. */
-                    if (units == 2 && dx < dst_cols) {
-                        Cell *pad = dst->get_cell(dx, dy);
-                        *pad = Cell();
-                        pad->set_wide(Wide::spacer_head);
-                    }
-
-                    dst->get_row(dy)->set_wrap(true);
-                    dy++;
-                    dx = 0;
-                    if (dy >= dst_rows) {
-                        out_of_rows = true;
-                        break;
-                    }
-                    Local::begin_row(dst, dy, true);
-                    r.rows_written++;
-
+            if (cur->row_begun && (CellCountInt)(cur->x + units) > dst_cols) {
+                /* A wide character will not be split across the edge. The
+                 * leftover column gets a spacer_head, which is exactly what
+                 * that state is for. */
+                if (units == 2 && cur->x < dst_cols) {
+                    Cell *pad = dst->get_cell(cur->x, cur->y);
+                    *pad = Cell();
+                    pad->set_wide(Wide::spacer_head);
                 }
+                dst->get_row(cur->y)->set_wrap(true);
+                cur->y++;
+                cur->x = 0;
+                cur->row_begun = false;
+            }
 
-                if (!page_clone_cell(dst, dx, dy, src, x, y)) {
-                    r.ok = false;
-                    r.src_rows_consumed = (CellCountInt)(line_start - src_y);
+            if (!cur->row_begun) {
+                if (cur->y >= dst_rows) {
+                    r.full = true;
+                    r.src_y = y;
+                    r.src_x = x;
                     return r;
                 }
-                dx++;
+                page_reflow_begin_row(dst, cur->y, cur->in_line);
+                if (!cur->in_line) {
+                    /* Prompt marks belong to the line, so they follow its
+                     * first row rather than being smeared across the rows the
+                     * new width produced. */
+                    dst->get_row(cur->y)->set_semantic_prompt(
+                        src->get_row(y)->semantic_prompt());
+                }
+                cur->row_begun = true;
+                cur->in_line = true;
+                r.rows_written++;
+            }
 
-                /* A wide character's tail travels with it, so the pair is
-                 * never separated by the move. */
-                if (units == 2 && (CellCountInt)(x + 1) < width &&
-                    src_cells[x + 1].wide() == Wide::spacer_tail) {
-                    if (!page_clone_cell(dst, dx, dy, src, (CellCountInt)(x + 1), y)) {
+            if (!page_clone_cell(dst, cur->x, cur->y, src, x, y)) {
+                r.ok = false;
+                r.src_y = y;
+                r.src_x = x;
+                return r;
+            }
+            cur->x++;
+            x++;
+
+            /* A wide character's tail travels with it, so the pair is never
+             * separated by the move. */
+            if (units == 2) {
+                if (x < width && src_cells[x].wide() == Wide::spacer_tail) {
+                    if (!page_clone_cell(dst, cur->x, cur->y, src, x, y)) {
                         r.ok = false;
-                        r.src_rows_consumed = (CellCountInt)(line_start - src_y);
+                        r.src_y = y;
+                        r.src_x = x;
                         return r;
                     }
-                    dx++;
                     x++;
                 }
+                cur->x++;
             }
         }
 
-        if (out_of_rows) {
-            /* The line did not fit. Report the source as consumed only up to
-             * the start of it, so a caller continuing into another page picks
-             * the whole line up again rather than splitting it. */
-            r.src_rows_consumed = (CellCountInt)(line_start - src_y);
-            return r;
+        /* A row whose wrap flag is set does not end its line, so the
+         * destination row it was filling stays open for what comes next. */
+        if (!src->get_row(y)->wrap()) {
+            if (!cur->row_begun) {
+                /* A blank hard-ended line still occupies a row. Dropping it
+                 * would close up gaps a program deliberately left. */
+                if (cur->y >= dst_rows) {
+                    r.full = true;
+                    r.src_y = y;
+                    r.src_x = 0;
+                    return r;
+                }
+                page_reflow_begin_row(dst, cur->y, false);
+                dst->get_row(cur->y)->set_semantic_prompt(
+                    src->get_row(y)->semantic_prompt());
+                r.rows_written++;
+            }
+
+            dst->get_row(cur->y)->set_wrap(false);
+            cur->y++;
+            cur->x = 0;
+            cur->row_begun = false;
+            cur->in_line = false;
         }
 
-        /* The logical line ended here, hard. */
-        dst->get_row(dy)->set_wrap(false);
-        dy++;
-        dx = 0;
-        row_started = false;
-        sy = (CellCountInt)(line_end + 1);
+        r.src_rows_consumed++;
+        r.src_y = (CellCountInt)(y + 1);
+        r.src_x = 0;
     }
 
-    r.src_rows_consumed = (CellCountInt)(sy - src_y);
     return r;
+}
+
+/* Re-lay rows into a destination starting at dst_y, in a single call.
+ *
+ * The common case, and what the per-page tests use. A caller that needs to
+ * carry a line across a page boundary wants page_reflow_resume. */
+inline ReflowResult page_reflow_into(Page *dst, CellCountInt dst_y, Page *src,
+                                     CellCountInt src_y, CellCountInt src_rows) {
+    ReflowCursor cur(dst_y);
+    return page_reflow_resume(dst, &cur, src, src_y, 0, src_rows);
 }
 
 /* ─── scrolling ──────────────────────────────────────────────────────────── */
@@ -1507,24 +1572,6 @@ inline void page_swap_rows(Page *p, CellCountInt a, CellCountInt b) {
 
     ra->set_dirty(true);
     rb->set_dirty(true);
-}
-
-/* Erase a row and reset the flags that described its old contents.
- *
- * page_erase_row leaves the flags alone, because its callers go on to
- * overwrite them. A row scrolled into view is not overwritten — it is the
- * blank line the user now sees — so a stale wrap flag there would join it to
- * a line it has nothing to do with. */
-inline void page_clear_row(Page *p, CellCountInt y) {
-    if (!p || y >= p->capacity.rows) return;
-
-    page_erase_row(p, y);
-
-    Row *row = p->get_row(y);
-    const Offset<Cell> cells_off = row->cells();
-    *row = Row();
-    row->set_cells(cells_off);
-    row->set_dirty(true);
 }
 
 /* Reverse a run of rows in place. Rotation is three reversals, which needs no
