@@ -4,10 +4,11 @@
  *
  * Cell and Row, the storage primitives a Page is built from.
  *
- * PARTIAL PORT. Cell, Row, Capacity, the layout, and the Page struct's
- * storage layer are here, along with the definitions that close the style and
- * hyperlink cycles. The larger operations — resize, clone, scrolling, grapheme
- * management — are still to come, so the ledger records page.zig as `wip`.
+ * PARTIAL PORT. Cell, Row, Capacity, the layout and the Page struct's storage
+ * layer are here, along with the definitions that close the style and
+ * hyperlink cycles and the operations over that storage: grapheme management,
+ * erase, clone, reflow and scrolling. Upstream's remaining pieces are not, so
+ * the ledger still records page.zig as `wip`.
  *
  * BIT LAYOUT. Both Cell and Row are exactly 64 bits, and the field order
  * matters: it is what lets a row of cells be memcpy'd and a page be relocated
@@ -1471,6 +1472,125 @@ inline ReflowResult page_reflow_into(Page *dst, CellCountInt dst_y,
 
     r.src_rows_consumed = (CellCountInt)(sy - src_y);
     return r;
+}
+
+/* ─── scrolling ──────────────────────────────────────────────────────────── */
+
+/* Scrolling moves rows, and a row is a handle rather than a container.
+ *
+ * A Row is 64 bits: some flags and the offset of its cells. Moving a row up
+ * the screen is therefore a swap of two 64-bit values, not a copy of a
+ * screenful of cells — scrolling a 200-column region costs the same as
+ * scrolling a 2000-column one.
+ *
+ * This works because everything hanging off a row is keyed by the *cell's*
+ * offset, not by its coordinates. A grapheme run and a hyperlink are found
+ * through the page's maps using the offset of the cell that owns them, and
+ * that offset travels with the row's cells pointer. Scrolling therefore needs
+ * no fixups at all: the maps are still right the instant the swap is done.
+ * Had a cell's extras been keyed by row and column, every scroll would have
+ * meant rebuilding both maps.
+ */
+
+/* Exchange two rows. Their cells stay exactly where they are; only which row
+ * points at them changes. */
+inline void page_swap_rows(Page *p, CellCountInt a, CellCountInt b) {
+    if (!p || a == b) return;
+    if (a >= p->capacity.rows || b >= p->capacity.rows) return;
+
+    Row *ra = p->get_row(a);
+    Row *rb = p->get_row(b);
+
+    const Row tmp = *ra;
+    *ra = *rb;
+    *rb = tmp;
+
+    ra->set_dirty(true);
+    rb->set_dirty(true);
+}
+
+/* Erase a row and reset the flags that described its old contents.
+ *
+ * page_erase_row leaves the flags alone, because its callers go on to
+ * overwrite them. A row scrolled into view is not overwritten — it is the
+ * blank line the user now sees — so a stale wrap flag there would join it to
+ * a line it has nothing to do with. */
+inline void page_clear_row(Page *p, CellCountInt y) {
+    if (!p || y >= p->capacity.rows) return;
+
+    page_erase_row(p, y);
+
+    Row *row = p->get_row(y);
+    const Offset<Cell> cells_off = row->cells();
+    *row = Row();
+    row->set_cells(cells_off);
+    row->set_dirty(true);
+}
+
+/* Reverse a run of rows in place. Rotation is three reversals, which needs no
+ * scratch space for the rows being displaced — worth having in a header that
+ * cannot allocate. */
+inline void page_reverse_rows(Page *p, CellCountInt lo, CellCountInt hi) {
+    while (lo < hi) {
+        page_swap_rows(p, lo, hi);
+        lo++;
+        hi--;
+    }
+}
+
+/* Scroll a region up by n rows: the top n rows leave, and n blank rows arrive
+ * at the bottom.
+ *
+ * top and bot are both inclusive, matching the DECSTBM scroll region the
+ * caller will have parsed. */
+inline void page_scroll_up(Page *p, CellCountInt top, CellCountInt bot,
+                           CellCountInt n) {
+    if (!p || n == 0) return;
+    if (bot >= p->capacity.rows) bot = (CellCountInt)(p->capacity.rows - 1);
+    if (top > bot) return;
+
+    const CellCountInt count = (CellCountInt)(bot - top + 1);
+
+    /* Scrolling by at least the region's height leaves nothing behind. */
+    if (n >= count) {
+        for (CellCountInt y = top; y <= bot; y++) page_clear_row(p, y);
+        return;
+    }
+
+    /* The departing rows are released here, while they are still findable.
+     * After the rotation they are the blank rows at the bottom. */
+    for (CellCountInt i = 0; i < n; i++) {
+        page_clear_row(p, (CellCountInt)(top + i));
+    }
+
+    page_reverse_rows(p, top, (CellCountInt)(top + n - 1));
+    page_reverse_rows(p, (CellCountInt)(top + n), bot);
+    page_reverse_rows(p, top, bot);
+}
+
+/* Scroll a region down by n rows: the bottom n rows leave, and n blank rows
+ * arrive at the top. */
+inline void page_scroll_down(Page *p, CellCountInt top, CellCountInt bot,
+                             CellCountInt n) {
+    if (!p || n == 0) return;
+    if (bot >= p->capacity.rows) bot = (CellCountInt)(p->capacity.rows - 1);
+    if (top > bot) return;
+
+    const CellCountInt count = (CellCountInt)(bot - top + 1);
+
+    if (n >= count) {
+        for (CellCountInt y = top; y <= bot; y++) page_clear_row(p, y);
+        return;
+    }
+
+    for (CellCountInt i = 0; i < n; i++) {
+        page_clear_row(p, (CellCountInt)(bot - i));
+    }
+
+    /* The same rotation the other way round. */
+    page_reverse_rows(p, top, bot);
+    page_reverse_rows(p, top, (CellCountInt)(top + n - 1));
+    page_reverse_rows(p, (CellCountInt)(top + n), bot);
 }
 
 /* ─── closing the style/page cycle ───────────────────────────────────────── */
