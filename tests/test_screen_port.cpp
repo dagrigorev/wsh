@@ -1710,3 +1710,278 @@ TEST(selection, selecting_again_replaces_the_old_one) {
 
     screen_deinit(&s);
 }
+
+/* ─── the saved cursor ───────────────────────────────────────────────────── */
+
+TEST(saved, restores_the_position) {
+    Screen s;
+    ASSERT_TRUE(screen_init(&s, 20, 6, 0));
+    ASSERT_TRUE(screen_cursor_absolute(&s, 7, 3));
+
+    screen_save_cursor(&s);
+    ASSERT_TRUE(screen_cursor_absolute(&s, 0, 0));
+    ASSERT_TRUE(screen_restore_cursor(&s));
+
+    ASSERT_EQ(s.cursor.x, 7);
+    ASSERT_EQ(s.cursor.y, 3);
+
+    screen_deinit(&s);
+}
+
+TEST(saved, restores_the_style) {
+    Screen s;
+    ASSERT_TRUE(screen_init(&s, 20, 6, 0));
+
+    s.cursor.style.fg_color.tag = style::StyleColor::Tag::palette;
+    s.cursor.style.fg_color.palette = 12;
+    s.cursor.style.flags.bold = true;
+    screen_save_cursor(&s);
+
+    /* A program that saves the cursor, prints something in another colour and
+     * restores expects its colour back as well as its place. */
+    s.cursor.style = style::Style();
+    ASSERT_TRUE(screen_restore_cursor(&s));
+
+    ASSERT_EQ(s.cursor.style.fg_color.palette, 12);
+    ASSERT_TRUE(s.cursor.style.flags.bold);
+
+    screen_deinit(&s);
+}
+
+TEST(saved, restores_a_pending_wrap) {
+    Screen s;
+    ASSERT_TRUE(screen_init(&s, 5, 4, 0));
+    ASSERT_TRUE(screen_write_ascii(&s, "abcde", 5));
+    ASSERT_TRUE(s.cursor.pending_wrap);
+
+    screen_save_cursor(&s);
+    ASSERT_TRUE(screen_cursor_absolute(&s, 0, 2));
+    ASSERT_TRUE(screen_restore_cursor(&s));
+
+    /* The pending wrap is as much a part of where the cursor is as the
+     * column, so writing after a restore wraps exactly as it would have. */
+    ASSERT_TRUE(s.cursor.pending_wrap);
+    ASSERT_TRUE(screen_write_codepoint(&s, 'f', 1));
+    ASSERT_EQ(screen_cell(&s, 0, 1)->codepoint(), 'f');
+
+    screen_deinit(&s);
+}
+
+TEST(saved, an_unsaved_restore_goes_to_the_top_left) {
+    Screen s;
+    ASSERT_TRUE(screen_init(&s, 20, 6, 0));
+    ASSERT_TRUE(screen_cursor_absolute(&s, 9, 4));
+
+    ASSERT_TRUE(screen_restore_cursor(&s));
+    ASSERT_EQ(s.cursor.x, 0);
+    ASSERT_EQ(s.cursor.y, 0);
+
+    screen_deinit(&s);
+}
+
+TEST(saved, is_a_place_on_the_screen_not_in_the_text) {
+    Screen s;
+    ASSERT_TRUE(screen_init(&s, 20, 4, 0));
+    ASSERT_TRUE(screen_cursor_absolute(&s, 2, 1));
+    put_line(&s, 1, "here");
+    ASSERT_TRUE(screen_cursor_absolute(&s, 2, 1));
+    screen_save_cursor(&s);
+
+    /* Scroll the line it was on off the top. DECSC means "this place on the
+     * screen", so the cursor comes back to row 1 rather than chasing the
+     * line, which is the opposite of what the cursor's own pin does. */
+    for (int i = 0; i < 3; i++) {
+        ASSERT_TRUE(screen_cursor_absolute(&s, 0, s.pages.rows - 1));
+        ASSERT_TRUE(screen_cursor_down_scroll(&s));
+    }
+
+    ASSERT_TRUE(screen_restore_cursor(&s));
+    ASSERT_EQ(s.cursor.y, 1);
+    ASSERT_EQ(s.cursor.x, 2);
+    ASSERT_EQ(s.cursor.page_cell->codepoint(), 0u);
+
+    screen_deinit(&s);
+}
+
+TEST(saved, a_position_off_a_shrunken_screen_is_clamped) {
+    Screen s;
+    ASSERT_TRUE(screen_init(&s, 40, 10, 0));
+    ASSERT_TRUE(screen_cursor_absolute(&s, 30, 8));
+    screen_save_cursor(&s);
+
+    ASSERT_TRUE(screen_resize(&s, 10, 4));
+    ASSERT_TRUE(screen_restore_cursor(&s));
+
+    /* Refusing would leave the cursor somewhere the program has no reason to
+     * expect, which is worse than as close as the screen allows. */
+    ASSERT_TRUE(s.cursor.x < s.pages.cols);
+    ASSERT_TRUE(s.cursor.y < s.pages.rows);
+    ASSERT_TRUE(s.cursor.page_cell != nullptr);
+
+    screen_deinit(&s);
+}
+
+TEST(saved, saving_again_replaces_it) {
+    Screen s;
+    ASSERT_TRUE(screen_init(&s, 20, 6, 0));
+
+    ASSERT_TRUE(screen_cursor_absolute(&s, 1, 1));
+    screen_save_cursor(&s);
+    ASSERT_TRUE(screen_cursor_absolute(&s, 4, 4));
+    screen_save_cursor(&s);
+
+    ASSERT_TRUE(screen_cursor_absolute(&s, 0, 0));
+    ASSERT_TRUE(screen_restore_cursor(&s));
+    ASSERT_EQ(s.cursor.x, 4);
+    ASSERT_EQ(s.cursor.y, 4);
+
+    screen_deinit(&s);
+}
+
+TEST(saved, restoring_twice_gives_the_same_place) {
+    Screen s;
+    ASSERT_TRUE(screen_init(&s, 20, 6, 0));
+    ASSERT_TRUE(screen_cursor_absolute(&s, 3, 2));
+    screen_save_cursor(&s);
+
+    ASSERT_TRUE(screen_cursor_absolute(&s, 0, 0));
+    ASSERT_TRUE(screen_restore_cursor(&s));
+    ASSERT_TRUE(screen_cursor_absolute(&s, 9, 5));
+    ASSERT_TRUE(screen_restore_cursor(&s));
+
+    ASSERT_EQ(s.cursor.x, 3);
+    ASSERT_EQ(s.cursor.y, 2);
+
+    screen_deinit(&s);
+}
+
+/* ─── selecting by word ──────────────────────────────────────────────────── */
+
+TEST(word, selects_the_run_it_is_in) {
+    Screen s;
+    ASSERT_TRUE(screen_init(&s, 40, 4, 0));
+    put_line(&s, 0, "the quick brown fox");
+
+    ASSERT_TRUE(screen_select_word(&s, at(&s, 6, 0)));
+
+    char got[64];
+    screen_selection_text(&s, got, sizeof(got));
+    ASSERT_TRUE(strcmp(got, "quick") == 0);
+
+    screen_deinit(&s);
+}
+
+TEST(word, selects_from_either_end_of_a_word) {
+    Screen s;
+    ASSERT_TRUE(screen_init(&s, 40, 4, 0));
+    put_line(&s, 0, "the quick brown fox");
+
+    char got[64];
+    ASSERT_TRUE(screen_select_word(&s, at(&s, 4, 0)));
+    screen_selection_text(&s, got, sizeof(got));
+    ASSERT_TRUE(strcmp(got, "quick") == 0);
+
+    ASSERT_TRUE(screen_select_word(&s, at(&s, 8, 0)));
+    screen_selection_text(&s, got, sizeof(got));
+    ASSERT_TRUE(strcmp(got, "quick") == 0);
+
+    screen_deinit(&s);
+}
+
+TEST(word, selects_a_run_of_spaces) {
+    Screen s;
+    ASSERT_TRUE(screen_init(&s, 40, 4, 0));
+    put_line(&s, 0, "a    b");
+
+    /* Clicking in a gap selects the gap, which is what taking "the run of
+     * things that are not the other kind" means both ways round. */
+    ASSERT_TRUE(screen_select_word(&s, at(&s, 3, 0)));
+
+    Pin tl, br;
+    ASSERT_TRUE(screen_selection_ordered(&s, &tl, &br));
+    ASSERT_EQ(tl.x, 1);
+    ASSERT_EQ(br.x, 4);
+
+    screen_deinit(&s);
+}
+
+TEST(word, keeps_punctuation_with_the_word) {
+    Screen s;
+    ASSERT_TRUE(screen_init(&s, 40, 4, 0));
+    put_line(&s, 0, "see /usr/local/bin/wisp here");
+
+    /* A path or a URL comes out in one piece, which is what somebody
+     * double-clicking one is after. */
+    ASSERT_TRUE(screen_select_word(&s, at(&s, 8, 0)));
+
+    char got[64];
+    screen_selection_text(&s, got, sizeof(got));
+    ASSERT_TRUE(strcmp(got, "/usr/local/bin/wisp") == 0);
+
+    screen_deinit(&s);
+}
+
+TEST(word, a_word_wrapped_across_rows_is_one_word) {
+    Screen s;
+    ASSERT_TRUE(screen_init(&s, 8, 4, 0));
+    put_line(&s, 0, "/a/long/path/here");
+    ASSERT_TRUE(screen_row(&s, 0)->wrap());
+
+    /* The screen broke it, not the program, so the run follows the wrap. */
+    ASSERT_TRUE(screen_select_word(&s, at(&s, 2, 1)));
+
+    char got[64];
+    screen_selection_text(&s, got, sizeof(got));
+    ASSERT_TRUE(strcmp(got, "/a/long/path/here") == 0);
+
+    screen_deinit(&s);
+}
+
+TEST(word, a_hard_line_end_stops_it) {
+    Screen s;
+    ASSERT_TRUE(screen_init(&s, 8, 4, 0));
+    put_line(&s, 0, "abcdefgh");
+    put_line(&s, 1, "ijkl");
+
+    /* The first row is full but was not wrapped into the second — the program
+     * ended the line — so the two are not one word however they look. */
+    ASSERT_FALSE(screen_row(&s, 0)->wrap());
+    ASSERT_TRUE(screen_select_word(&s, at(&s, 2, 0)));
+
+    char got[64];
+    screen_selection_text(&s, got, sizeof(got));
+    ASSERT_TRUE(strcmp(got, "abcdefgh") == 0);
+
+    screen_deinit(&s);
+}
+
+TEST(word, stops_at_the_start_and_end_of_everything) {
+    Screen s;
+    ASSERT_TRUE(screen_init(&s, 6, 3, 0));
+    put_line(&s, 0, "ab");
+
+    ASSERT_TRUE(screen_select_word(&s, at(&s, 0, 0)));
+
+    char got[64];
+    screen_selection_text(&s, got, sizeof(got));
+    ASSERT_TRUE(strcmp(got, "ab") == 0);
+
+    screen_deinit(&s);
+}
+
+TEST(word, a_wide_character_is_not_split_from_its_spacer) {
+    Screen s;
+    ASSERT_TRUE(screen_init(&s, 20, 4, 0));
+    ASSERT_TRUE(screen_cursor_absolute(&s, 0, 0));
+    ASSERT_TRUE(screen_write_codepoint(&s, 0x4E2D, 2));
+    ASSERT_TRUE(screen_write_codepoint(&s, 0x6587, 2));
+
+    /* Clicking the spacer means clicking the character in front of it. */
+    ASSERT_TRUE(screen_select_word(&s, at(&s, 1, 0)));
+
+    char got[64];
+    screen_selection_text(&s, got, sizeof(got));
+    ASSERT_TRUE(strcmp(got, "\xe4\xb8\xad\xe6\x96\x87") == 0);
+
+    screen_deinit(&s);
+}

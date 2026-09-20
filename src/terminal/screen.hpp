@@ -22,9 +22,13 @@
  * buffer, which is what the application currently runs on. This is the ported
  * one, built on the ported page list, and the two are unrelated for now.
  *
- * PARTIAL PORT. The screen, the cursor, its movement, writing text, erasing
- * and selections are here. The alternate screen and the saved cursor are not,
- * so the ledger records Screen.zig as `wip`.
+ * PARTIAL PORT. The screen, the cursor, its movement, writing text, erasing,
+ * selections and the saved cursor are here. Upstream's remaining pieces are
+ * not, so the ledger records Screen.zig as `wip`.
+ *
+ * The alternate screen is not one of them: upstream a terminal owns two
+ * screens and swaps between them, so it arrives with Terminal rather than
+ * here.
  */
 
 #pragma once
@@ -105,6 +109,37 @@ struct Selection {
     Selection() : start_pin(), end_pin(), rectangle(false), active(false) {}
 };
 
+/* ─── the saved cursor ───────────────────────────────────────────────────── */
+
+/* What DECSC puts away and DECRC brings back.
+ *
+ * It is not just a position. A program that saves the cursor, prints
+ * something in another colour and restores expects its colour back too, so
+ * the style goes with it — and so does the pending wrap, which is as much a
+ * part of where the cursor is as the column.
+ *
+ * Coordinates rather than a pin, deliberately. DECSC means "this place on the
+ * screen", and a program that saves the cursor, scrolls, and restores expects
+ * the cursor back where it was on the *screen*, not chasing the line that has
+ * since moved up. That is the opposite of what the cursor itself wants, and
+ * the difference is the whole reason a pin and a coordinate are both kept.
+ *
+ * Upstream this also carries the character sets and the origin mode, which
+ * are Terminal's state rather than the screen's. They join it when Terminal
+ * does. */
+struct SavedCursor {
+    CellCountInt x;
+    CellCountInt y;
+    style::Style style;
+    bool pending_wrap;
+
+    /* Nothing has been saved yet. A restore then means "go to the top left",
+     * which is what the standard says an unsaved DECRC does. */
+    bool valid;
+
+    SavedCursor() : x(0), y(0), style(), pending_wrap(false), valid(false) {}
+};
+
 /* ─── the screen ─────────────────────────────────────────────────────────── */
 
 struct Screen {
@@ -125,11 +160,14 @@ struct Screen {
      * below. */
     struct Selection selection;
 
+    /* Where DECSC put the cursor. */
+    SavedCursor saved;
+
     Screen();
 };
 
 inline Screen::Screen()
-    : pages(), cursor(), auto_wrap(true), selection() {}
+    : pages(), cursor(), auto_wrap(true), selection(), saved() {}
 
 /* Forget the selection, releasing the pins the list was maintaining. */
 inline void screen_select_clear(Screen *s) {
@@ -985,6 +1023,117 @@ inline size_t screen_selection_text(Screen *s, char *out, size_t cap) {
 
     out[n] = '\0';
     return n;
+}
+
+inline void screen_save_cursor(Screen *s) {
+    s->saved.x = s->cursor.x;
+    s->saved.y = s->cursor.y;
+    s->saved.style = s->cursor.style;
+    s->saved.pending_wrap = s->cursor.pending_wrap;
+    s->saved.valid = true;
+}
+
+/* Put the cursor back where DECSC left it.
+ *
+ * The saved position can be off the screen by now — the window may have been
+ * made smaller since — so it is clamped rather than refused. A restore that
+ * did nothing would leave the cursor somewhere the program has no reason to
+ * expect, which is worse than putting it as close as the screen allows. */
+inline bool screen_restore_cursor(Screen *s) {
+    if (!s->saved.valid) return screen_cursor_absolute(s, 0, 0);
+
+    CellCountInt x = s->saved.x;
+    CellCountInt y = s->saved.y;
+    if (x >= s->pages.cols) x = (CellCountInt)(s->pages.cols - 1);
+    if (y >= s->pages.rows) y = (CellCountInt)(s->pages.rows - 1);
+
+    if (!screen_cursor_absolute(s, x, y)) return false;
+
+    s->cursor.style = s->saved.style;
+    s->cursor.pending_wrap = s->saved.pending_wrap && x == s->saved.x;
+    return true;
+}
+
+/* ─── selecting by word ──────────────────────────────────────────────────── */
+
+/* Whether a cell holds part of a word.
+ *
+ * The rule is whitespace against everything else, which is coarse but is what
+ * a double click means: take the run of things that are not gaps. Punctuation
+ * counts as part of a word, so a path or a URL comes out in one piece, which
+ * is what a user double-clicking one is after.
+ *
+ * An empty cell is a gap. So is a wide character's spacer as far as the class
+ * goes, but a spacer is never the boundary — it is carried along with its
+ * lead. */
+inline bool screen_cell_is_word(const Cell *c) {
+    if (c->wide() == Wide::spacer_tail) return true;
+    const uint32_t cp = c->codepoint();
+    if (cp == 0) return false;
+    return cp != ' ' && cp != '\t';
+}
+
+/* Select the run of word or of whitespace that a pin is in.
+ *
+ * Words wrapped across rows are one word: the run follows the wrap flags, so
+ * a long path broken by the screen's width still selects whole. A hard line
+ * end stops it, because that is a line the program ended and the next line is
+ * not a continuation of this word. */
+inline bool screen_select_word(Screen *s, const Pin &p) {
+    if (!p.valid()) return false;
+
+    Pin at = p;
+    Page *page = &at.node->page;
+
+    /* A spacer is never a boundary; it belongs to the character in front. */
+    if (at.x > 0 && page->get_cell(at.x, at.y)->wide() == Wide::spacer_tail) {
+        at.x = (CellCountInt)(at.x - 1);
+    }
+
+    const bool want = screen_cell_is_word(at.node->page.get_cell(at.x, at.y));
+    const CellCountInt cols = s->pages.cols;
+
+    Pin start = at;
+    while (true) {
+        if (start.x > 0) {
+            Cell *c = start.node->page.get_cell((CellCountInt)(start.x - 1),
+                                                start.y);
+            if (screen_cell_is_word(c) != want) break;
+            start.x = (CellCountInt)(start.x - 1);
+            continue;
+        }
+
+        /* Column zero: the word may continue on the row above, but only if
+         * that row wrapped into this one. */
+        Pin above = start;
+        if (!above.up(1)) break;
+        if (!above.row()->wrap()) break;
+
+        above.x = (CellCountInt)(cols - 1);
+        if (screen_cell_is_word(above.cell()) != want) break;
+        start = above;
+    }
+
+    Pin end = at;
+    while (true) {
+        if (end.x + 1 < cols) {
+            Cell *c = end.node->page.get_cell((CellCountInt)(end.x + 1), end.y);
+            if (screen_cell_is_word(c) != want) break;
+            end.x = (CellCountInt)(end.x + 1);
+            continue;
+        }
+
+        if (!end.row()->wrap()) break;
+        Pin below = end;
+        if (!below.down(1)) break;
+
+        below.x = 0;
+        if (screen_cell_is_word(below.cell()) != want) break;
+        end = below;
+    }
+
+    screen_select(s, start, end, false);
+    return true;
 }
 
 /* ─── reading ────────────────────────────────────────────────────────────── */
