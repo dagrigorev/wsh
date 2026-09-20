@@ -235,6 +235,15 @@ struct PageList {
      * with unlimited scrollback asks for. */
     size_t max_size;
 
+    /* Keep nothing but the screen.
+     *
+     * The alternate screen is for programs that draw the whole display
+     * themselves, and scrollback there would be a record of frames rather
+     * than of output — a user scrolling up through half-drawn editor screens
+     * is not something anyone wants. A list with this set forgets a row the
+     * moment it leaves the active area. */
+    bool no_scrollback;
+
     /* Where the user is looking. See the viewport section below. */
     ViewportTag viewport;
     Pin         viewport_pin;
@@ -246,7 +255,8 @@ struct PageList {
     PageList()
         : first(nullptr), last(nullptr), cols(0), rows(0),
           page_count(0), row_count(0), bytes(0), max_size(0),
-          viewport(ViewportTag::active), viewport_pin(), tracked(nullptr) {}
+          no_scrollback(false), viewport(ViewportTag::active), viewport_pin(),
+          tracked(nullptr) {}
 };
 
 /* ─── tracked pins ───────────────────────────────────────────────────────── */
@@ -397,6 +407,10 @@ inline void page_list_trim(PageList *l) {
     }
 }
 
+/* Defined below, once splitting exists. Growth needs it for a list that
+ * keeps no scrollback. */
+inline void page_list_erase_scrollback(PageList *l);
+
 /* Add one row to the end of the list, returning a pin to it.
  *
  * This is what a newline at the bottom of the screen calls, and it is the
@@ -416,6 +430,7 @@ inline Pin page_list_grow(PageList *l) {
         node->rows_used++;
         l->row_count++;
         page_clear_row(&node->page, y);
+        if (l->no_scrollback) page_list_erase_scrollback(l);
         page_list_trim(l);
         return Pin(node, y, 0);
     }
@@ -427,6 +442,7 @@ inline Pin page_list_grow(PageList *l) {
     if (!fresh) return Pin();
 
     page_clear_row(&fresh->page, 0);
+    if (l->no_scrollback) page_list_erase_scrollback(l);
     page_list_trim(l);
     return Pin(fresh, 0, 0);
 }
@@ -960,6 +976,7 @@ inline bool page_list_resize(PageList *l, CellCountInt new_cols,
     out.cols = new_cols;
     out.rows = new_rows;
     out.max_size = l->max_size;
+    out.no_scrollback = l->no_scrollback;
 
     const CellCountInt cap_rows = page_list_rows_per_page(new_cols, new_rows);
 
