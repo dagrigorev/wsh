@@ -518,6 +518,172 @@ inline bool capacity_adjust_cols(const Capacity &in, CellCountInt cols, Capacity
     return false;
 }
 
+/* ─── Page ───────────────────────────────────────────────────────────────── */
+
+/* A self-contained section of terminal screen.
+ *
+ * Everything a page needs lives in one allocation: the row headers, the cell
+ * array, the interned style set, and the grapheme and string storage. Nothing
+ * inside holds an absolute pointer — every internal reference is a byte offset
+ * from the allocation base — so a page can be memcpy'd to a different address,
+ * written to disk, or moved between allocations and still work. That is what
+ * `relocate` demonstrates, and it is the reason for the offset machinery
+ * underneath all of this.
+ *
+ * PARTIAL. This is the storage layer: construction, addressing cells and rows,
+ * and style assignment with its reference counting. The larger operations from
+ * upstream's page.zig — resize, clone, scrolling, grapheme and hyperlink
+ * management — are not here yet.
+ */
+struct Page {
+    /* Base of the backing allocation. The only absolute pointer, and it is
+     * deliberately outside the page's own memory so relocating is just
+     * changing this field. */
+    uint8_t *memory;
+
+    Offset<Row>  rows;
+    Offset<Cell> cells;
+
+    style::Set    styles;
+    GraphemeAlloc grapheme_alloc;
+    GraphemeMap   grapheme_map;
+    StringAlloc   string_alloc;
+
+    Capacity capacity;
+    size_t   size;
+
+    Page() : memory(nullptr), rows(), cells(), capacity(), size(0) {}
+
+    /* Build a page in caller-provided memory, which must be at least
+     * PageLayout::init(cap).total_size bytes and zero-filled.
+     *
+     * Only the row headers are written: every other member treats all-zero as
+     * its empty state, so a fresh page leaves the rest of the pages untouched
+     * until something actually uses them. */
+    static Page init(uint8_t *buf, const Capacity &cap) {
+        const PageLayout l = PageLayout::init(cap);
+        OffsetBuf base = OffsetBuf::init(buf);
+
+        Page p;
+        p.memory = buf;
+        p.capacity = cap;
+        p.size = l.total_size;
+
+        p.rows = base.member<Row>(l.rows_start);
+        p.cells = base.member<Cell>(l.cells_start);
+
+        p.styles = style::Set::init_assume_zeroed(
+            base.add(l.styles_start), l.styles_layout, style::Context());
+        p.grapheme_alloc = GraphemeAlloc::init_assume_zeroed(
+            base.add(l.grapheme_alloc_start), l.grapheme_alloc_layout);
+        p.grapheme_map = GraphemeMap::init_assume_zeroed(
+            base.add(l.grapheme_map_start), l.grapheme_map_layout);
+        p.string_alloc = StringAlloc::init_assume_zeroed(
+            base.add(l.string_alloc_start), l.string_alloc_layout);
+
+        /* Point each row at its slice of the cell array. This is the one thing
+         * a zeroed buffer cannot express, since row 0's cells are not at
+         * offset 0. */
+        Row *r = p.rows.ptr(buf);
+        for (CellCountInt y = 0; y < cap.rows; y++) {
+            Offset<Cell> o;
+            o.offset = (OffsetInt)(l.cells_start +
+                                   (size_t)y * cap.cols * sizeof(Cell));
+            r[y].set_cells(o);
+        }
+
+        return p;
+    }
+
+    /* Move the page to a new base address.
+     *
+     * The caller copies `size` bytes; this just re-points the base. Nothing
+     * else needs fixing up, which is the entire payoff of offset addressing. */
+    void relocate(uint8_t *new_base) { memory = new_base; }
+
+    /* ─── addressing ─────────────────────────────────────────────────────── */
+
+    Row *get_row(CellCountInt y) {
+        assert(y < capacity.rows);
+        return &rows.ptr(memory)[y];
+    }
+
+    const Row *get_row(CellCountInt y) const {
+        assert(y < capacity.rows);
+        return &rows.ptr(memory)[y];
+    }
+
+    /* The cells of a row, `capacity.cols` of them. */
+    Cell *get_cells(CellCountInt y) {
+        return get_row(y)->cells().ptr(memory);
+    }
+
+    Cell *get_cell(CellCountInt x, CellCountInt y) {
+        assert(x < capacity.cols);
+        return &get_cells(y)[x];
+    }
+
+    /* ─── styles ─────────────────────────────────────────────────────────── */
+
+    /* Assign a style to a cell, taking a reference to the new style and
+     * releasing the old one.
+     *
+     * The new reference is taken before the old is released so that
+     * re-applying the same style is a no-op rather than briefly dropping the
+     * refcount to zero, which would make the style eligible for reaping
+     * between the two calls.
+     *
+     * Returns false if the style set is full. */
+    bool set_cell_style(CellCountInt x, CellCountInt y, const style::Style &s) {
+        Cell *c = get_cell(x, y);
+        const style::Id old_id = c->style_id();
+
+        style::Id new_id = style::DEFAULT_ID;
+        if (!s.is_default()) {
+            if (styles.add(memory, s, &new_id) != AddResult::ok) return false;
+        }
+
+        if (old_id != style::DEFAULT_ID) styles.release(memory, old_id);
+
+        c->set_style_id(new_id);
+
+        if (new_id != style::DEFAULT_ID) {
+            /* The row's styled flag is a false-positive-only hint: set once a
+             * style is used, never cleared, because proving no cell is still
+             * styled would cost more than the flag saves. */
+            get_row(y)->set_styled(true);
+        }
+
+        return true;
+    }
+
+    /* The style of a cell, or the default when it has none. */
+    style::Style get_cell_style(CellCountInt x, CellCountInt y) {
+        const style::Id id = get_cell(x, y)->style_id();
+        if (id == style::DEFAULT_ID) return style::Style();
+        return *styles.get(memory, id);
+    }
+
+    /* Drop a cell's style reference and reset it to default. Used when
+     * erasing, so that styles do not leak references. */
+    void clear_cell_style(CellCountInt x, CellCountInt y) {
+        Cell *c = get_cell(x, y);
+        const style::Id id = c->style_id();
+        if (id == style::DEFAULT_ID) return;
+        styles.release(memory, id);
+        c->set_style_id(style::DEFAULT_ID);
+    }
+
+    /* Erase a cell entirely, releasing anything it referenced. */
+    void clear_cell(CellCountInt x, CellCountInt y) {
+        clear_cell_style(x, y);
+        *get_cell(x, y) = Cell();
+    }
+
+    /* Number of distinct styles currently interned. */
+    size_t style_count() const { return styles.count(); }
+};
+
 /* ─── closing the style/page cycle ───────────────────────────────────────── */
 
 /* These were declared in style.hpp against a forward-declared Cell. Now that
