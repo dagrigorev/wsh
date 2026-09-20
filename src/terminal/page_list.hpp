@@ -18,8 +18,8 @@
  * not a separate structure to copy into — it is the pages nobody is looking at
  * any more, and forgetting it is freeing the page at the front.
  *
- * PARTIAL PORT. The list itself, page allocation, growth and trimming, and
- * pins are here. The viewport, scrolling between pages, reflow across a resize
+ * PARTIAL PORT. The list itself, page allocation, growth and trimming, pins
+ * and the viewport are here. Scrolling between pages, reflow across a resize
  * and page splitting are not, so the ledger records PageList.zig as `wip`.
  */
 
@@ -187,6 +187,25 @@ struct Pin {
 
 /* ─── the list ───────────────────────────────────────────────────────────── */
 
+/* What the viewport is following.
+ *
+ * Two of these are not positions but intentions, and that is the point. A
+ * viewport that merely remembered a row would have to be corrected every time
+ * the list grew or was trimmed; one that remembers *what it is following*
+ * needs no correction at all.
+ *
+ *   active — stay at the bottom. Output scrolls under it, and the user keeps
+ *            seeing the newest text without anything being recomputed.
+ *   top    — stay at the oldest row the list still has.
+ *   pin    — stay exactly here, wherever the list moves around it. This is
+ *            the one a user scrolled up by hand gets: new output arrives
+ *            below without dragging the screen along. */
+enum class ViewportTag : uint8_t {
+    active = 0,
+    top = 1,
+    pin = 2,
+};
+
 struct PageList {
     PageNode *first;
     PageNode *last;
@@ -204,9 +223,14 @@ struct PageList {
      * with unlimited scrollback asks for. */
     size_t max_size;
 
+    /* Where the user is looking. See the viewport section below. */
+    ViewportTag viewport;
+    Pin         viewport_pin;
+
     PageList()
         : first(nullptr), last(nullptr), cols(0), rows(0),
-          page_count(0), row_count(0), bytes(0), max_size(0) {}
+          page_count(0), row_count(0), bytes(0), max_size(0),
+          viewport(ViewportTag::active), viewport_pin() {}
 };
 
 /* Append a page to the end of the list. Returns null if the allocation
@@ -248,6 +272,15 @@ inline void page_list_drop_first(PageList *l) {
     l->page_count--;
     l->row_count -= node->page.capacity.rows;
     l->bytes -= node->page.size;
+
+    /* A viewport pinned into the page being freed would be left pointing at
+     * memory that is gone. It falls back to the top, which is the nearest
+     * thing to where it was looking that still exists. */
+    if (l->viewport == ViewportTag::pin && l->viewport_pin.node == node) {
+        l->viewport = ViewportTag::top;
+        l->viewport_pin = Pin();
+    }
+
     page_node_destroy(node);
 }
 
@@ -323,20 +356,136 @@ inline Pin page_list_pin(const PageList *l, size_t row_index) {
 }
 
 /* The first row the screen shows: the last `rows` rows of the list. */
-inline Pin page_list_screen_start(const PageList *l) {
+inline Pin page_list_active_start(const PageList *l) {
     if (l->row_count < (size_t)l->rows) return page_list_pin(l, 0);
     return page_list_pin(l, l->row_count - (size_t)l->rows);
 }
 
 /* A pin for a screen coordinate, where y is counted from the top of the
  * screen rather than from the start of the scrollback. */
-inline Pin page_list_screen_pin(const PageList *l, CellCountInt x,
+inline Pin page_list_active_pin(const PageList *l, CellCountInt x,
                                 CellCountInt y) {
-    Pin p = page_list_screen_start(l);
+    Pin p = page_list_active_start(l);
     if (!p.valid()) return p;
     if (y > 0 && !p.down((size_t)y)) return Pin();
     p.x = x;
     return p;
+}
+
+/* The index of a pin's row, counted from the oldest row in the list, or
+ * SIZE_MAX if the pin does not belong to this list. */
+inline size_t page_list_row_index(const PageList *l, const Pin &p) {
+    if (!p.valid()) return (size_t)-1;
+
+    size_t index = 0;
+    for (PageNode *node = l->first; node; node = node->next) {
+        if (node == p.node) return index + (size_t)p.y;
+        index += (size_t)node->page.capacity.rows;
+    }
+    return (size_t)-1;
+}
+
+/* ─── the viewport ───────────────────────────────────────────────────────── */
+
+/* How many rows of scrollback sit above the active area.
+ *
+ * This is also the largest row index the viewport can start at: scrolling
+ * further down would show rows past the bottom of the list. */
+inline size_t page_list_max_scroll(const PageList *l) {
+    return l->row_count > (size_t)l->rows ? l->row_count - (size_t)l->rows : 0;
+}
+
+/* The first row the user is currently looking at. */
+inline Pin page_list_viewport_start(const PageList *l) {
+    switch (l->viewport) {
+        case ViewportTag::active:
+            return page_list_active_start(l);
+        case ViewportTag::top:
+            return page_list_pin(l, 0);
+        case ViewportTag::pin:
+            return l->viewport_pin;
+    }
+    return page_list_active_start(l);
+}
+
+/* A pin for a viewport coordinate, y counted from the top of what is shown. */
+inline Pin page_list_viewport_cell(const PageList *l, CellCountInt x,
+                                   CellCountInt y) {
+    Pin p = page_list_viewport_start(l);
+    if (!p.valid()) return p;
+    if (y > 0 && !p.down((size_t)y)) return Pin();
+    p.x = x;
+    return p;
+}
+
+/* How far the viewport sits above the active area, in rows. Zero means the
+ * user is looking at the newest output. */
+inline size_t page_list_viewport_offset(const PageList *l) {
+    if (l->viewport == ViewportTag::active) return 0;
+
+    const size_t max = page_list_max_scroll(l);
+    const size_t at = page_list_row_index(l, page_list_viewport_start(l));
+    if (at == (size_t)-1 || at >= max) return 0;
+    return max - at;
+}
+
+/* Jump to the newest output and stay there. */
+inline void page_list_scroll_active(PageList *l) {
+    l->viewport = ViewportTag::active;
+    l->viewport_pin = Pin();
+}
+
+/* Jump to the oldest row the list still holds. */
+inline void page_list_scroll_top(PageList *l) {
+    l->viewport = ViewportTag::top;
+    l->viewport_pin = Pin();
+}
+
+/* Look at a particular row and stay on it. */
+inline void page_list_scroll_to_pin(PageList *l, const Pin &p) {
+    if (!p.valid()) return;
+    l->viewport = ViewportTag::pin;
+    l->viewport_pin = Pin(p.node, p.y, 0);
+}
+
+/* Move the viewport by delta rows: negative goes back into the scrollback,
+ * positive returns toward the newest output.
+ *
+ * Landing at the bottom switches back to following the active area rather
+ * than pinning the row that happens to be there. That is what makes a
+ * terminal behave the way people expect: scroll all the way down once and new
+ * output keeps you there, instead of sliding away the moment it arrives. */
+inline void page_list_scroll_delta(PageList *l, long delta) {
+    const size_t max = page_list_max_scroll(l);
+
+    size_t at = page_list_row_index(l, page_list_viewport_start(l));
+    if (at == (size_t)-1) at = max;
+
+    size_t target;
+    if (delta < 0) {
+        const size_t back = (size_t)(-delta);
+        target = back >= at ? 0 : at - back;
+    } else {
+        const size_t fwd = (size_t)delta;
+        target = at + fwd;
+        if (target < at || target > max) target = max;   /* also catches overflow */
+    }
+
+    if (target >= max) {
+        page_list_scroll_active(l);
+        return;
+    }
+    if (target == 0) {
+        page_list_scroll_top(l);
+        return;
+    }
+
+    Pin p = page_list_pin(l, target);
+    if (!p.valid()) {
+        page_list_scroll_active(l);
+        return;
+    }
+    page_list_scroll_to_pin(l, p);
 }
 
 } /* namespace terminal */
