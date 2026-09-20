@@ -17,8 +17,16 @@ TEST(VtParser, ParsesTextAndSgrAttributes) {
 
     ASSERT_EQ(screen_cell_at(&sb, 0, 0)->ch, 'A');
     ASSERT_EQ(screen_cell_at(&sb, 1, 0)->ch, 'B');
-    ASSERT_EQ(screen_cell_at(&sb, 1, 0)->attr.fg_idx, 1);
-    ASSERT_EQ(screen_cell_at(&sb, 1, 0)->attr.bg_idx, 4);
+    /* Attributes are interned, so the cell holds a style ID and the colors
+       come back through the buffer's table. This exercises the whole path:
+       parser sets current_attr, the write interns it, the cell keeps the ID,
+       and resolving returns what was set. */
+    {
+        CellAttr a = style_table_resolve(sb.styles,
+                                         screen_cell_at(&sb, 1, 0)->style_id);
+        ASSERT_EQ(a.fg_idx, 1);
+        ASSERT_EQ(a.bg_idx, 4);
+    }
     ASSERT_EQ(screen_cell_at(&sb, 2, 0)->ch, 'C');
     ASSERT_EQ(sb.current_attr.fg_idx, 7);
     ASSERT_EQ(sb.current_attr.bg_idx, 0);

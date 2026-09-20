@@ -8,6 +8,7 @@ add_library(wisp_terminal STATIC
     renderer.cpp
     font.cpp
     guid_init.cpp
+    style_table.cpp
 )
 
 target_include_directories(wisp_terminal PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})

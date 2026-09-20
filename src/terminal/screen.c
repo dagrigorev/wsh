@@ -9,11 +9,18 @@
 
 /* ─── Helpers ────────────────────────────────────────────────────────────── */
 
-static void fill_cells(ScreenCell *cells, int count, const CellAttr *attr) {
+static void fill_cells(ScreenCell *cells, int count, uint16_t style_id) {
     ScreenCell blank = screen_cell_blank();
-    if (attr) blank.attr = *attr;
+    blank.style_id = style_id;
     blank.dirty = 1;
     for (int i = 0; i < count; i++) cells[i] = blank;
+}
+
+/* Intern the buffer's pending attributes, returning the style ID to stamp
+   into cells. Falls back to the default style if the table cannot grow, so a
+   cell renders unstyled rather than carrying someone else's style. */
+static uint16_t intern_current(ScreenBuffer *sb) {
+    return style_table_intern(sb->styles, sb->current_attr, NULL);
 }
 
 static ScreenCell *active_grid(ScreenBuffer *sb) {
@@ -37,16 +44,17 @@ void screen_init(ScreenBuffer *sb, int cols, int rows, int scrollback_lines) {
     sb->scroll_bot     = rows - 1;
 
     /* Default attributes */
-    sb->current_attr.fg_idx = 7;
-    sb->current_attr.bg_idx = 0;
+    sb->current_attr = style_table_default_attr();
+
+    sb->styles = style_table_create();
 
     int total = cols * rows;
     sb->cells     = (ScreenCell *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY,
                                             (size_t)total * sizeof(ScreenCell));
     sb->alt_cells = (ScreenCell *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY,
                                             (size_t)total * sizeof(ScreenCell));
-    fill_cells(sb->cells,     total, NULL);
-    fill_cells(sb->alt_cells, total, NULL);
+    fill_cells(sb->cells,     total, 0);
+    fill_cells(sb->alt_cells, total, 0);
 
     /* Scrollback */
     sb->scrollback_capacity = scrollback_lines > 0 ? scrollback_lines : 10000;
@@ -58,7 +66,7 @@ void screen_init(ScreenBuffer *sb, int cols, int rows, int scrollback_lines) {
     /* Extra bottom rows (for AI suggestions beyond visible grid) */
     sb->extra_bottom = (ScreenCell *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY,
                        (size_t)(WISP_OVERSCROLL_LINES * cols) * sizeof(ScreenCell));
-    fill_cells(sb->extra_bottom, WISP_OVERSCROLL_LINES * cols, NULL);
+    fill_cells(sb->extra_bottom, WISP_OVERSCROLL_LINES * cols, 0);
 }
 
 void screen_free(ScreenBuffer *sb) {
@@ -66,6 +74,7 @@ void screen_free(ScreenBuffer *sb) {
     HeapFree(GetProcessHeap(), 0, sb->alt_cells);
     HeapFree(GetProcessHeap(), 0, sb->scrollback);
     HeapFree(GetProcessHeap(), 0, sb->extra_bottom);
+    style_table_destroy(sb->styles);
     memset(sb, 0, sizeof(*sb));
 }
 
@@ -83,8 +92,8 @@ void screen_resize(ScreenBuffer *sb, int new_cols, int new_rows) {
                                               (size_t)total * sizeof(ScreenCell));
     ScreenCell *nca = (ScreenCell *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY,
                                               (size_t)total * sizeof(ScreenCell));
-    fill_cells(nc,  total, NULL);
-    fill_cells(nca, total, NULL);
+    fill_cells(nc,  total, 0);
+    fill_cells(nca, total, 0);
 
     /* Copy what we can */
     int copy_rows = new_rows < sb->rows ? new_rows : sb->rows;
@@ -117,7 +126,7 @@ void screen_resize(ScreenBuffer *sb, int new_cols, int new_rows) {
     ScreenCell *nsb = (ScreenCell *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY,
                       (size_t)(sb->scrollback_capacity * new_cols) * sizeof(ScreenCell));
     if (nsb) {
-        fill_cells(nsb, sb->scrollback_capacity * new_cols, NULL);
+        fill_cells(nsb, sb->scrollback_capacity * new_cols, 0);
         int keep = old_scrollback_count < sb->scrollback_capacity ? old_scrollback_count : sb->scrollback_capacity;
         int copy_sb_cols = old_cols < new_cols ? old_cols : new_cols;
         if (old_scrollback && old_scrollback_capacity > 0 && keep > 0) {
@@ -141,7 +150,7 @@ void screen_resize(ScreenBuffer *sb, int new_cols, int new_rows) {
     ScreenCell *neb = (ScreenCell *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY,
                      (size_t)(WISP_OVERSCROLL_LINES * new_cols) * sizeof(ScreenCell));
     if (neb) {
-        fill_cells(neb, WISP_OVERSCROLL_LINES * new_cols, NULL);
+        fill_cells(neb, WISP_OVERSCROLL_LINES * new_cols, 0);
         if (sb->extra_bottom) {
             int copy_eb_cols = old_cols < new_cols ? old_cols : new_cols;
             for (int i = 0; i < WISP_OVERSCROLL_LINES; i++) {
@@ -251,7 +260,7 @@ void screen_scroll_up(ScreenBuffer *sb, int top, int bot, int n) {
     }
     /* Clear new blank lines at bottom */
     for (int r = bot - n + 1; r <= bot; r++) {
-        fill_cells(grid + r * sb->cols, sb->cols, &sb->current_attr);
+        fill_cells(grid + r * sb->cols, sb->cols, intern_current(sb));
     }
 }
 
@@ -268,7 +277,7 @@ void screen_scroll_down(ScreenBuffer *sb, int top, int bot, int n) {
                 (size_t)(move * sb->cols) * sizeof(ScreenCell));
     }
     for (int r = top; r < top + n; r++) {
-        fill_cells(grid + r * sb->cols, sb->cols, &sb->current_attr);
+        fill_cells(grid + r * sb->cols, sb->cols, intern_current(sb));
     }
 }
 
@@ -341,7 +350,8 @@ void screen_put_char(ScreenBuffer *sb, uint32_t ch, const CellAttr *attr) {
     if (!c) return;
 
     c->ch       = ch;
-    c->attr     = attr ? *attr : sb->current_attr;
+    c->style_id = attr ? style_table_intern(sb->styles, *attr, NULL)
+                       : intern_current(sb);
     c->wide     = wide ? 1 : 0;
     c->wide_cont= 0;
     c->dirty    = 1;
@@ -351,7 +361,7 @@ void screen_put_char(ScreenBuffer *sb, uint32_t ch, const CellAttr *attr) {
         ScreenCell *c2 = screen_cell_at(sb, sb->cursor_x, sb->cursor_y);
         if (c2) {
             c2->ch        = ' ';
-            c2->attr      = c->attr;
+            c2->style_id  = c->style_id;
             c2->wide      = 0;
             c2->wide_cont = 1;
             c2->dirty     = 1;
@@ -366,8 +376,11 @@ void screen_erase_line(ScreenBuffer *sb, int mode) {
     ScreenCell *grid = active_grid(sb);
     int row = sb->cursor_y;
     ScreenCell blank = screen_cell_blank();
-    blank.attr = sb->current_attr;
-    blank.attr.bold = blank.attr.italic = blank.attr.underline = 0;
+    /* Erasing keeps the current colors but drops the text decorations, so an
+       erased span does not carry underlines or bold across it. */
+    CellAttr erase_attr = sb->current_attr;
+    erase_attr.bold = erase_attr.italic = erase_attr.underline = 0;
+    blank.style_id = style_table_intern(sb->styles, erase_attr, NULL);
 
     int from, to;
     switch (mode) {
@@ -385,21 +398,21 @@ void screen_erase_line(ScreenBuffer *sb, int mode) {
 void screen_erase_display(ScreenBuffer *sb, int mode) {
     ScreenCell *grid = active_grid(sb);
     ScreenCell blank = screen_cell_blank();
-    blank.attr = sb->current_attr;
+    blank.style_id = intern_current(sb);
 
     if (mode == 0) {
         /* From cursor to end */
         screen_erase_line(sb, 0);
         for (int r = sb->cursor_y + 1; r < sb->rows; r++)
-            fill_cells(grid + r * sb->cols, sb->cols, &blank.attr);
+            fill_cells(grid + r * sb->cols, sb->cols, blank.style_id);
     } else if (mode == 1) {
         /* From start to cursor */
         for (int r = 0; r < sb->cursor_y; r++)
-            fill_cells(grid + r * sb->cols, sb->cols, &blank.attr);
+            fill_cells(grid + r * sb->cols, sb->cols, blank.style_id);
         screen_erase_line(sb, 1);
     } else if (mode == 2 || mode == 3) {
         /* All screen; snap viewport to active grid so stale scrollback is hidden */
-        fill_cells(grid, sb->cols * sb->rows, &blank.attr);
+        fill_cells(grid, sb->cols * sb->rows, blank.style_id);
         sb->viewport_offset = 0;
         if (mode == 3) {
             /* Also clear scrollback */
@@ -411,7 +424,7 @@ void screen_erase_display(ScreenBuffer *sb, int mode) {
 
 void screen_erase_chars(ScreenBuffer *sb, int n) {
     ScreenCell blank = screen_cell_blank();
-    blank.attr = sb->current_attr;
+    blank.style_id = intern_current(sb);
     ScreenCell *grid = active_grid(sb);
     for (int i = 0; i < n && sb->cursor_x + i < sb->cols; i++) {
         grid[sb->cursor_y * sb->cols + sb->cursor_x + i] = blank;
@@ -440,7 +453,7 @@ void screen_insert_chars(ScreenBuffer *sb, int n) {
                 (size_t)move * sizeof(ScreenCell));
     }
     ScreenCell blank = screen_cell_blank();
-    blank.attr = sb->current_attr;
+    blank.style_id = intern_current(sb);
     for (int i = 0; i < n && from + i < sb->cols; i++) {
         grid[row * sb->cols + from + i] = blank;
         grid[row * sb->cols + from + i].dirty = 1;
@@ -458,7 +471,7 @@ void screen_delete_chars(ScreenBuffer *sb, int n) {
                 (size_t)move * sizeof(ScreenCell));
     }
     ScreenCell blank = screen_cell_blank();
-    blank.attr = sb->current_attr;
+    blank.style_id = intern_current(sb);
     for (int i = sb->cols - n; i < sb->cols; i++) {
         if (i >= from) { grid[row * sb->cols + i] = blank; grid[row * sb->cols + i].dirty = 1; }
     }
@@ -470,7 +483,7 @@ void screen_enter_alt(ScreenBuffer *sb) {
     if (sb->alt_screen_active) return;
     screen_reset_viewport(sb);
     sb->alt_screen_active = true;
-    fill_cells(sb->alt_cells, sb->cols * sb->rows, NULL);
+    fill_cells(sb->alt_cells, sb->cols * sb->rows, 0);
     screen_mark_dirty_all(sb);
 }
 
@@ -562,7 +575,7 @@ ScreenCell *screen_extra_bottom_cell(ScreenBuffer *sb, int line, int col) {
 
 void screen_extra_bottom_clear(ScreenBuffer *sb) {
     if (!sb || !sb->extra_bottom) return;
-    fill_cells(sb->extra_bottom, WISP_OVERSCROLL_LINES * sb->cols, NULL);
+    fill_cells(sb->extra_bottom, WISP_OVERSCROLL_LINES * sb->cols, 0);
 }
 
 void screen_put_cell_at(ScreenBuffer *sb, int row, int col, uint32_t ch, const CellAttr *attr) {
@@ -577,7 +590,7 @@ void screen_put_cell_at(ScreenBuffer *sb, int row, int col, uint32_t ch, const C
         ScreenCell blank = screen_cell_blank();
         *cell = blank;
         cell->ch = ch;
-        if (attr) cell->attr = *attr;
+        if (attr) cell->style_id = style_table_intern(sb->styles, *attr, NULL);
         cell->dirty = 1;
     }
 }

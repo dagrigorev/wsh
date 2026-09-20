@@ -73,6 +73,11 @@ typedef struct {
     /* Configuration reference */
     const Config *cfg;
 
+    /* Style table of the buffer currently being painted. Cells hold style
+       IDs rather than attributes, so drawing needs the table to resolve
+       them. Set at the top of each paint from the ScreenBuffer. */
+    const StyleTable *styles;
+
     /* Tab bar height (0 if tabs disabled) */
     int    tab_bar_height;
 

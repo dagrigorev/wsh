@@ -13,26 +13,24 @@ extern "C" {
 
 /* ─── Cell Attribute ─────────────────────────────────────────────────────── */
 
-typedef struct {
-    uint8_t  fg_idx;      /* 0-255 ANSI palette index; 0xFF = use fg_rgb */
-    uint8_t  bg_idx;      /* 0-255 ANSI palette index; 0xFF = use bg_rgb */
-    uint32_t fg_rgb;      /* Truecolor when fg_idx == 0xFF */
-    uint32_t bg_rgb;      /* Truecolor when bg_idx == 0xFF */
-    uint8_t  bold     : 1;
-    uint8_t  italic   : 1;
-    uint8_t  underline: 1;
-    uint8_t  blink    : 1;
-    uint8_t  reverse  : 1;
-    uint8_t  dim      : 1;
-    uint8_t  strikethrough : 1;
-    uint8_t  _pad     : 1;
-} CellAttr;
+/* CellAttr now lives with the style table, which owns the interning. */
+#include "style_table.h"
 
 /* ─── Screen Cell ────────────────────────────────────────────────────────── */
 
+/* A cell holds a style ID rather than its attributes.
+ *
+ * Attributes used to be stored inline, sixteen bytes of color and flags in
+ * every cell, which put a ScreenCell at twenty-four bytes. Most cells on a
+ * screen share a handful of styles, so the distinct ones live once in the
+ * buffer's StyleTable and a cell keeps a two-byte ID. That takes a cell to
+ * eight bytes: for a 200-column buffer with 10,000 lines of scrollback, 46 MB
+ * of cells becomes 15 MB.
+ *
+ * Style ID 0 is the default style, so a zeroed cell is already sensible. */
 typedef struct {
     uint32_t ch;          /* Unicode codepoint (0 = empty / space) */
-    CellAttr attr;
+    uint16_t style_id;    /* Index into the buffer's StyleTable; 0 = default */
     uint8_t  wide     : 1; /* CJK double-width lead cell */
     uint8_t  wide_cont: 1; /* CJK double-width continuation cell */
     uint8_t  dirty    : 1; /* Needs repaint */
@@ -42,10 +40,9 @@ typedef struct {
 /* Default "blank" cell */
 static inline ScreenCell screen_cell_blank(void) {
     ScreenCell c = {0};
-    c.ch           = ' ';
-    c.attr.fg_idx  = 7;   /* Default white */
-    c.attr.bg_idx  = 0;   /* Default black */
-    c.dirty        = 1;
+    c.ch       = ' ';
+    c.style_id = 0;   /* default style: white on black */
+    c.dirty    = 1;
     return c;
 }
 
@@ -56,6 +53,17 @@ typedef struct {
     ScreenCell *cells;          /* [rows * cols] — primary screen */
     ScreenCell *alt_cells;      /* [rows * cols] — alternate (vim, less, etc.) */
     int         cols, rows;
+
+    /* Interned styles referenced by every cell's style_id.
+     *
+     * Grow-only: styles are never released when a cell is overwritten or
+     * scrolled away. Cells are copied in a dozen places — scroll, resize,
+     * erase, scrollback push — and a single missed release there would be a
+     * use-after-free surfacing as wrong colors much later. Treating this as a
+     * cache costs at most a bounded table and needs no bookkeeping in any of
+     * those paths. Distinct styles are deduped, so the table tracks how many
+     * styles a session actually uses, not how many cells use them. */
+    StyleTable *styles;
 
     /* Cursor */
     int         cursor_x, cursor_y;
