@@ -1,0 +1,373 @@
+/* Ported from Ghostty src/terminal/page.zig
+ * Copyright (c) 2024 Mitchell Hashimoto, Ghostty contributors
+ * MIT License — see THIRD_PARTY_NOTICES.md
+ *
+ * Cell and Row, the storage primitives a Page is built from.
+ *
+ * PARTIAL PORT. Cell, Row and their enums are here, together with the
+ * definitions that close the style/page cycle. The Page struct itself — its
+ * capacity calculation, layout, and the operations over it — is still to come.
+ * The ledger records page.zig as `wip`.
+ *
+ * BIT LAYOUT. Both Cell and Row are exactly 64 bits, and the field order
+ * matters: it is what lets a row of cells be memcpy'd and a page be relocated
+ * wholesale. Zig packs a packed struct from the least significant bit upward,
+ * so the field order below matches the declaration order upstream.
+ *
+ *   Cell                                Row
+ *     0..1   content_tag                  0..31  cells (Offset)
+ *     2..25  content (union)             32      wrap
+ *    26..41  style_id                    33      wrap_continuation
+ *    42..43  wide                        34      grapheme
+ *    44      protected                   35      styled
+ *    45      hyperlink                   36      hyperlink
+ *    46..47  semantic_content            37..38  semantic_prompt
+ *    48..63  padding                     39      kitty_virtual_placeholder
+ *                                        40      dirty
+ *                                        41..63  padding
+ *
+ * This is written as explicit shifts over a uint64_t rather than as C++
+ * bitfields. Bitfield allocation order is implementation-defined, so a
+ * bitfield version would be a layout that happens to work on one compiler
+ * rather than the layout being reproduced.
+ */
+
+#pragma once
+#ifndef WISP_TERMINAL_PAGE_HPP
+#define WISP_TERMINAL_PAGE_HPP
+
+#include <stddef.h>
+#include <stdint.h>
+
+#include "size.hpp"
+#include "color.hpp"
+#include "style.hpp"
+
+namespace wisp {
+namespace terminal {
+
+/* ─── cell enums ─────────────────────────────────────────────────────────── */
+
+/* Selects which member of a cell's content union is active, and affects some
+ * behavior besides. */
+enum class ContentTag : uint8_t {
+    /* A single codepoint, possibly zero for an empty cell. */
+    codepoint = 0,
+
+    /* A codepoint that begins a multi-codepoint grapheme cluster. The
+     * codepoint member is still active, but more codepoints live in the
+     * page's grapheme data. */
+    codepoint_grapheme = 1,
+
+    /* No text, only a background color. Keeping these out of the style map
+     * saves both a style slot and a lookup, which matters because large runs
+     * of background-only cells are common. */
+    bg_color_palette = 2,
+    bg_color_rgb = 3,
+};
+
+/* A grid cell is one or two columns wide, and a wide character is always
+ * followed by a spacer. This encodes both the width and the spacer role. */
+enum class Wide : uint8_t {
+    narrow = 0,
+    wide = 1,
+
+    /* Follows a wide character; not rendered. */
+    spacer_tail = 2,
+
+    /* Sits at the end of a soft-wrapped line to show that a wide character
+     * continues on the next one. */
+    spacer_head = 3,
+};
+
+/* Semantic type of a cell's content, from OSC 133. */
+enum class SemanticContent : uint8_t {
+    output = 0,
+    input = 1,
+    prompt = 2,
+};
+
+/* Whether a row holds prompt cells, and which kind. */
+enum class SemanticPrompt : uint8_t {
+    none = 0,
+
+    /* A primary prompt line: the start of a prompt, not a continuation. */
+    prompt = 1,
+
+    /* A continuation line, marked with k=c. Used to decide that a line
+     * belongs to some earlier prompt. */
+    prompt_continuation = 2,
+};
+
+/* ─── Cell ───────────────────────────────────────────────────────────────── */
+
+struct Cell {
+    uint64_t bits;
+
+    Cell() : bits(0) {}
+
+    /* Field positions. Kept as named constants because the tests assert
+     * against them, so a field that moves fails loudly rather than quietly
+     * reinterpreting existing cells. */
+    static const int CONTENT_TAG_SHIFT = 0;
+    static const int CONTENT_SHIFT = 2;
+    static const int STYLE_ID_SHIFT = 26;
+    static const int WIDE_SHIFT = 42;
+    static const int PROTECTED_SHIFT = 44;
+    static const int HYPERLINK_SHIFT = 45;
+    static const int SEMANTIC_SHIFT = 46;
+
+    static const uint64_t CONTENT_TAG_MASK = 0x3;
+    static const uint64_t CONTENT_MASK = 0xFFFFFF;      /* 24 bits */
+    static const uint64_t STYLE_ID_MASK = 0xFFFF;
+    static const uint64_t WIDE_MASK = 0x3;
+    static const uint64_t SEMANTIC_MASK = 0x3;
+
+    /* Within the 24-bit content union. */
+    static const uint32_t CODEPOINT_MASK = 0x1FFFFF;    /* 21 bits */
+    static const uint32_t PALETTE_MASK = 0xFF;
+
+    ContentTag content_tag() const {
+        return (ContentTag)((bits >> CONTENT_TAG_SHIFT) & CONTENT_TAG_MASK);
+    }
+    void set_content_tag(ContentTag t) {
+        bits = (bits & ~(CONTENT_TAG_MASK << CONTENT_TAG_SHIFT)) |
+               (((uint64_t)t & CONTENT_TAG_MASK) << CONTENT_TAG_SHIFT);
+    }
+
+    uint32_t content_raw() const {
+        return (uint32_t)((bits >> CONTENT_SHIFT) & CONTENT_MASK);
+    }
+    void set_content_raw(uint32_t v) {
+        bits = (bits & ~(CONTENT_MASK << CONTENT_SHIFT)) |
+               (((uint64_t)v & CONTENT_MASK) << CONTENT_SHIFT);
+    }
+
+    /* The codepoint, valid when the tag is codepoint or codepoint_grapheme. */
+    uint32_t codepoint() const { return content_raw() & CODEPOINT_MASK; }
+    void set_codepoint(uint32_t cp) { set_content_raw(cp & CODEPOINT_MASK); }
+
+    /* The palette index, valid when the tag is bg_color_palette. */
+    uint8_t color_palette() const { return (uint8_t)(content_raw() & PALETTE_MASK); }
+    void set_color_palette(uint8_t idx) { set_content_raw(idx); }
+
+    /* The background color, valid when the tag is bg_color_rgb. */
+    RGB color_rgb() const {
+        const uint32_t c = content_raw();
+        return RGB((uint8_t)(c & 0xFF),
+                   (uint8_t)((c >> 8) & 0xFF),
+                   (uint8_t)((c >> 16) & 0xFF));
+    }
+    void set_color_rgb(RGB v) {
+        set_content_raw((uint32_t)v.r | ((uint32_t)v.g << 8) | ((uint32_t)v.b << 16));
+    }
+
+    /* Index into the page's style set. Zero is the default style, which needs
+     * no lookup. */
+    style::Id style_id() const {
+        return (style::Id)((bits >> STYLE_ID_SHIFT) & STYLE_ID_MASK);
+    }
+    void set_style_id(style::Id id) {
+        bits = (bits & ~(STYLE_ID_MASK << STYLE_ID_SHIFT)) |
+               (((uint64_t)id & STYLE_ID_MASK) << STYLE_ID_SHIFT);
+    }
+
+    Wide wide() const { return (Wide)((bits >> WIDE_SHIFT) & WIDE_MASK); }
+    void set_wide(Wide w) {
+        bits = (bits & ~(WIDE_MASK << WIDE_SHIFT)) |
+               (((uint64_t)w & WIDE_MASK) << WIDE_SHIFT);
+    }
+
+    bool protect() const { return ((bits >> PROTECTED_SHIFT) & 1) != 0; }
+    void set_protect(bool v) {
+        bits = (bits & ~((uint64_t)1 << PROTECTED_SHIFT)) |
+               ((uint64_t)(v ? 1 : 0) << PROTECTED_SHIFT);
+    }
+
+    /* Whether this cell belongs to a hyperlink. The ID lives in the page's
+     * hyperlink map rather than in the cell. */
+    bool hyperlink() const { return ((bits >> HYPERLINK_SHIFT) & 1) != 0; }
+    void set_hyperlink(bool v) {
+        bits = (bits & ~((uint64_t)1 << HYPERLINK_SHIFT)) |
+               ((uint64_t)(v ? 1 : 0) << HYPERLINK_SHIFT);
+    }
+
+    SemanticContent semantic_content() const {
+        return (SemanticContent)((bits >> SEMANTIC_SHIFT) & SEMANTIC_MASK);
+    }
+    void set_semantic_content(SemanticContent s) {
+        bits = (bits & ~(SEMANTIC_MASK << SEMANTIC_SHIFT)) |
+               (((uint64_t)s & SEMANTIC_MASK) << SEMANTIC_SHIFT);
+    }
+
+    /* ─── derived ────────────────────────────────────────────────────────── */
+
+    /* True if the cell holds no text. A background-only cell still counts as
+     * empty of text. */
+    bool has_text() const {
+        const ContentTag t = content_tag();
+        return (t == ContentTag::codepoint || t == ContentTag::codepoint_grapheme) &&
+               codepoint() != 0;
+    }
+
+    /* True if the cell participates in a multi-codepoint grapheme cluster. */
+    bool has_grapheme() const {
+        return content_tag() == ContentTag::codepoint_grapheme;
+    }
+
+    /* True if the cell carries a background color of its own, which takes
+     * precedence over its style's background. */
+    bool has_bg_color() const {
+        const ContentTag t = content_tag();
+        return t == ContentTag::bg_color_palette || t == ContentTag::bg_color_rgb;
+    }
+
+    bool eql(const Cell &o) const { return bits == o.bits; }
+};
+
+/* ─── Row ────────────────────────────────────────────────────────────────── */
+
+struct Row {
+    uint64_t bits;
+
+    Row() : bits(0) {}
+
+    static const int CELLS_SHIFT = 0;
+    static const int WRAP_SHIFT = 32;
+    static const int WRAP_CONT_SHIFT = 33;
+    static const int GRAPHEME_SHIFT = 34;
+    static const int STYLED_SHIFT = 35;
+    static const int HYPERLINK_SHIFT = 36;
+    static const int SEMANTIC_PROMPT_SHIFT = 37;
+    static const int KITTY_PLACEHOLDER_SHIFT = 39;
+    static const int DIRTY_SHIFT = 40;
+
+    static const uint64_t CELLS_MASK = 0xFFFFFFFF;
+    static const uint64_t SEMANTIC_PROMPT_MASK = 0x3;
+
+    /* The row's cells, as an offset from the page base. */
+    Offset<Cell> cells() const {
+        Offset<Cell> o;
+        o.offset = (OffsetInt)((bits >> CELLS_SHIFT) & CELLS_MASK);
+        return o;
+    }
+    void set_cells(Offset<Cell> o) {
+        bits = (bits & ~(CELLS_MASK << CELLS_SHIFT)) |
+               (((uint64_t)o.offset & CELLS_MASK) << CELLS_SHIFT);
+    }
+
+    /* Soft-wrapped: the next row continues this one. */
+    bool wrap() const { return bit(WRAP_SHIFT); }
+    void set_wrap(bool v) { set_bit(WRAP_SHIFT, v); }
+
+    /* This row continues the previous one. */
+    bool wrap_continuation() const { return bit(WRAP_CONT_SHIFT); }
+    void set_wrap_continuation(bool v) { set_bit(WRAP_CONT_SHIFT, v); }
+
+    /* Some cell here has a multi-codepoint grapheme cluster, so the fast
+     * paths that skip grapheme cleanup are unavailable. */
+    bool grapheme() const { return bit(GRAPHEME_SHIFT); }
+    void set_grapheme(bool v) { set_bit(GRAPHEME_SHIFT, v); }
+
+    /* Some cell here uses a ref-counted style.
+     *
+     * False positives are allowed, false negatives are not: it is set the
+     * first time a style is used and never cleared, because checking whether
+     * a style is still in use would cost more than it saves. Erase operations
+     * use it to skip style cleanup entirely on rows that were never styled,
+     * which upstream measures at roughly 4x. */
+    bool styled() const { return bit(STYLED_SHIFT); }
+    void set_styled(bool v) { set_bit(STYLED_SHIFT, v); }
+
+    /* Some cell here is part of a hyperlink. Same false-positive rule as
+     * styled. */
+    bool hyperlink() const { return bit(HYPERLINK_SHIFT); }
+    void set_hyperlink(bool v) { set_bit(HYPERLINK_SHIFT, v); }
+
+    /* Whether this row holds prompt cells. Only an optimization for
+     * jump-to-prompt; individual cells still have to be checked. False
+     * positives are allowed, false negatives are not. */
+    SemanticPrompt semantic_prompt() const {
+        return (SemanticPrompt)((bits >> SEMANTIC_PROMPT_SHIFT) & SEMANTIC_PROMPT_MASK);
+    }
+    void set_semantic_prompt(SemanticPrompt p) {
+        bits = (bits & ~(SEMANTIC_PROMPT_MASK << SEMANTIC_PROMPT_SHIFT)) |
+               (((uint64_t)p & SEMANTIC_PROMPT_MASK) << SEMANTIC_PROMPT_SHIFT);
+    }
+
+    /* Holds a Kitty graphics virtual placeholder (U+10EEEE). The bit is kept
+     * even when Kitty graphics are disabled so the layout does not change. */
+    bool kitty_virtual_placeholder() const { return bit(KITTY_PLACEHOLDER_SHIFT); }
+    void set_kitty_virtual_placeholder(bool v) { set_bit(KITTY_PLACEHOLDER_SHIFT, v); }
+
+    /* Needs redrawing. Set by anything that changes the row's contents or
+     * position, and cleared by whoever draws it.
+     *
+     * Conveys only that something changed visually. False positives are
+     * allowed; a false negative leaves an artifact on screen. */
+    bool dirty() const { return bit(DIRTY_SHIFT); }
+    void set_dirty(bool v) { set_bit(DIRTY_SHIFT, v); }
+
+private:
+    bool bit(int shift) const { return ((bits >> shift) & 1) != 0; }
+    void set_bit(int shift, bool v) {
+        bits = (bits & ~((uint64_t)1 << shift)) | ((uint64_t)(v ? 1 : 0) << shift);
+    }
+};
+
+/* ─── closing the style/page cycle ───────────────────────────────────────── */
+
+/* These were declared in style.hpp against a forward-declared Cell. Now that
+ * Cell is complete they can be defined. */
+
+inline bool style::Style::bg(const Cell *cell, const Palette *palette, RGB *out) const {
+    /* A cell's own background wins over the style's, which is what makes
+     * background-only cells able to skip the style map entirely. */
+    if (cell) {
+        switch (cell->content_tag()) {
+            case ContentTag::bg_color_palette:
+                if (!palette) return false;
+                *out = (*palette)[cell->color_palette()];
+                return true;
+            case ContentTag::bg_color_rgb:
+                *out = cell->color_rgb();
+                return true;
+            default:
+                break;
+        }
+    }
+
+    switch (bg_color.tag) {
+        case StyleColor::Tag::none:
+            return false;
+        case StyleColor::Tag::palette:
+            if (!palette) return false;
+            *out = (*palette)[bg_color.palette];
+            return true;
+        case StyleColor::Tag::rgb:
+            *out = bg_color.rgb;
+            return true;
+    }
+    return false;
+}
+
+inline bool style::Style::bg_cell(Cell *out) const {
+    switch (bg_color.tag) {
+        case StyleColor::Tag::none:
+            return false;
+        case StyleColor::Tag::palette:
+            out->set_content_tag(ContentTag::bg_color_palette);
+            out->set_color_palette(bg_color.palette);
+            return true;
+        case StyleColor::Tag::rgb:
+            out->set_content_tag(ContentTag::bg_color_rgb);
+            out->set_color_rgb(bg_color.rgb);
+            return true;
+    }
+    return false;
+}
+
+} /* namespace terminal */
+} /* namespace wisp */
+
+#endif /* WISP_TERMINAL_PAGE_HPP */

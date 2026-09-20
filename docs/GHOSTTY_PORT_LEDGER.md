@@ -16,7 +16,7 @@ License: MIT, (c) 2024 Mitchell Hashimoto and Ghostty contributors
 | Ported | - | 5370 |
 | Not applicable to a Windows port | - | 37082 |
 | Remaining | - | 299949 |
-| ...of which partially ported | - | 2708 |
+| ...of which partially ported | - | 7231 |
 
 Status values: `todo`, `wip`, `done`, `n/a`. A `wip` file counts
 toward *remaining*, not ported — a partially ported file is not
@@ -84,7 +84,7 @@ whole file's length.
 | `terminal/formatter.zig` | 7030 | todo |
 | `terminal/stream_terminal.zig` | 6604 | todo |
 | `terminal/stream.zig` | 5407 | todo |
-| `terminal/page.zig` | 4523 | todo |
+| `terminal/page.zig` | 4523 | wip |
 | `terminal/render.zig` | 2397 | todo |
 | `terminal/SelectionGesture.zig` | 2110 | todo |
 | `terminal/hash_map.zig` | 1918 | done |
