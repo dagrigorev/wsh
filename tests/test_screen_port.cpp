@@ -458,3 +458,416 @@ TEST(screen, a_wrapped_line_below_the_cursor_is_kept) {
 
     screen_deinit(&s);
 }
+
+/* ─── writing ────────────────────────────────────────────────────────────── */
+
+static void read_row(Screen *s, CellCountInt y, char *out, size_t out_len) {
+    size_t n = 0;
+    for (CellCountInt x = 0; x < s->pages.cols && n + 1 < out_len; x++) {
+        Cell *c = screen_cell(s, x, y);
+        const uint32_t cp = c->codepoint();
+        out[n++] = cp ? (char)cp : ' ';
+    }
+    while (n > 0 && out[n - 1] == ' ') n--;
+    out[n] = '\0';
+}
+
+TEST(write, one_character) {
+    Screen s;
+    ASSERT_TRUE(screen_init(&s, 10, 4, 0));
+
+    ASSERT_TRUE(screen_write_codepoint(&s, 'a', 1));
+    ASSERT_EQ(screen_cell(&s, 0, 0)->codepoint(), 'a');
+    ASSERT_EQ(s.cursor.x, 1);
+    ASSERT_FALSE(s.cursor.pending_wrap);
+
+    screen_deinit(&s);
+}
+
+TEST(write, a_run_of_text) {
+    Screen s;
+    ASSERT_TRUE(screen_init(&s, 20, 4, 0));
+
+    ASSERT_TRUE(screen_write_ascii(&s, "hello", 5));
+
+    char got[32];
+    read_row(&s, 0, got, sizeof(got));
+    ASSERT_TRUE(strcmp(got, "hello") == 0);
+    ASSERT_EQ(s.cursor.x, 5);
+
+    screen_deinit(&s);
+}
+
+TEST(write, carries_the_cursor_style) {
+    Screen s;
+    ASSERT_TRUE(screen_init(&s, 10, 4, 0));
+
+    s.cursor.style.fg_color.tag = style::StyleColor::Tag::palette;
+    s.cursor.style.fg_color.palette = 42;
+    s.cursor.style.flags.bold = true;
+    ASSERT_TRUE(screen_write_codepoint(&s, 'x', 1));
+
+    Pin p = page_list_active_pin(&s.pages, 0, 0);
+    const style::Style got = p.node->page.get_cell_style(0, p.y);
+    ASSERT_EQ(got.fg_color.palette, 42);
+    ASSERT_TRUE(got.flags.bold);
+
+    screen_deinit(&s);
+}
+
+TEST(write, an_unstyled_character_costs_no_style_slot) {
+    Screen s;
+    ASSERT_TRUE(screen_init(&s, 10, 4, 0));
+    ASSERT_TRUE(screen_write_ascii(&s, "plain", 5));
+
+    /* The default style is not interned — that is what makes ordinary text
+     * free. */
+    ASSERT_EQ(s.pages.first->page.style_count(), 0u);
+
+    screen_deinit(&s);
+}
+
+TEST(write, overwriting_releases_the_old_style) {
+    Screen s;
+    ASSERT_TRUE(screen_init(&s, 10, 4, 0));
+
+    s.cursor.style.fg_color.tag = style::StyleColor::Tag::palette;
+    s.cursor.style.fg_color.palette = 5;
+    ASSERT_TRUE(screen_write_codepoint(&s, 'a', 1));
+    ASSERT_EQ(s.pages.first->page.style_count(), 1u);
+
+    s.cursor.style = style::Style();
+    ASSERT_TRUE(screen_cursor_absolute(&s, 0, 0));
+    ASSERT_TRUE(screen_write_codepoint(&s, 'b', 1));
+
+    ASSERT_EQ(screen_cell(&s, 0, 0)->codepoint(), 'b');
+    ASSERT_EQ(s.pages.first->page.style_count(), 0u);
+
+    screen_deinit(&s);
+}
+
+TEST(write, running_out_of_styles_grows_the_page) {
+    Screen s;
+    ASSERT_TRUE(screen_init(&s, 40, 4, 0));
+    const StyleCountInt budget = s.pages.first->page.capacity.styles;
+
+    /* More distinct styles than the page was laid out for. The page is
+     * replaced by a roomier one rather than the write failing, and the
+     * cursor's cached pointers have to survive that. */
+    for (CellCountInt i = 0; i < 40; i++) {
+        ASSERT_TRUE(screen_cursor_absolute(&s, i, 0));
+        s.cursor.style = style::Style();
+        s.cursor.style.fg_color.tag = style::StyleColor::Tag::palette;
+        s.cursor.style.fg_color.palette = (uint8_t)(i + 1);
+        ASSERT_TRUE(screen_write_codepoint(&s, (uint32_t)('a' + (i % 26)), 1));
+    }
+
+    ASSERT_TRUE(s.pages.first->page.capacity.styles > budget);
+
+    Pin p = page_list_active_pin(&s.pages, 0, 0);
+    for (CellCountInt i = 0; i < 40; i++) {
+        ASSERT_EQ(p.node->page.get_cell_style(i, p.y).fg_color.palette,
+                  (uint8_t)(i + 1));
+    }
+
+    screen_deinit(&s);
+}
+
+/* ─── wrapping ───────────────────────────────────────────────────────────── */
+
+TEST(write, the_last_column_does_not_move_the_cursor) {
+    Screen s;
+    ASSERT_TRUE(screen_init(&s, 5, 4, 0));
+    ASSERT_TRUE(screen_write_ascii(&s, "abcde", 5));
+
+    /* There is nowhere to move to, so the cursor stays and leaves a note
+     * that the next character wraps first. */
+    ASSERT_EQ(s.cursor.x, 4);
+    ASSERT_EQ(s.cursor.y, 0);
+    ASSERT_TRUE(s.cursor.pending_wrap);
+
+    screen_deinit(&s);
+}
+
+TEST(write, a_line_ending_exactly_at_the_margin_does_not_wrap) {
+    Screen s;
+    ASSERT_TRUE(screen_init(&s, 5, 4, 0));
+    ASSERT_TRUE(screen_write_ascii(&s, "abcde", 5));
+
+    /* Nothing followed it, so no wrap happened and the row is not joined to
+     * the next. Doing the wrap eagerly is what produces a spurious blank
+     * line after a line that exactly fits. */
+    ASSERT_FALSE(screen_row(&s, 0)->wrap());
+    ASSERT_FALSE(screen_row(&s, 1)->wrap_continuation());
+
+    screen_deinit(&s);
+}
+
+TEST(write, one_more_character_wraps) {
+    Screen s;
+    ASSERT_TRUE(screen_init(&s, 5, 4, 0));
+    ASSERT_TRUE(screen_write_ascii(&s, "abcdef", 6));
+
+    ASSERT_TRUE(screen_row(&s, 0)->wrap());
+    ASSERT_TRUE(screen_row(&s, 1)->wrap_continuation());
+    ASSERT_EQ(screen_cell(&s, 0, 1)->codepoint(), 'f');
+    ASSERT_EQ(s.cursor.x, 1);
+    ASSERT_EQ(s.cursor.y, 1);
+
+    screen_deinit(&s);
+}
+
+TEST(write, wrapping_at_the_bottom_scrolls) {
+    Screen s;
+    ASSERT_TRUE(screen_init(&s, 4, 2, 0));
+    ASSERT_TRUE(screen_cursor_absolute(&s, 0, 1));
+
+    ASSERT_TRUE(screen_write_ascii(&s, "abcdef", 6));
+
+    /* The wrap had nowhere to go, so the screen moved instead. */
+    ASSERT_EQ(page_list_max_scroll(&s.pages), 1u);
+    ASSERT_EQ(s.cursor.y, 1);
+    ASSERT_EQ(screen_cell(&s, 0, 1)->codepoint(), 'e');
+
+    screen_deinit(&s);
+}
+
+TEST(write, with_wrapping_off_the_margin_overwrites) {
+    Screen s;
+    ASSERT_TRUE(screen_init(&s, 5, 4, 0));
+    s.auto_wrap = false;
+
+    ASSERT_TRUE(screen_write_ascii(&s, "abcdefg", 7));
+
+    /* Each character past the margin replaces the one before it, and the
+     * line never becomes two. */
+    char got[32];
+    read_row(&s, 0, got, sizeof(got));
+    ASSERT_TRUE(strcmp(got, "abcdg") == 0);
+    ASSERT_FALSE(screen_row(&s, 0)->wrap());
+    ASSERT_EQ(s.cursor.y, 0);
+
+    screen_deinit(&s);
+}
+
+TEST(write, moving_the_cursor_clears_a_pending_wrap) {
+    Screen s;
+    ASSERT_TRUE(screen_init(&s, 5, 4, 0));
+    ASSERT_TRUE(screen_write_ascii(&s, "abcde", 5));
+    ASSERT_TRUE(s.cursor.pending_wrap);
+
+    screen_cursor_left(&s, 1);
+    ASSERT_FALSE(s.cursor.pending_wrap);
+
+    ASSERT_TRUE(screen_write_codepoint(&s, 'z', 1));
+    ASSERT_EQ(screen_cell(&s, 3, 0)->codepoint(), 'z');
+    ASSERT_FALSE(screen_row(&s, 0)->wrap());
+
+    screen_deinit(&s);
+}
+
+/* ─── wide characters ────────────────────────────────────────────────────── */
+
+TEST(write, a_wide_character_takes_two_cells) {
+    Screen s;
+    ASSERT_TRUE(screen_init(&s, 10, 4, 0));
+
+    ASSERT_TRUE(screen_write_codepoint(&s, 0x4E2D, 2));
+
+    ASSERT_EQ(screen_cell(&s, 0, 0)->codepoint(), 0x4E2Du);
+    ASSERT_TRUE(screen_cell(&s, 0, 0)->wide() == Wide::wide);
+    ASSERT_TRUE(screen_cell(&s, 1, 0)->wide() == Wide::spacer_tail);
+    ASSERT_EQ(s.cursor.x, 2);
+
+    screen_deinit(&s);
+}
+
+TEST(write, a_wide_character_will_not_straddle_the_margin) {
+    Screen s;
+    ASSERT_TRUE(screen_init(&s, 5, 4, 0));
+    ASSERT_TRUE(screen_write_ascii(&s, "abcd", 4));
+
+    ASSERT_TRUE(screen_write_codepoint(&s, 0x4E2D, 2));
+
+    /* The column it could not use says so, which is how a reflow later knows
+     * the gap was the margin's doing and not something that was printed. */
+    ASSERT_TRUE(screen_cell(&s, 4, 0)->wide() == Wide::spacer_head);
+    ASSERT_TRUE(screen_row(&s, 0)->wrap());
+    ASSERT_EQ(screen_cell(&s, 0, 1)->codepoint(), 0x4E2Du);
+    ASSERT_TRUE(screen_cell(&s, 1, 1)->wide() == Wide::spacer_tail);
+
+    screen_deinit(&s);
+}
+
+TEST(write, overwriting_a_wide_lead_clears_its_spacer) {
+    Screen s;
+    ASSERT_TRUE(screen_init(&s, 10, 4, 0));
+    ASSERT_TRUE(screen_write_codepoint(&s, 0x4E2D, 2));
+
+    ASSERT_TRUE(screen_cursor_absolute(&s, 0, 0));
+    ASSERT_TRUE(screen_write_codepoint(&s, 'a', 1));
+
+    /* A spacer with nothing in front of it is a state the terminal should
+     * never produce. */
+    ASSERT_EQ(screen_cell(&s, 0, 0)->codepoint(), 'a');
+    ASSERT_TRUE(screen_cell(&s, 1, 0)->wide() == Wide::narrow);
+    ASSERT_EQ(screen_cell(&s, 1, 0)->codepoint(), 0u);
+
+    screen_deinit(&s);
+}
+
+TEST(write, overwriting_a_wide_spacer_clears_its_lead) {
+    Screen s;
+    ASSERT_TRUE(screen_init(&s, 10, 4, 0));
+    ASSERT_TRUE(screen_write_codepoint(&s, 0x4E2D, 2));
+
+    ASSERT_TRUE(screen_cursor_absolute(&s, 1, 0));
+    ASSERT_TRUE(screen_write_codepoint(&s, 'b', 1));
+
+    ASSERT_EQ(screen_cell(&s, 1, 0)->codepoint(), 'b');
+    ASSERT_TRUE(screen_cell(&s, 0, 0)->wide() == Wide::narrow);
+    ASSERT_EQ(screen_cell(&s, 0, 0)->codepoint(), 0u);
+
+    screen_deinit(&s);
+}
+
+/* ─── combining marks ────────────────────────────────────────────────────── */
+
+TEST(write, a_combining_mark_joins_the_character_before_it) {
+    Screen s;
+    ASSERT_TRUE(screen_init(&s, 10, 4, 0));
+
+    ASSERT_TRUE(screen_write_codepoint(&s, 'e', 1));
+    ASSERT_TRUE(screen_append_grapheme(&s, 0x0301));
+
+    /* It attaches to the cell behind the cursor, because a mark arrives after
+     * the character it modifies. */
+    ASSERT_EQ(s.cursor.x, 1);
+    Pin p = page_list_active_pin(&s.pages, 0, 0);
+    ASSERT_TRUE(p.node->page.get_cell(0, p.y)->has_grapheme());
+
+    const uint32_t *cps = nullptr;
+    uint32_t len = 0;
+    ASSERT_TRUE(page_grapheme_codepoints(&p.node->page, 0, p.y, &cps, &len));
+    ASSERT_EQ(len, 1u);
+    ASSERT_EQ(cps[0], 0x0301u);
+
+    screen_deinit(&s);
+}
+
+TEST(write, a_combining_mark_with_nothing_to_join_is_refused) {
+    Screen s;
+    ASSERT_TRUE(screen_init(&s, 10, 4, 0));
+
+    ASSERT_FALSE(screen_append_grapheme(&s, 0x0301));
+
+    screen_deinit(&s);
+}
+
+TEST(write, a_combining_mark_at_the_margin_joins_the_last_character) {
+    Screen s;
+    ASSERT_TRUE(screen_init(&s, 5, 4, 0));
+    ASSERT_TRUE(screen_write_ascii(&s, "abcde", 5));
+    ASSERT_TRUE(s.cursor.pending_wrap);
+
+    /* With a wrap pending the cursor is still on the character it wrote, so
+     * the mark goes there rather than one cell back. */
+    ASSERT_TRUE(screen_append_grapheme(&s, 0x0301));
+
+    Pin p = page_list_active_pin(&s.pages, 4, 0);
+    ASSERT_TRUE(p.node->page.get_cell(4, p.y)->has_grapheme());
+    ASSERT_FALSE(screen_row(&s, 0)->wrap());
+
+    screen_deinit(&s);
+}
+
+TEST(write, a_combining_mark_joins_a_wide_character_not_its_spacer) {
+    Screen s;
+    ASSERT_TRUE(screen_init(&s, 10, 4, 0));
+    ASSERT_TRUE(screen_write_codepoint(&s, 0x4E2D, 2));
+
+    ASSERT_TRUE(screen_append_grapheme(&s, 0x0301));
+
+    /* The cell behind the cursor is the spacer, which is not where the
+     * character's codepoints live. */
+    Pin p = page_list_active_pin(&s.pages, 0, 0);
+    ASSERT_TRUE(p.node->page.get_cell(0, p.y)->has_grapheme());
+    ASSERT_FALSE(p.node->page.get_cell(1, p.y)->has_grapheme());
+
+    screen_deinit(&s);
+}
+
+/* ─── what writing leaves behind ─────────────────────────────────────────── */
+
+TEST(write, text_survives_a_resize) {
+    Screen s;
+    ASSERT_TRUE(screen_init(&s, 20, 4, 0));
+    ASSERT_TRUE(screen_write_ascii(&s, "the quick brown fox", 19));
+
+    ASSERT_TRUE(screen_resize(&s, 8, 4));
+
+    /* Written as one line at twenty columns, read back as one line at
+     * eight. */
+    char got[64];
+    size_t n = 0;
+    Pin p = page_list_active_start(&s.pages);
+    while (p.valid()) {
+        const CellCountInt w = page_row_used_width(&p.node->page, p.y);
+        for (CellCountInt x = 0; x < w && n + 1 < sizeof(got); x++) {
+            got[n++] = (char)p.node->page.get_cell(x, p.y)->codepoint();
+        }
+        if (!p.row()->wrap()) break;
+        if (!p.down(1)) break;
+    }
+    got[n] = '\0';
+    ASSERT_TRUE(strcmp(got, "the quick brown fox") == 0);
+
+    screen_deinit(&s);
+}
+
+TEST(write, a_screenful_of_output_scrolls_correctly) {
+    Screen s;
+    ASSERT_TRUE(screen_init(&s, 10, 4, 0));
+
+    /* Twelve lines through a four-row screen, each ending with a scroll the
+     * way a newline would. */
+    for (int i = 0; i < 12; i++) {
+        char line[4];
+        line[0] = (char)('a' + i);
+        line[1] = (char)('a' + i);
+        ASSERT_TRUE(screen_write_ascii(&s, line, 2));
+        ASSERT_TRUE(screen_cursor_down_scroll(&s));
+        ASSERT_TRUE(screen_cursor_absolute(&s, 0, s.cursor.y));
+    }
+
+    char got[32];
+    read_row(&s, 0, got, sizeof(got));
+    ASSERT_TRUE(strcmp(got, "jj") == 0);
+    read_row(&s, 2, got, sizeof(got));
+    ASSERT_TRUE(strcmp(got, "ll") == 0);
+
+    /* And the older lines are in the scrollback rather than gone. */
+    Pin old = page_list_pin(&s.pages, 0);
+    old.x = 0;
+    ASSERT_EQ(old.cell()->codepoint(), 'a');
+
+    screen_deinit(&s);
+}
+
+TEST(write, a_wide_character_on_a_one_column_screen_is_refused) {
+    Screen s;
+    ASSERT_TRUE(screen_init(&s, 1, 4, 0));
+
+    /* Wrapping would not help, since the next row is just as narrow. The
+     * alternative to refusing is writing the spacer past the end of the
+     * row. */
+    ASSERT_FALSE(screen_write_codepoint(&s, 0x4E2D, 2));
+    ASSERT_EQ(screen_cell(&s, 0, 0)->codepoint(), 0u);
+    ASSERT_TRUE(screen_cell(&s, 0, 0)->wide() == Wide::narrow);
+
+    /* A narrow character still works there. */
+    ASSERT_TRUE(screen_write_codepoint(&s, 'a', 1));
+    ASSERT_EQ(screen_cell(&s, 0, 0)->codepoint(), 'a');
+
+    screen_deinit(&s);
+}

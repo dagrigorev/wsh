@@ -22,8 +22,8 @@
  * buffer, which is what the application currently runs on. This is the ported
  * one, built on the ported page list, and the two are unrelated for now.
  *
- * PARTIAL PORT. The screen, the cursor and its movement are here. Writing
- * text, erasing, selections, the alternate screen and the saved cursor are
+ * PARTIAL PORT. The screen, the cursor, its movement and writing text are
+ * here. Erasing, selections, the alternate screen and the saved cursor are
  * not, so the ledger records Screen.zig as `wip`.
  */
 
@@ -86,7 +86,17 @@ struct Screen {
     PageList pages;
     Cursor   cursor;
 
-    Screen() : pages(), cursor() {}
+    /* DECAWM: whether a character at the right margin wraps to the next line
+     * or overwrites the last column.
+     *
+     * Upstream this is one of Terminal's modes, not the screen's, and it
+     * belongs there — it is set by an escape sequence and applies to a
+     * terminal rather than to a buffer. It lives here until Terminal is
+     * ported, because writing text has to do something at the margin and
+     * silently picking one behaviour would be worse than naming it. */
+    bool auto_wrap;
+
+    Screen() : pages(), cursor(), auto_wrap(true) {}
 };
 
 /* Point the cursor's cached row and cell at whatever its pin now names.
@@ -206,6 +216,213 @@ inline bool screen_cursor_down_scroll(Screen *s) {
      * the cached pointers were not. */
     return screen_cursor_absolute(s, s->cursor.x,
                                   (CellCountInt)(s->pages.rows - 1));
+}
+
+
+/* ─── writing ────────────────────────────────────────────────────────────── */
+
+/* Give the cursor's cell the cursor's style, making room if there is none.
+ *
+ * The cursor carries a style value rather than an interned ID, because an ID
+ * belongs to one page's style set and the cursor crosses pages. Interning
+ * happens here, at the moment a character is actually written.
+ *
+ * A page can be out of style slots, and this is where the page budgets earn
+ * their keep: the page is replaced by a roomier one holding the same rows.
+ * That moves everything to a new address, so the cursor has to be reloaded
+ * before the write is retried — a cached cell pointer from before the growth
+ * points into a page that has been freed. */
+inline bool screen_cursor_apply_style(Screen *s) {
+    PageNode *node = s->cursor.page_pin.pin.node;
+    if (!node) return false;
+
+    const CellCountInt x = s->cursor.x;
+    const CellCountInt y = s->cursor.page_pin.pin.y;
+
+    if (node->page.set_cell_style(x, y, s->cursor.style)) return true;
+
+    PageNode *fresh = page_list_grow_budget(&s->pages, node, PageBudget::styles);
+    if (!fresh) return false;
+
+    screen_cursor_reload(s);
+    node = s->cursor.page_pin.pin.node;
+    return node->page.set_cell_style(s->cursor.x, s->cursor.page_pin.pin.y,
+                                     s->cursor.style);
+}
+
+/* Erase the cell about to be written, and the other half of any wide
+ * character it belongs to.
+ *
+ * A wide character occupies two cells that only make sense together. Writing
+ * over one of them without the other leaves a spacer with nothing to follow,
+ * or a lead with nothing after it, and every later reader has to cope with a
+ * state the terminal should never have produced. */
+inline void screen_erase_for_write(Screen *s, CellCountInt x) {
+    Pin p = s->cursor.page_pin.pin;
+    if (!p.valid()) return;
+
+    Page *page = &p.node->page;
+    const CellCountInt y = p.y;
+
+    Cell *c = page->get_cell(x, y);
+    switch (c->wide()) {
+        case Wide::wide:
+            if ((size_t)x + 1 < (size_t)page->capacity.cols) {
+                page_erase_cell(page, (CellCountInt)(x + 1), y);
+            }
+            break;
+        case Wide::spacer_tail:
+            if (x > 0) page_erase_cell(page, (CellCountInt)(x - 1), y);
+            break;
+        default:
+            break;
+    }
+
+    page_erase_cell(page, x, y);
+}
+
+/* Move to the start of the next row, joining it to this one.
+ *
+ * The wrap flag is what makes the two rows one line, and it is the only
+ * record that they were ever joined — without it a resize would treat the
+ * break as one the program asked for. */
+inline bool screen_wrap(Screen *s) {
+    if (s->cursor.page_row) s->cursor.page_row->set_wrap(true);
+
+    if (!screen_cursor_down_scroll(s)) return false;
+    if (!screen_cursor_absolute(s, 0, s->cursor.y)) return false;
+
+    if (s->cursor.page_row) s->cursor.page_row->set_wrap_continuation(true);
+    s->cursor.pending_wrap = false;
+    return true;
+}
+
+/* Deal with a cursor that is sitting past the right margin.
+ *
+ * A character written at the last column does not move the cursor off the
+ * end — there is nowhere to move to. It leaves a flag saying the *next*
+ * character wraps first. Keeping it as a flag rather than moving the cursor
+ * immediately is what makes a line ending exactly at the margin come out
+ * right: the wrap only happens if something else is actually written. */
+inline bool screen_resolve_pending_wrap(Screen *s) {
+    if (!s->cursor.pending_wrap) return true;
+
+    if (!s->auto_wrap) {
+        /* With wrapping off the cursor stays at the margin and each new
+         * character overwrites the last one. */
+        s->cursor.pending_wrap = false;
+        return true;
+    }
+
+    return screen_wrap(s);
+}
+
+/* Write one codepoint at the cursor and move past it.
+ *
+ * width is 1 or 2 columns, which the caller works out — how wide a codepoint
+ * is depends on Unicode tables and on the terminal's own settings, and this
+ * has no business knowing about either. */
+inline bool screen_write_codepoint(Screen *s, uint32_t cp, int width) {
+    if (width != 1 && width != 2) return false;
+
+    const CellCountInt cols = s->pages.cols;
+
+    /* A screen too narrow to hold a wide character at all. Wrapping would not
+     * help — the next row is just as narrow — so there is nowhere for it to
+     * go, and the alternative to refusing is writing its spacer past the end
+     * of the row. */
+    if (width == 2 && cols < 2) return false;
+
+    if (!screen_resolve_pending_wrap(s)) return false;
+
+    if (width == 2) {
+        /* A wide character will not be split across the right margin. The
+         * column it cannot use is marked so that a reflow later knows the gap
+         * was the margin's doing and not something the program printed. */
+        if ((size_t)s->cursor.x + 1 >= (size_t)cols) {
+            if (!s->auto_wrap) return true;
+
+            screen_erase_for_write(s, s->cursor.x);
+            Cell *pad = s->cursor.page_cell;
+            *pad = Cell();
+            pad->set_wide(Wide::spacer_head);
+
+            if (!screen_wrap(s)) return false;
+        }
+    }
+
+    screen_erase_for_write(s, s->cursor.x);
+    if (!screen_cursor_apply_style(s)) return false;
+
+    Cell *c = s->cursor.page_cell;
+    c->set_content_tag(ContentTag::codepoint);
+    c->set_codepoint(cp);
+    c->set_wide(width == 2 ? Wide::wide : Wide::narrow);
+    if (s->cursor.page_row) s->cursor.page_row->set_dirty(true);
+
+    if (width == 2) {
+        Pin p = s->cursor.page_pin.pin;
+        Cell *tail = p.node->page.get_cell((CellCountInt)(s->cursor.x + 1), p.y);
+        *tail = Cell();
+        tail->set_wide(Wide::spacer_tail);
+    }
+
+    const size_t next = (size_t)s->cursor.x + (size_t)width;
+    if (next >= (size_t)cols) {
+        /* No column left to move to, so the cursor stays where it is and the
+         * next character deals with it. */
+        s->cursor.pending_wrap = true;
+        return true;
+    }
+
+    return screen_cursor_absolute(s, (CellCountInt)next, s->cursor.y);
+}
+
+/* Add a codepoint to the character just written.
+ *
+ * Combining marks arrive after the character they modify, so this attaches to
+ * the cell behind the cursor rather than the one under it. A cursor that has
+ * not written anything on this row has nothing to attach to. */
+inline bool screen_append_grapheme(Screen *s, uint32_t cp) {
+    Pin p = s->cursor.page_pin.pin;
+    if (!p.valid()) return false;
+
+    /* The cell the last character went into: the one under the cursor when a
+     * wrap is pending, otherwise the one before it. */
+    CellCountInt x = s->cursor.x;
+    if (!s->cursor.pending_wrap) {
+        if (x == 0) return false;
+        x = (CellCountInt)(x - 1);
+    }
+
+    Page *page = &p.node->page;
+
+    /* A wide character's spacer is not where its codepoints live. */
+    if (page->get_cell(x, p.y)->wide() == Wide::spacer_tail) {
+        if (x == 0) return false;
+        x = (CellCountInt)(x - 1);
+    }
+
+    if (page_append_grapheme(page, x, p.y, cp)) return true;
+
+    /* Out of grapheme storage: the same answer as running out of styles. */
+    PageNode *fresh = page_list_grow_budget(&s->pages, p.node,
+                                            PageBudget::grapheme_bytes);
+    if (!fresh) return false;
+
+    screen_cursor_reload(s);
+    p = s->cursor.page_pin.pin;
+    return page_append_grapheme(&p.node->page, x, p.y, cp);
+}
+
+/* Write a run of narrow ASCII, which is what almost all output is. */
+inline bool screen_write_ascii(Screen *s, const char *text, size_t len) {
+    for (size_t i = 0; i < len; i++) {
+        if (!screen_write_codepoint(s, (uint32_t)(unsigned char)text[i], 1)) {
+            return false;
+        }
+    }
+    return true;
 }
 
 /* ─── resizing ───────────────────────────────────────────────────────────── */
