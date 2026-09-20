@@ -1436,3 +1436,360 @@ TEST(split, then_walking_crosses_the_new_seam) {
 
     page_list_deinit(&l);
 }
+
+/* ─── tracked pins ───────────────────────────────────────────────────────── */
+
+/* An ordinary pin is stable against what a page protects it from. A tracked
+ * pin is stable against the list changing shape: trimming, page replacement,
+ * splitting and reflow. That is what a cursor and a selection need. */
+
+TEST(tracked, registering_and_unregistering) {
+    PageList l;
+    ASSERT_TRUE(small_list(&l, 10, 4, 5, 2));
+
+    TrackedPin a, b;
+    page_list_track(&l, &a, page_list_pin(&l, 1));
+    page_list_track(&l, &b, page_list_pin(&l, 6));
+    ASSERT_TRUE(l.tracked == &b);
+    ASSERT_TRUE(b.next == &a);
+
+    page_list_untrack(&l, &b);
+    ASSERT_TRUE(l.tracked == &a);
+    page_list_untrack(&l, &a);
+    ASSERT_TRUE(l.tracked == nullptr);
+
+    /* Untracking leaves the pin's value alone; it is simply no longer
+     * maintained. */
+    ASSERT_EQ(page_list_row_index(&l, a.pin), 1u);
+
+    page_list_deinit(&l);
+}
+
+TEST(tracked, untracking_from_the_middle) {
+    PageList l;
+    ASSERT_TRUE(small_list(&l, 10, 4, 5, 2));
+
+    TrackedPin a, b, c;
+    page_list_track(&l, &a, page_list_pin(&l, 0));
+    page_list_track(&l, &b, page_list_pin(&l, 1));
+    page_list_track(&l, &c, page_list_pin(&l, 2));
+
+    page_list_untrack(&l, &b);
+    ASSERT_TRUE(l.tracked == &c);
+    ASSERT_TRUE(c.next == &a);
+    ASSERT_TRUE(a.prev == &c);
+
+    page_list_deinit(&l);
+}
+
+TEST(tracked, survives_a_page_being_replaced) {
+    PageList l;
+    ASSERT_TRUE(small_list(&l, 10, 4, 5, 2));
+    l.first->page.get_cell(3, 2)->set_codepoint('w');
+
+    TrackedPin t;
+    page_list_track(&l, &t, Pin(l.first, 2, 3));
+
+    PageNode *fresh = page_list_grow_budget(&l, l.first, PageBudget::styles);
+    ASSERT_TRUE(fresh != nullptr);
+
+    /* The page's memory is gone, so a pin holding an address would now be
+     * reading freed memory. */
+    ASSERT_TRUE(t.pin.node == fresh);
+    ASSERT_EQ(t.pin.cell()->codepoint(), 'w');
+
+    page_list_deinit(&l);
+}
+
+TEST(tracked, follows_the_rows_that_a_split_moves) {
+    PageList l;
+    ASSERT_TRUE(small_list(&l, 10, 4, 6, 1));
+    l.first->page.get_cell(2, 4)->set_codepoint('s');
+
+    TrackedPin below, above;
+    page_list_track(&l, &below, Pin(l.first, 4, 2));
+    page_list_track(&l, &above, Pin(l.first, 1, 0));
+
+    ASSERT_TRUE(page_list_split(&l, l.first, 2) != nullptr);
+
+    ASSERT_TRUE(below.pin.node == l.last);
+    ASSERT_EQ(below.pin.y, 2);
+    ASSERT_EQ(below.pin.cell()->codepoint(), 's');
+    ASSERT_EQ(page_list_row_index(&l, below.pin), 4u);
+
+    ASSERT_TRUE(above.pin.node == l.first);
+    ASSERT_EQ(above.pin.y, 1);
+
+    page_list_deinit(&l);
+}
+
+TEST(tracked, moves_to_the_oldest_row_left_when_its_page_is_forgotten) {
+    PageList l;
+    ASSERT_TRUE(small_list(&l, 10, 4, 5, 3));
+
+    TrackedPin t;
+    page_list_track(&l, &t, page_list_pin(&l, 2));
+    PageNode *doomed = l.first;
+
+    page_list_drop_first(&l);
+
+    /* The row it named is genuinely gone — this is scrollback being
+     * forgotten. There is nowhere better than the oldest row that is left,
+     * and dangling is the one thing not allowed. */
+    ASSERT_TRUE(t.pin.node != doomed);
+    ASSERT_TRUE(t.pin.node == l.first);
+    ASSERT_EQ(t.pin.y, 0);
+
+    page_list_deinit(&l);
+}
+
+/* ─── through a reflow ───────────────────────────────────────────────────── */
+
+TEST(tracked, follows_its_cell_when_the_screen_narrows) {
+    PageList l;
+    ASSERT_TRUE(page_list_init(&l, 20, 4, 0));
+    const size_t start = write_text(&l, "abcdefghijklmnop");
+
+    Pin p = page_list_pin(&l, start);
+    p.x = 12;
+    ASSERT_EQ(p.cell()->codepoint(), 'm');
+
+    TrackedPin t;
+    page_list_track(&l, &t, p);
+
+    ASSERT_TRUE(page_list_resize(&l, 5, 4));
+
+    /* Column 12 of twenty is column 2 of the third five-wide row. The pin
+     * followed the character, which is the only thing it could mean. */
+    ASSERT_EQ(t.pin.cell()->codepoint(), 'm');
+    ASSERT_EQ(t.pin.x, 2);
+
+    page_list_deinit(&l);
+}
+
+TEST(tracked, follows_its_cell_when_the_screen_widens) {
+    PageList l;
+    ASSERT_TRUE(page_list_init(&l, 6, 4, 0));
+    const size_t start = write_text(&l, "abcdefghijklmnop");
+
+    Pin p = page_list_pin(&l, start + 2);
+    p.x = 1;
+    ASSERT_EQ(p.cell()->codepoint(), 'n');
+
+    TrackedPin t;
+    page_list_track(&l, &t, p);
+
+    ASSERT_TRUE(page_list_resize(&l, 40, 4));
+
+    ASSERT_EQ(t.pin.cell()->codepoint(), 'n');
+    ASSERT_EQ(t.pin.x, 13);
+
+    page_list_deinit(&l);
+}
+
+TEST(tracked, a_cursor_in_the_blanks_past_a_line_is_kept) {
+    PageList l;
+    ASSERT_TRUE(page_list_init(&l, 20, 4, 0));
+    const size_t start = write_text(&l, "abcde");
+
+    /* Where a cursor actually sits: one past the last character, on a cell
+     * holding nothing. No cell carries it through a reflow, so only the
+     * end-of-row report can place it. */
+    TrackedPin t;
+    page_list_track(&l, &t, Pin(page_list_pin(&l, start).node,
+                                page_list_pin(&l, start).y, 5));
+
+    ASSERT_TRUE(page_list_resize(&l, 10, 4));
+
+    ASSERT_EQ(t.pin.x, 5);
+    Pin line = page_list_pin(&l, page_list_row_index(&l, t.pin));
+    line.x = 4;
+    ASSERT_EQ(line.cell()->codepoint(), 'e');
+
+    page_list_deinit(&l);
+}
+
+TEST(tracked, several_pins_are_remapped_independently) {
+    PageList l;
+    ASSERT_TRUE(page_list_init(&l, 20, 4, 0));
+    const size_t start = write_text(&l, "abcdefghijklmnopqrst");
+
+    Pin a = page_list_pin(&l, start);
+    a.x = 0;
+    Pin b = page_list_pin(&l, start);
+    b.x = 9;
+    Pin c = page_list_pin(&l, start);
+    c.x = 19;
+
+    TrackedPin ta, tb, tc;
+    page_list_track(&l, &ta, a);
+    page_list_track(&l, &tb, b);
+    page_list_track(&l, &tc, c);
+
+    ASSERT_TRUE(page_list_resize(&l, 4, 4));
+
+    ASSERT_EQ(ta.pin.cell()->codepoint(), 'a');
+    ASSERT_EQ(tb.pin.cell()->codepoint(), 'j');
+    ASSERT_EQ(tc.pin.cell()->codepoint(), 't');
+
+    /* And they are still in the order they were in. */
+    ASSERT_TRUE(page_list_row_index(&l, ta.pin) <=
+                page_list_row_index(&l, tb.pin));
+    ASSERT_TRUE(page_list_row_index(&l, tb.pin) <=
+                page_list_row_index(&l, tc.pin));
+
+    page_list_deinit(&l);
+}
+
+TEST(tracked, survives_a_line_crossing_a_destination_page_seam) {
+    PageList l;
+    ASSERT_TRUE(page_list_init(&l, 80, 4, 0));
+
+    static char text[16384];
+    for (size_t i = 0; i + 1 < sizeof(text); i++) {
+        text[i] = (char)('a' + (i % 26));
+    }
+    text[sizeof(text) - 1] = '\0';
+    const size_t start = write_text(&l, text);
+
+    /* A character late in a line long enough to need several destination
+     * pages, so the pin is staged against a page that is not the one the
+     * reflow started on. */
+    Pin p = page_list_pin(&l, start + 120);
+    p.x = 7;
+    const uint32_t want = p.cell()->codepoint();
+    ASSERT_TRUE(want != 0u);
+
+    TrackedPin t;
+    page_list_track(&l, &t, p);
+
+    ASSERT_TRUE(page_list_resize(&l, 2, 4));
+    ASSERT_TRUE(l.page_count > 1u);
+
+    ASSERT_EQ(t.pin.cell()->codepoint(), want);
+
+    page_list_deinit(&l);
+}
+
+TEST(tracked, the_registry_comes_across_the_resize) {
+    PageList l;
+    ASSERT_TRUE(page_list_init(&l, 20, 4, 0));
+    write_text(&l, "abcdefgh");
+
+    TrackedPin t;
+    page_list_track(&l, &t, page_list_pin(&l, 0));
+
+    ASSERT_TRUE(page_list_resize(&l, 7, 4));
+
+    /* The registry belongs to the terminal, not to the pages underneath it,
+     * so it survives the list being rebuilt — and keeps working afterwards. */
+    ASSERT_TRUE(l.tracked == &t);
+    ASSERT_TRUE(t.pin.valid());
+    ASSERT_TRUE(page_list_row_index(&l, t.pin) != (size_t)-1);
+
+    page_list_untrack(&l, &t);
+    ASSERT_TRUE(l.tracked == nullptr);
+
+    page_list_deinit(&l);
+}
+
+TEST(tracked, a_resize_to_the_same_width_leaves_pins_alone) {
+    PageList l;
+    ASSERT_TRUE(page_list_init(&l, 20, 4, 0));
+    const size_t start = write_text(&l, "abcdefgh");
+
+    Pin p = page_list_pin(&l, start);
+    p.x = 3;
+    TrackedPin t;
+    page_list_track(&l, &t, p);
+
+    ASSERT_TRUE(page_list_resize(&l, 20, 8));
+
+    ASSERT_TRUE(t.pin == p);
+    ASSERT_EQ(t.pin.cell()->codepoint(), 'd');
+
+    page_list_deinit(&l);
+}
+
+TEST(tracked, every_pin_is_somewhere_valid_after_a_resize) {
+    PageList l;
+    ASSERT_TRUE(page_list_init(&l, 30, 4, 0));
+    for (int i = 0; i < 8; i++) {
+        write_text(&l, "a line that will be re-laid at a different width");
+        page_list_grow(&l);
+    }
+
+    /* Pins scattered over everything, including rows that hold nothing. */
+    TrackedPin pins[16];
+    for (size_t i = 0; i < 16; i++) {
+        Pin p = page_list_pin(&l, (i * l.row_count) / 16);
+        p.x = (CellCountInt)(i * 2);
+        page_list_track(&l, &pins[i], p);
+    }
+
+    ASSERT_TRUE(page_list_resize(&l, 9, 4));
+
+    for (size_t i = 0; i < 16; i++) {
+        ASSERT_TRUE(pins[i].pin.valid());
+        ASSERT_TRUE(page_list_row_index(&l, pins[i].pin) != (size_t)-1);
+        ASSERT_TRUE(pins[i].pin.x < l.cols);
+        /* Reading through it must not be reading freed memory. */
+        pins[i].pin.cell()->set_codepoint('z');
+    }
+
+    page_list_deinit(&l);
+}
+
+TEST(tracked, a_pin_is_emptied_when_the_list_goes_away) {
+    PageList l;
+    ASSERT_TRUE(page_list_init(&l, 20, 4, 0));
+
+    TrackedPin t;
+    page_list_track(&l, &t, page_list_pin(&l, 0));
+    ASSERT_TRUE(t.pin.valid());
+
+    /* Tracked pins outlive the list, since the caller owns their storage. A
+     * pin that reads as invalid is recoverable; one that looks fine and
+     * points at a freed page is not. */
+    page_list_deinit(&l);
+    ASSERT_FALSE(t.pin.valid());
+}
+
+TEST(tracked, a_pin_with_nothing_to_follow_lands_somewhere_usable) {
+    PageList l;
+    ASSERT_TRUE(page_list_init(&l, 20, 4, 0));
+    write_text(&l, "abcdefgh");
+
+    /* A pin on a row past everything the list holds. The reflow never reads
+     * that row, so nothing can say where it went. */
+    TrackedPin t;
+    page_list_track(&l, &t, Pin(l.first, (CellCountInt)(l.first->rows_used + 2), 3));
+
+    ASSERT_TRUE(page_list_resize(&l, 7, 4));
+
+    /* The top of the active area is where a caller can sensibly carry on
+     * from, and it is a real row rather than a dangling one. */
+    ASSERT_TRUE(t.pin.valid());
+    ASSERT_TRUE(t.pin == page_list_active_start(&l));
+    ASSERT_TRUE(page_list_row_index(&l, t.pin) != (size_t)-1);
+
+    page_list_deinit(&l);
+}
+
+TEST(tracked, a_refused_resize_leaves_pins_alone) {
+    PageList l;
+    ASSERT_TRUE(page_list_init(&l, 20, 4, 0));
+    const size_t start = write_text(&l, "abcdefgh");
+
+    Pin p = page_list_pin(&l, start);
+    p.x = 2;
+    TrackedPin t;
+    page_list_track(&l, &t, p);
+
+    ASSERT_FALSE(page_list_resize(&l, 0, 4));
+
+    ASSERT_TRUE(t.pin == p);
+    ASSERT_EQ(t.pin.cell()->codepoint(), 'c');
+
+    page_list_deinit(&l);
+}

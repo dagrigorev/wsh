@@ -18,10 +18,10 @@
  * not a separate structure to copy into — it is the pages nobody is looking at
  * any more, and forgetting it is freeing the page at the front.
  *
- * PARTIAL PORT. The list itself, page allocation, growth and trimming, pins,
- * the viewport, scrolling, resizing, page replacement and splitting are
- * here. Tracking pins across a reflow is not, so the ledger records
- * PageList.zig as `wip`.
+ * PARTIAL PORT. The list itself, page allocation, growth and trimming, pins
+ * and tracked pins, the viewport, scrolling, resizing, page replacement and
+ * splitting are here. Upstream's remaining pieces are not, so the ledger
+ * still records PageList.zig as `wip`.
  */
 
 #pragma once
@@ -239,11 +239,76 @@ struct PageList {
     ViewportTag viewport;
     Pin         viewport_pin;
 
+    /* Pins the list keeps up to date through everything that moves rows.
+     * See the tracked pins section below. */
+    struct TrackedPin *tracked;
+
     PageList()
         : first(nullptr), last(nullptr), cols(0), rows(0),
           page_count(0), row_count(0), bytes(0), max_size(0),
-          viewport(ViewportTag::active), viewport_pin() {}
+          viewport(ViewportTag::active), viewport_pin(), tracked(nullptr) {}
 };
+
+/* ─── tracked pins ───────────────────────────────────────────────────────── */
+
+/* A pin the list keeps up to date.
+ *
+ * An ordinary Pin is stable against the things a page protects it from: the
+ * rows inside a page do not move, so scrolling within one leaves it alone.
+ * It is not stable against the list changing shape underneath it. Trimming
+ * can free the page it names; replacing a page for a bigger budget moves its
+ * contents to a different address; a reflow moves its cell to another row
+ * entirely, in another page.
+ *
+ * Registering a pin here means the list fixes it up through all of those
+ * instead of leaving the caller to notice. That is what the cursor, the two
+ * ends of a selection and a scrolled-back viewport need, and it is why
+ * upstream keeps a registry rather than handing out bare pins.
+ *
+ * The caller owns the storage. Tracking is an intrusive list, so registering
+ * a pin cannot fail for want of memory — which matters, because the places
+ * that need a tracked pin are usually places that cannot handle a failure. */
+struct TrackedPin {
+    Pin pin;
+
+    TrackedPin *prev;
+    TrackedPin *next;
+
+    /* Scratch, used only while a resize is rebuilding the list. The new
+     * position is staged rather than written, so that a resize which fails
+     * partway leaves every tracked pin pointing where it did before. */
+    Pin  staged;
+    bool staged_ok;
+
+    TrackedPin() : pin(), prev(nullptr), next(nullptr), staged(), staged_ok(false) {}
+};
+
+/* Start keeping a pin up to date. */
+inline void page_list_track(PageList *l, TrackedPin *t, const Pin &p) {
+    if (!l || !t) return;
+
+    t->pin = p;
+    t->prev = nullptr;
+    t->next = l->tracked;
+    if (l->tracked) l->tracked->prev = t;
+    l->tracked = t;
+}
+
+/* Stop. The pin keeps whatever value it had; it is simply no longer
+ * maintained. */
+inline void page_list_untrack(PageList *l, TrackedPin *t) {
+    if (!l || !t) return;
+
+    if (t->prev) {
+        t->prev->next = t->next;
+    } else if (l->tracked == t) {
+        l->tracked = t->next;
+    }
+    if (t->next) t->next->prev = t->prev;
+
+    t->prev = nullptr;
+    t->next = nullptr;
+}
 
 /* Append a page holding used_rows rows of a cap_rows page. Returns null if
  * the allocation failed; the list is unchanged in that case. */
@@ -300,6 +365,16 @@ inline void page_list_drop_first(PageList *l) {
     if (l->viewport == ViewportTag::pin && l->viewport_pin.node == node) {
         l->viewport = ViewportTag::top;
         l->viewport_pin = Pin();
+    }
+
+    /* Tracked pins in the freed page move to the oldest row that is left.
+     * The rows they named are genuinely gone — this is scrollback being
+     * forgotten — so there is nowhere better, and leaving them dangling is
+     * the one thing that is not allowed. */
+    for (TrackedPin *t = l->tracked; t; t = t->next) {
+        if (t->pin.node != node) continue;
+        t->pin.node = l->first;
+        t->pin.y = 0;
     }
 
     page_node_destroy(node);
@@ -387,6 +462,19 @@ inline bool page_list_init(PageList *l, CellCountInt cols, CellCountInt rows,
 }
 
 inline void page_list_deinit(PageList *l) {
+    /* Tracked pins outlive the list — the caller owns their storage — so
+     * they are emptied rather than left naming pages that no longer exist.
+     * A pin that reads as invalid is recoverable; one that looks fine and
+     * points at freed memory is not. */
+    TrackedPin *t = l->tracked;
+    while (t) {
+        TrackedPin *next = t->next;
+        t->pin = Pin();
+        t->prev = nullptr;
+        t->next = nullptr;
+        t = next;
+    }
+
     PageNode *node = l->first;
     while (node) {
         PageNode *next = node->next;
@@ -584,10 +672,14 @@ inline void page_list_replace_node(PageList *l, PageNode *old_node,
         l->last = fresh;
     }
 
-    /* Row i of the old page is row i of the new one, so a viewport pinned
-     * into it is still looking at the same line. */
+    /* Row i of the old page is row i of the new one, so a viewport or a
+     * tracked pin in it is still looking at the same line — at a different
+     * address, which is exactly why a pin names a node. */
     if (l->viewport == ViewportTag::pin && l->viewport_pin.node == old_node) {
         l->viewport_pin.node = fresh;
+    }
+    for (TrackedPin *t = l->tracked; t; t = t->next) {
+        if (t->pin.node == old_node) t->pin.node = fresh;
     }
 
     l->bytes -= old_node->page.size;
@@ -734,11 +826,16 @@ inline PageNode *page_list_split(PageList *l, PageNode *node, CellCountInt at) {
     l->page_count++;
     l->bytes += tail->page.size;
 
-    /* A viewport pinned into the rows that moved goes with them. */
+    /* A viewport or tracked pin in the rows that moved goes with them. */
     if (l->viewport == ViewportTag::pin && l->viewport_pin.node == node &&
         l->viewport_pin.y >= at) {
         l->viewport_pin.node = tail;
         l->viewport_pin.y = (CellCountInt)(l->viewport_pin.y - at);
+    }
+    for (TrackedPin *t = l->tracked; t; t = t->next) {
+        if (t->pin.node != node || t->pin.y < at) continue;
+        t->pin.node = tail;
+        t->pin.y = (CellCountInt)(t->pin.y - at);
     }
 
     return tail;
@@ -766,6 +863,46 @@ inline bool page_list_resize_rows(PageList *l, CellCountInt new_rows) {
     return true;
 }
 
+/* What the reflow observer needs to know while a resize is running. */
+struct ReflowRemap {
+    PageList *tracked_from;   /* the list whose pins are being remapped */
+    PageNode *src_node;       /* the source page currently being read */
+    PageNode *dst_node;       /* the destination page currently being written */
+};
+
+/* Write down where a tracked pin's cell ended up.
+ *
+ * Called for every cell the reflow copies, and once at the end of each source
+ * row. The row-end call is not a nicety: a cursor usually sits in the blanks
+ * past the end of its line, where there is no cell to follow, and without it
+ * every resize would drop the cursor to the start of a row. Its column is
+ * carried across as an offset from where the row's content ended. */
+inline void page_list_reflow_observe(void *ctx, const ReflowEvent &e) {
+    ReflowRemap *m = (ReflowRemap *)ctx;
+
+    for (TrackedPin *t = m->tracked_from->tracked; t; t = t->next) {
+        if (t->staged_ok) continue;
+        if (t->pin.node != m->src_node || t->pin.y != e.src_y) continue;
+
+        CellCountInt x;
+        if (!e.at_row_end) {
+            if (t->pin.x != e.src_x) continue;
+            x = e.dst_x;
+        } else {
+            /* Past the end of the content. Anything before it was matched by
+             * a cell already, so this is only reached by a position in the
+             * trailing blanks. */
+            if (t->pin.x < e.src_x) continue;
+            const size_t want = (size_t)e.dst_x + (t->pin.x - e.src_x);
+            const size_t last = (size_t)(m->dst_node->page.capacity.cols - 1);
+            x = (CellCountInt)(want > last ? last : want);
+        }
+
+        t->staged = Pin(m->dst_node, e.dst_y, x);
+        t->staged_ok = true;
+    }
+}
+
 /* Resize the screen, re-laying every line at the new width.
  *
  * Width is the hard case, and it is the reason reflow is resumable. The
@@ -781,10 +918,12 @@ inline bool page_list_resize_rows(PageList *l, CellCountInt new_rows) {
  * state to recover from, which for an operation this involved is worth more
  * than the memory it costs while both lists exist.
  *
- * The viewport is returned to the active area. Upstream tracks pins through a
- * reflow so a user scrolled up stays roughly where they were reading; that
- * needs a registry of live pins, which is not ported, and moving someone to
- * the wrong place would be worse than moving them to a place they asked for.
+ * Tracked pins are remapped as the reflow runs, so a cursor or a selection
+ * comes out pointing at the same characters. The viewport is still returned
+ * to the active area: it could now follow a tracked pin, but a viewport is a
+ * place in the scrollback rather than a place in the text, and which row of a
+ * re-laid screen a reader wants to be looking at is a question this does not
+ * have an answer to.
  *
  * Returns false and leaves the list untouched if an allocation failed. */
 inline bool page_list_resize(PageList *l, CellCountInt new_cols,
@@ -807,14 +946,28 @@ inline bool page_list_resize(PageList *l, CellCountInt new_cols,
 
     ReflowCursor cur(0);
 
+    ReflowRemap remap;
+    remap.tracked_from = l;
+    remap.src_node = nullptr;
+    remap.dst_node = dst;
+
+    /* Staging starts clean, because a pin may still hold a staged position
+     * from a resize that failed. */
+    for (TrackedPin *t = l->tracked; t; t = t->next) {
+        t->staged = Pin();
+        t->staged_ok = false;
+    }
+
     for (PageNode *src = l->first; src; src = src->next) {
         CellCountInt sy = 0;
         CellCountInt sx = 0;
+        remap.src_node = src;
 
         while (sy < src->rows_used) {
             ReflowResult r = page_reflow_resume(
                 &dst->page, &cur, &src->page, sy, sx,
-                (CellCountInt)(src->rows_used - sy));
+                (CellCountInt)(src->rows_used - sy),
+                l->tracked ? page_list_reflow_observe : nullptr, &remap);
 
             /* The cursor is the truth about how much of the destination page
              * is now in use: it knows whether the row it is on has been
@@ -839,6 +992,7 @@ inline bool page_list_resize(PageList *l, CellCountInt new_cols,
                     return false;
                 }
                 dst = next;
+                remap.dst_node = next;
 
                 /* A new page, but not necessarily a new line. If a line was
                  * open it stays open: the previous page's last row already
@@ -861,6 +1015,25 @@ inline bool page_list_resize(PageList *l, CellCountInt new_cols,
     }
 
     page_list_trim(&out);
+
+    /* Everything worked, so the staged positions become the real ones. The
+     * registry itself moves across with them: it belongs to the terminal,
+     * not to the pages that happen to be underneath it. */
+    out.tracked = l->tracked;
+    for (TrackedPin *t = out.tracked; t; t = t->next) {
+        if (t->staged_ok) {
+            t->pin = t->staged;
+        } else {
+            /* Nothing in the new list corresponds to where this pin was —
+             * its row held no cells the reflow reached, or the reflow never
+             * got that far. The top of the active area is where a caller can
+             * sensibly carry on from. */
+            t->pin = page_list_active_start(&out);
+        }
+        t->staged = Pin();
+        t->staged_ok = false;
+    }
+    l->tracked = nullptr;
 
     PageList old = *l;
     *l = out;

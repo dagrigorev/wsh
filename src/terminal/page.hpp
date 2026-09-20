@@ -1318,6 +1318,33 @@ inline CellCountInt page_row_used_width(Page *p, CellCountInt y) {
     return w;
 }
 
+/* Told where each cell went.
+ *
+ * Reflow moves a cell to a row and column that have nothing to do with the
+ * ones it came from, so anything remembering a position — a cursor, the ends
+ * of a selection, a viewport someone scrolled to — is wrong the moment a
+ * resize finishes. Recomputing those afterwards would mean guessing. The
+ * reflow already knows the answer as it goes, so it says so, and the caller
+ * writes it down.
+ *
+ * This is deliberately a callback rather than a list of positions to fix up:
+ * page.hpp knows nothing about lists, cursors or selections, and this keeps
+ * it that way. */
+struct ReflowEvent {
+    CellCountInt src_y;
+    CellCountInt src_x;
+    CellCountInt dst_y;
+    CellCountInt dst_x;
+
+    /* Fired once per source row after its last cell, with src_x set to the
+     * row's used width. A position in a row's trailing blanks — which is
+     * where a cursor usually sits — is never carried by a cell, so this is
+     * the only thing that can place it. */
+    bool at_row_end;
+};
+
+typedef void (*ReflowObserver)(void *ctx, const ReflowEvent &e);
+
 /* Where a reflow has got to in the destination.
  *
  * Reflow is resumable, and this is what makes it so. A logical line can be
@@ -1395,7 +1422,9 @@ inline void page_reflow_begin_row(Page *dst, CellCountInt y, bool continuation) 
  * fell and say nothing about the text. */
 inline ReflowResult page_reflow_resume(Page *dst, ReflowCursor *cur, Page *src,
                                        CellCountInt src_y, CellCountInt src_x,
-                                       CellCountInt src_rows) {
+                                       CellCountInt src_rows,
+                                       ReflowObserver obs = nullptr,
+                                       void *obs_ctx = nullptr) {
     ReflowResult r;
     r.src_y = src_y;
     r.src_x = src_x;
@@ -1471,6 +1500,16 @@ inline ReflowResult page_reflow_resume(Page *dst, ReflowCursor *cur, Page *src,
                 r.rows_written++;
             }
 
+            if (obs) {
+                ReflowEvent e;
+                e.src_y = y;
+                e.src_x = x;
+                e.dst_y = cur->y;
+                e.dst_x = cur->x;
+                e.at_row_end = false;
+                obs(obs_ctx, e);
+            }
+
             if (!page_clone_cell(dst, cur->x, cur->y, src, x, y)) {
                 r.ok = false;
                 r.src_y = y;
@@ -1494,6 +1533,16 @@ inline ReflowResult page_reflow_resume(Page *dst, ReflowCursor *cur, Page *src,
                 }
                 cur->x++;
             }
+        }
+
+        if (obs) {
+            ReflowEvent e;
+            e.src_y = y;
+            e.src_x = width;
+            e.dst_y = cur->y;
+            e.dst_x = cur->x;
+            e.at_row_end = true;
+            obs(obs_ctx, e);
         }
 
         /* A row whose wrap flag is set does not end its line, so the
