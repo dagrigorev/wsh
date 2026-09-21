@@ -1536,3 +1536,749 @@ TEST(kitty_metadata, ValueIterator_skips_values_containing_disallowed_characters
     ASSERT_TRUE(it.next(&v) && v.eql("abc"));
     ASSERT_FALSE(it.next(&v));
 }
+
+/* semantic_prompt.zig */
+
+namespace sp = wisp::terminal::osc::semantic_prompt;
+
+TEST(semantic_prompt, OSC_133_end_input_start_output) {
+    Parser p; /* .init(null) */
+    const char *input = "133;C";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end();
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::semantic_prompt);
+    ASSERT_TRUE(cmd.semantic_prompt.action == sp::Command::Action::end_input_start_output);
+    { ZStr v1; ASSERT_FALSE(cmd.semantic_prompt.readOption(sp::Option::aid, &v1)); }
+    { sp::Click v2; ASSERT_FALSE(cmd.semantic_prompt.readOption(sp::Option::cl, &v2)); }
+}
+
+TEST(semantic_prompt, OSC_133_end_input_start_output_extra_contents) {
+    Parser p; /* .init(null) */
+    const char *input = "133;Cextra";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    ASSERT_TRUE(p.end() == nullptr);
+}
+
+TEST(semantic_prompt, OSC_133_end_input_start_output_with_options) {
+    Parser p; /* .init(null) */
+    const char *input = "133;C;aid=foo";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end();
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::semantic_prompt);
+    ASSERT_TRUE(cmd.semantic_prompt.action == sp::Command::Action::end_input_start_output);
+    { ZStr v3; ASSERT_TRUE(cmd.semantic_prompt.readOption(sp::Option::aid, &v3) && v3.eql("foo")); }
+}
+
+TEST(semantic_prompt, OSC_133_end_input_start_output_with_cmdline) {
+    std::string w;
+    Parser p; /* .init(null) */
+    const char *input = "133;C;cmdline=echo bobr kurwa";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end();
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::semantic_prompt);
+    ASSERT_TRUE(cmd.semantic_prompt.action == sp::Command::Action::end_input_start_output);
+    ASSERT_TRUE(cmd.semantic_prompt.writeCommandLine(&w));
+    ASSERT_TRUE(w == "echo bobr kurwa");
+}
+
+TEST(semantic_prompt, OSC_133_end_input_start_output_with_cmdline_3) {
+    std::string w;
+    Parser p; /* .init(null) */
+    const char *input = "133;C;cmdline=echo bobr\\nkurwa";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end();
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::semantic_prompt);
+    ASSERT_TRUE(cmd.semantic_prompt.writeCommandLine(&w));
+    ASSERT_TRUE(w == "echo bobr\nkurwa");
+}
+
+TEST(semantic_prompt, OSC_133_end_input_start_output_with_cmdline_4) {
+    std::string w;
+    Parser p; /* .init(null) */
+    const char *input = "133;C;cmdline=$'echo bobr kurwa'";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end();
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::semantic_prompt);
+    ASSERT_TRUE(cmd.semantic_prompt.action == sp::Command::Action::end_input_start_output);
+    ASSERT_TRUE(cmd.semantic_prompt.writeCommandLine(&w));
+    ASSERT_TRUE(w == "echo bobr kurwa");
+}
+
+TEST(semantic_prompt, OSC_133_end_input_start_output_with_cmdline_5) {
+    std::string w;
+    Parser p; /* .init(null) */
+    const char *input = "133;C;cmdline='echo bobr kurwa'";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end();
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::semantic_prompt);
+    ASSERT_TRUE(cmd.semantic_prompt.action == sp::Command::Action::end_input_start_output);
+    ASSERT_TRUE(cmd.semantic_prompt.writeCommandLine(&w));
+    ASSERT_TRUE(w == "echo bobr kurwa");
+}
+
+TEST(semantic_prompt, OSC_133_end_input_start_output_with_cmdline_6) {
+    std::string w;
+    Parser p; /* .init(null) */
+    const char *input = "133;C;cmdline='echo bobr kurwa";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end();
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::semantic_prompt);
+    ASSERT_TRUE(cmd.semantic_prompt.action == sp::Command::Action::end_input_start_output);
+    ASSERT_FALSE(cmd.semantic_prompt.writeCommandLine(&w));
+}
+
+TEST(semantic_prompt, OSC_133_end_input_start_output_with_cmdline_7) {
+    std::string w;
+    Parser p; /* .init(null) */
+    const char *input = "133;C;cmdline=$'echo bobr kurwa";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end();
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::semantic_prompt);
+    ASSERT_TRUE(cmd.semantic_prompt.action == sp::Command::Action::end_input_start_output);
+    ASSERT_FALSE(cmd.semantic_prompt.writeCommandLine(&w));
+}
+
+TEST(semantic_prompt, OSC_133_end_input_start_output_with_cmdline_8) {
+    std::string w;
+    Parser p; /* .init(null) */
+    const char *input = "133;C;cmdline=$'";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end();
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::semantic_prompt);
+    ASSERT_TRUE(cmd.semantic_prompt.action == sp::Command::Action::end_input_start_output);
+    ASSERT_FALSE(cmd.semantic_prompt.writeCommandLine(&w));
+}
+
+TEST(semantic_prompt, OSC_133_end_input_start_output_with_cmdline_9) {
+    std::string w;
+    Parser p; /* .init(null) */
+    const char *input = "133;C;cmdline=";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end();
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::semantic_prompt);
+    ASSERT_TRUE(cmd.semantic_prompt.action == sp::Command::Action::end_input_start_output);
+    ASSERT_TRUE(cmd.semantic_prompt.writeCommandLine(&w));
+    ASSERT_TRUE(w == "");
+}
+
+TEST(semantic_prompt, OSC_133_end_input_start_output_with_cmdline_url_1) {
+    std::string w;
+    Parser p; /* .init(null) */
+    const char *input = "133;C;cmdline_url=echo bobr kurwa";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end();
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::semantic_prompt);
+    ASSERT_TRUE(cmd.semantic_prompt.action == sp::Command::Action::end_input_start_output);
+    ASSERT_TRUE(cmd.semantic_prompt.writeCommandLine(&w));
+    ASSERT_TRUE(w == "echo bobr kurwa");
+}
+
+TEST(semantic_prompt, OSC_133_end_input_start_output_with_cmdline_url_2) {
+    std::string w;
+    Parser p; /* .init(null) */
+    const char *input = "133;C;cmdline_url=echo bobr%20kurwa";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end();
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::semantic_prompt);
+    ASSERT_TRUE(cmd.semantic_prompt.action == sp::Command::Action::end_input_start_output);
+    ASSERT_TRUE(cmd.semantic_prompt.writeCommandLine(&w));
+    ASSERT_TRUE(w == "echo bobr kurwa");
+}
+
+TEST(semantic_prompt, OSC_133_end_input_start_output_with_cmdline_url_3) {
+    std::string w;
+    Parser p; /* .init(null) */
+    const char *input = "133;C;cmdline_url=echo bobr%3bkurwa";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end();
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::semantic_prompt);
+    ASSERT_TRUE(cmd.semantic_prompt.action == sp::Command::Action::end_input_start_output);
+    ASSERT_TRUE(cmd.semantic_prompt.writeCommandLine(&w));
+    ASSERT_TRUE(w == "echo bobr;kurwa");
+}
+
+TEST(semantic_prompt, OSC_133_end_input_start_output_with_cmdline_url_4) {
+    std::string w;
+    Parser p; /* .init(null) */
+    const char *input = "133;C;cmdline_url=echo bobr%3kurwa";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end();
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::semantic_prompt);
+    ASSERT_TRUE(cmd.semantic_prompt.action == sp::Command::Action::end_input_start_output);
+    ASSERT_FALSE(cmd.semantic_prompt.writeCommandLine(&w));
+}
+
+TEST(semantic_prompt, OSC_133_end_input_start_output_with_cmdline_url_5) {
+    std::string w;
+    Parser p; /* .init(null) */
+    const char *input = "133;C;cmdline_url=echo bobr%kurwa";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end();
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::semantic_prompt);
+    ASSERT_TRUE(cmd.semantic_prompt.action == sp::Command::Action::end_input_start_output);
+    ASSERT_FALSE(cmd.semantic_prompt.writeCommandLine(&w));
+}
+
+TEST(semantic_prompt, OSC_133_end_input_start_output_with_cmdline_url_6) {
+    std::string w;
+    Parser p; /* .init(null) */
+    const char *input = "133;C;cmdline_url=echo bobr kurwa%20";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end();
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::semantic_prompt);
+    ASSERT_TRUE(cmd.semantic_prompt.action == sp::Command::Action::end_input_start_output);
+    ASSERT_TRUE(cmd.semantic_prompt.writeCommandLine(&w));
+    ASSERT_TRUE(w == "echo bobr kurwa ");
+}
+
+TEST(semantic_prompt, OSC_133_end_input_start_output_with_cmdline_url_7) {
+    std::string w;
+    Parser p; /* .init(null) */
+    const char *input = "133;C;cmdline_url=echo bobr kurwa%2";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end();
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::semantic_prompt);
+    ASSERT_TRUE(cmd.semantic_prompt.action == sp::Command::Action::end_input_start_output);
+    ASSERT_FALSE(cmd.semantic_prompt.writeCommandLine(&w));
+}
+
+TEST(semantic_prompt, OSC_133_end_input_start_output_with_cmdline_url_8) {
+    std::string w;
+    Parser p; /* .init(null) */
+    const char *input = "133;C;cmdline_url=echo bobr kurwa%";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end();
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::semantic_prompt);
+    ASSERT_TRUE(cmd.semantic_prompt.action == sp::Command::Action::end_input_start_output);
+    ASSERT_FALSE(cmd.semantic_prompt.writeCommandLine(&w));
+}
+
+TEST(semantic_prompt, OSC_133_fresh_line) {
+    Parser p; /* .init(null) */
+    const char *input = "133;L";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end();
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::semantic_prompt);
+    ASSERT_TRUE(cmd.semantic_prompt.action == sp::Command::Action::fresh_line);
+}
+
+TEST(semantic_prompt, OSC_133_fresh_line_extra_contents) {
+    /* Random */
+    {
+        Parser p; /* .init(null) */
+        const char *input = "133;Lol";
+        for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+        ASSERT_TRUE(p.end() == nullptr);
+    }
+    /* Options */
+    {
+        Parser p; /* .init(null) */
+        const char *input = "133;L;aid=foo";
+        for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+        ASSERT_TRUE(p.end() == nullptr);
+    }
+}
+
+TEST(semantic_prompt, OSC_133_fresh_line_new_prompt) {
+    Parser p; /* .init(null) */
+    const char *input = "133;A";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end();
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::semantic_prompt);
+    ASSERT_TRUE(cmd.semantic_prompt.action == sp::Command::Action::fresh_line_new_prompt);
+    { ZStr v4; ASSERT_FALSE(cmd.semantic_prompt.readOption(sp::Option::aid, &v4)); }
+    { sp::Click v5; ASSERT_FALSE(cmd.semantic_prompt.readOption(sp::Option::cl, &v5)); }
+}
+
+TEST(semantic_prompt, OSC_133_fresh_line_new_prompt_with_aid) {
+    Parser p; /* .init(null) */
+    const char *input = "133;A;aid=14";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end();
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::semantic_prompt);
+    ASSERT_TRUE(cmd.semantic_prompt.action == sp::Command::Action::fresh_line_new_prompt);
+    { ZStr v6; ASSERT_TRUE(cmd.semantic_prompt.readOption(sp::Option::aid, &v6) && v6.eql("14")); }
+}
+
+TEST(semantic_prompt, OSC_133_fresh_line_new_prompt_with_in_aid) {
+    Parser p; /* .init(null) */
+    const char *input = "133;A;aid=a=b";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end();
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::semantic_prompt);
+    ASSERT_TRUE(cmd.semantic_prompt.action == sp::Command::Action::fresh_line_new_prompt);
+    { ZStr v7; ASSERT_TRUE(cmd.semantic_prompt.readOption(sp::Option::aid, &v7) && v7.eql("a=b")); }
+}
+
+TEST(semantic_prompt, OSC_133_fresh_line_new_prompt_with_cl_line) {
+    Parser p; /* .init(null) */
+    const char *input = "133;A;cl=line";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end();
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::semantic_prompt);
+    ASSERT_TRUE(cmd.semantic_prompt.action == sp::Command::Action::fresh_line_new_prompt);
+    { sp::Click v8; ASSERT_TRUE(cmd.semantic_prompt.readOption(sp::Option::cl, &v8) && v8 == sp::Click::line); }
+}
+
+TEST(semantic_prompt, OSC_133_fresh_line_new_prompt_with_cl_m) {
+    Parser p; /* .init(null) */
+    const char *input = "133;A;cl=m";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end();
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::semantic_prompt);
+    ASSERT_TRUE(cmd.semantic_prompt.action == sp::Command::Action::fresh_line_new_prompt);
+    { sp::Click v9; ASSERT_TRUE(cmd.semantic_prompt.readOption(sp::Option::cl, &v9) && v9 == sp::Click::multiple); }
+}
+
+TEST(semantic_prompt, OSC_133_fresh_line_new_prompt_with_invalid_cl) {
+    Parser p; /* .init(null) */
+    const char *input = "133;A;cl=invalid";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end();
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::semantic_prompt);
+    ASSERT_TRUE(cmd.semantic_prompt.action == sp::Command::Action::fresh_line_new_prompt);
+    { sp::Click v10; ASSERT_FALSE(cmd.semantic_prompt.readOption(sp::Option::cl, &v10)); }
+}
+
+TEST(semantic_prompt, OSC_133_fresh_line_new_prompt_with_trailing) {
+    Parser p; /* .init(null) */
+    const char *input = "133;A;";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end();
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::semantic_prompt);
+    ASSERT_TRUE(cmd.semantic_prompt.action == sp::Command::Action::fresh_line_new_prompt);
+}
+
+TEST(semantic_prompt, OSC_133_fresh_line_new_prompt_with_bare_key) {
+    Parser p; /* .init(null) */
+    const char *input = "133;A;barekey";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end();
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::semantic_prompt);
+    ASSERT_TRUE(cmd.semantic_prompt.action == sp::Command::Action::fresh_line_new_prompt);
+    { ZStr v11; ASSERT_FALSE(cmd.semantic_prompt.readOption(sp::Option::aid, &v11)); }
+    { sp::Click v12; ASSERT_FALSE(cmd.semantic_prompt.readOption(sp::Option::cl, &v12)); }
+}
+
+TEST(semantic_prompt, OSC_133_fresh_line_new_prompt_with_multiple_options) {
+    Parser p; /* .init(null) */
+    const char *input = "133;A;aid=foo;cl=line";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end();
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::semantic_prompt);
+    ASSERT_TRUE(cmd.semantic_prompt.action == sp::Command::Action::fresh_line_new_prompt);
+    { ZStr v13; ASSERT_TRUE(cmd.semantic_prompt.readOption(sp::Option::aid, &v13) && v13.eql("foo")); }
+    { sp::Click v14; ASSERT_TRUE(cmd.semantic_prompt.readOption(sp::Option::cl, &v14) && v14 == sp::Click::line); }
+}
+
+TEST(semantic_prompt, OSC_133_fresh_line_new_prompt_default_redraw) {
+    Parser p; /* .init(null) */
+    const char *input = "133;A";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end();
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::semantic_prompt);
+    ASSERT_TRUE(cmd.semantic_prompt.action == sp::Command::Action::fresh_line_new_prompt);
+    { sp::Redraw v15; ASSERT_FALSE(cmd.semantic_prompt.readOption(sp::Option::redraw, &v15)); }
+}
+
+TEST(semantic_prompt, OSC_133_fresh_line_new_prompt_with_redraw_0) {
+    Parser p; /* .init(null) */
+    const char *input = "133;A;redraw=0";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end();
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::semantic_prompt);
+    ASSERT_TRUE(cmd.semantic_prompt.action == sp::Command::Action::fresh_line_new_prompt);
+    { sp::Redraw v16; ASSERT_TRUE(cmd.semantic_prompt.readOption(sp::Option::redraw, &v16) && v16 == sp::Redraw::false_); }
+}
+
+TEST(semantic_prompt, OSC_133_fresh_line_new_prompt_with_redraw_1) {
+    Parser p; /* .init(null) */
+    const char *input = "133;A;redraw=1";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end();
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::semantic_prompt);
+    ASSERT_TRUE(cmd.semantic_prompt.action == sp::Command::Action::fresh_line_new_prompt);
+    { sp::Redraw v17; ASSERT_TRUE(cmd.semantic_prompt.readOption(sp::Option::redraw, &v17) && v17 == sp::Redraw::true_); }
+}
+
+TEST(semantic_prompt, OSC_133_fresh_line_new_prompt_with_invalid_redraw) {
+    Parser p; /* .init(null) */
+    const char *input = "133;A;redraw=x";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end();
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::semantic_prompt);
+    ASSERT_TRUE(cmd.semantic_prompt.action == sp::Command::Action::fresh_line_new_prompt);
+    { sp::Redraw v18; ASSERT_FALSE(cmd.semantic_prompt.readOption(sp::Option::redraw, &v18)); }
+}
+
+TEST(semantic_prompt, OSC_133_prompt_start) {
+    Parser p; /* .init(null) */
+    const char *input = "133;P";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end();
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::semantic_prompt);
+    ASSERT_TRUE(cmd.semantic_prompt.action == sp::Command::Action::prompt_start);
+    { sp::PromptKind v19; ASSERT_FALSE(cmd.semantic_prompt.readOption(sp::Option::prompt_kind, &v19)); }
+}
+
+TEST(semantic_prompt, OSC_133_prompt_start_with_k_i) {
+    Parser p; /* .init(null) */
+    const char *input = "133;P;k=i";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end();
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::semantic_prompt);
+    ASSERT_TRUE(cmd.semantic_prompt.action == sp::Command::Action::prompt_start);
+    { sp::PromptKind v20; ASSERT_TRUE(cmd.semantic_prompt.readOption(sp::Option::prompt_kind, &v20) && v20 == sp::PromptKind::initial); }
+}
+
+TEST(semantic_prompt, OSC_133_prompt_start_with_k_r) {
+    Parser p; /* .init(null) */
+    const char *input = "133;P;k=r";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end();
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::semantic_prompt);
+    ASSERT_TRUE(cmd.semantic_prompt.action == sp::Command::Action::prompt_start);
+    { sp::PromptKind v21; ASSERT_TRUE(cmd.semantic_prompt.readOption(sp::Option::prompt_kind, &v21) && v21 == sp::PromptKind::right); }
+}
+
+TEST(semantic_prompt, OSC_133_prompt_start_with_k_c) {
+    Parser p; /* .init(null) */
+    const char *input = "133;P;k=c";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end();
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::semantic_prompt);
+    ASSERT_TRUE(cmd.semantic_prompt.action == sp::Command::Action::prompt_start);
+    { sp::PromptKind v22; ASSERT_TRUE(cmd.semantic_prompt.readOption(sp::Option::prompt_kind, &v22) && v22 == sp::PromptKind::continuation); }
+}
+
+TEST(semantic_prompt, OSC_133_prompt_start_with_k_s) {
+    Parser p; /* .init(null) */
+    const char *input = "133;P;k=s";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end();
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::semantic_prompt);
+    ASSERT_TRUE(cmd.semantic_prompt.action == sp::Command::Action::prompt_start);
+    { sp::PromptKind v23; ASSERT_TRUE(cmd.semantic_prompt.readOption(sp::Option::prompt_kind, &v23) && v23 == sp::PromptKind::secondary); }
+}
+
+TEST(semantic_prompt, OSC_133_prompt_start_with_invalid_k) {
+    Parser p; /* .init(null) */
+    const char *input = "133;P;k=x";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end();
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::semantic_prompt);
+    ASSERT_TRUE(cmd.semantic_prompt.action == sp::Command::Action::prompt_start);
+    { sp::PromptKind v24; ASSERT_FALSE(cmd.semantic_prompt.readOption(sp::Option::prompt_kind, &v24)); }
+}
+
+TEST(semantic_prompt, OSC_133_prompt_start_extra_contents) {
+    Parser p; /* .init(null) */
+    const char *input = "133;Pextra";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    ASSERT_TRUE(p.end() == nullptr);
+}
+
+TEST(semantic_prompt, OSC_133_new_command) {
+    Parser p; /* .init(null) */
+    const char *input = "133;N";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end();
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::semantic_prompt);
+    ASSERT_TRUE(cmd.semantic_prompt.action == sp::Command::Action::new_command);
+    { ZStr v25; ASSERT_FALSE(cmd.semantic_prompt.readOption(sp::Option::aid, &v25)); }
+    { sp::Click v26; ASSERT_FALSE(cmd.semantic_prompt.readOption(sp::Option::cl, &v26)); }
+}
+
+TEST(semantic_prompt, OSC_133_new_command_with_aid) {
+    Parser p; /* .init(null) */
+    const char *input = "133;N;aid=foo";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end();
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::semantic_prompt);
+    ASSERT_TRUE(cmd.semantic_prompt.action == sp::Command::Action::new_command);
+    { ZStr v27; ASSERT_TRUE(cmd.semantic_prompt.readOption(sp::Option::aid, &v27) && v27.eql("foo")); }
+}
+
+TEST(semantic_prompt, OSC_133_new_command_with_cl_line) {
+    Parser p; /* .init(null) */
+    const char *input = "133;N;cl=line";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end();
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::semantic_prompt);
+    ASSERT_TRUE(cmd.semantic_prompt.action == sp::Command::Action::new_command);
+    { sp::Click v28; ASSERT_TRUE(cmd.semantic_prompt.readOption(sp::Option::cl, &v28) && v28 == sp::Click::line); }
+}
+
+TEST(semantic_prompt, OSC_133_new_command_with_multiple_options) {
+    Parser p; /* .init(null) */
+    const char *input = "133;N;aid=foo;cl=line";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end();
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::semantic_prompt);
+    ASSERT_TRUE(cmd.semantic_prompt.action == sp::Command::Action::new_command);
+    { ZStr v29; ASSERT_TRUE(cmd.semantic_prompt.readOption(sp::Option::aid, &v29) && v29.eql("foo")); }
+    { sp::Click v30; ASSERT_TRUE(cmd.semantic_prompt.readOption(sp::Option::cl, &v30) && v30 == sp::Click::line); }
+}
+
+TEST(semantic_prompt, OSC_133_new_command_extra_contents) {
+    Parser p; /* .init(null) */
+    const char *input = "133;Nextra";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    ASSERT_TRUE(p.end() == nullptr);
+}
+
+TEST(semantic_prompt, OSC_133_end_prompt_start_input) {
+    Parser p; /* .init(null) */
+    const char *input = "133;B";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end();
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::semantic_prompt);
+    ASSERT_TRUE(cmd.semantic_prompt.action == sp::Command::Action::end_prompt_start_input);
+}
+
+TEST(semantic_prompt, OSC_133_end_prompt_start_input_extra_contents) {
+    Parser p; /* .init(null) */
+    const char *input = "133;Bextra";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    ASSERT_TRUE(p.end() == nullptr);
+}
+
+TEST(semantic_prompt, OSC_133_end_prompt_start_input_with_options) {
+    Parser p; /* .init(null) */
+    const char *input = "133;B;aid=foo";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end();
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::semantic_prompt);
+    ASSERT_TRUE(cmd.semantic_prompt.action == sp::Command::Action::end_prompt_start_input);
+    { ZStr v31; ASSERT_TRUE(cmd.semantic_prompt.readOption(sp::Option::aid, &v31) && v31.eql("foo")); }
+}
+
+TEST(semantic_prompt, OSC_133_end_prompt_start_input_terminate_eol) {
+    Parser p; /* .init(null) */
+    const char *input = "133;I";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end();
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::semantic_prompt);
+    ASSERT_TRUE(cmd.semantic_prompt.action == sp::Command::Action::end_prompt_start_input_terminate_eol);
+}
+
+TEST(semantic_prompt, OSC_133_end_prompt_start_input_terminate_eol_extra_contents) {
+    Parser p; /* .init(null) */
+    const char *input = "133;Iextra";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    ASSERT_TRUE(p.end() == nullptr);
+}
+
+TEST(semantic_prompt, OSC_133_end_prompt_start_input_terminate_eol_with_options) {
+    Parser p; /* .init(null) */
+    const char *input = "133;I;aid=foo";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end();
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::semantic_prompt);
+    ASSERT_TRUE(cmd.semantic_prompt.action == sp::Command::Action::end_prompt_start_input_terminate_eol);
+    { ZStr v32; ASSERT_TRUE(cmd.semantic_prompt.readOption(sp::Option::aid, &v32) && v32.eql("foo")); }
+}
+
+TEST(semantic_prompt, OSC_133_end_command) {
+    Parser p; /* .init(null) */
+    const char *input = "133;D";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end();
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::semantic_prompt);
+    ASSERT_TRUE(cmd.semantic_prompt.action == sp::Command::Action::end_command);
+    { int32_t v33; ASSERT_FALSE(cmd.semantic_prompt.readOption(sp::Option::exit_code, &v33)); }
+    { ZStr v34; ASSERT_FALSE(cmd.semantic_prompt.readOption(sp::Option::aid, &v34)); }
+    { ZStr v35; ASSERT_FALSE(cmd.semantic_prompt.readOption(sp::Option::err, &v35)); }
+}
+
+TEST(semantic_prompt, OSC_133_end_command_extra_contents) {
+    Parser p; /* .init(null) */
+    const char *input = "133;Dextra";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    ASSERT_TRUE(p.end() == nullptr);
+}
+
+TEST(semantic_prompt, OSC_133_end_command_with_exit_code_0) {
+    Parser p; /* .init(null) */
+    const char *input = "133;D;0";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end();
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::semantic_prompt);
+    ASSERT_TRUE(cmd.semantic_prompt.action == sp::Command::Action::end_command);
+    { int32_t v36; ASSERT_TRUE(cmd.semantic_prompt.readOption(sp::Option::exit_code, &v36) && v36 == 0); }
+}
+
+TEST(semantic_prompt, OSC_133_end_command_with_exit_code_and_aid) {
+    Parser p; /* .init(null) */
+    const char *input = "133;D;12;aid=foo";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end();
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::semantic_prompt);
+    ASSERT_TRUE(cmd.semantic_prompt.action == sp::Command::Action::end_command);
+    { ZStr v37; ASSERT_TRUE(cmd.semantic_prompt.readOption(sp::Option::aid, &v37) && v37.eql("foo")); }
+    { int32_t v38; ASSERT_TRUE(cmd.semantic_prompt.readOption(sp::Option::exit_code, &v38) && v38 == 12); }
+}
+
+TEST(semantic_prompt, Option_read_aid) {
+    { ZStr v39; ASSERT_TRUE(sp::Option_read(sp::Option::aid, "aid=test123", &v39) && v39.eql("test123")); }
+    { ZStr v40; ASSERT_TRUE(sp::Option_read(sp::Option::aid, "cl=line;aid=myaid;k=i", &v40) && v40.eql("myaid")); }
+    { ZStr v41; ASSERT_FALSE(sp::Option_read(sp::Option::aid, "cl=line;k=i", &v41)); }
+    { ZStr v42; ASSERT_TRUE(sp::Option_read(sp::Option::aid, "aid=", &v42) && v42.eql("")); }
+    { ZStr v43; ASSERT_TRUE(sp::Option_read(sp::Option::aid, "k=i;aid=last", &v43) && v43.eql("last")); }
+    { ZStr v44; ASSERT_TRUE(sp::Option_read(sp::Option::aid, "aid=first;k=i", &v44) && v44.eql("first")); }
+    { ZStr v45; ASSERT_FALSE(sp::Option_read(sp::Option::aid, "", &v45)); }
+    { ZStr v46; ASSERT_FALSE(sp::Option_read(sp::Option::aid, "aid", &v46)); }
+    { ZStr v47; ASSERT_TRUE(sp::Option_read(sp::Option::aid, ";;aid=value;;", &v47) && v47.eql("value")); }
+}
+
+TEST(semantic_prompt, Option_read_cl) {
+    { sp::Click v48; ASSERT_TRUE(sp::Option_read(sp::Option::cl, "cl=line", &v48) && v48 == sp::Click::line); }
+    { sp::Click v49; ASSERT_TRUE(sp::Option_read(sp::Option::cl, "cl=m", &v49) && v49 == sp::Click::multiple); }
+    { sp::Click v50; ASSERT_TRUE(sp::Option_read(sp::Option::cl, "cl=v", &v50) && v50 == sp::Click::conservative_vertical); }
+    { sp::Click v51; ASSERT_TRUE(sp::Option_read(sp::Option::cl, "cl=w", &v51) && v51 == sp::Click::smart_vertical); }
+    { sp::Click v52; ASSERT_FALSE(sp::Option_read(sp::Option::cl, "cl=invalid", &v52)); }
+    { sp::Click v53; ASSERT_FALSE(sp::Option_read(sp::Option::cl, "aid=foo", &v53)); }
+}
+
+TEST(semantic_prompt, Option_read_prompt_kind) {
+    { sp::PromptKind v54; ASSERT_TRUE(sp::Option_read(sp::Option::prompt_kind, "k=i", &v54) && v54 == sp::PromptKind::initial); }
+    { sp::PromptKind v55; ASSERT_TRUE(sp::Option_read(sp::Option::prompt_kind, "k=r", &v55) && v55 == sp::PromptKind::right); }
+    { sp::PromptKind v56; ASSERT_TRUE(sp::Option_read(sp::Option::prompt_kind, "k=c", &v56) && v56 == sp::PromptKind::continuation); }
+    { sp::PromptKind v57; ASSERT_TRUE(sp::Option_read(sp::Option::prompt_kind, "k=s", &v57) && v57 == sp::PromptKind::secondary); }
+    { sp::PromptKind v58; ASSERT_FALSE(sp::Option_read(sp::Option::prompt_kind, "k=x", &v58)); }
+    { sp::PromptKind v59; ASSERT_FALSE(sp::Option_read(sp::Option::prompt_kind, "k=ii", &v59)); }
+    { sp::PromptKind v60; ASSERT_FALSE(sp::Option_read(sp::Option::prompt_kind, "k=", &v60)); }
+}
+
+TEST(semantic_prompt, Option_read_err) {
+    { ZStr v61; ASSERT_TRUE(sp::Option_read(sp::Option::err, "err=some_error", &v61) && v61.eql("some_error")); }
+    { ZStr v62; ASSERT_FALSE(sp::Option_read(sp::Option::err, "aid=foo", &v62)); }
+}
+
+TEST(semantic_prompt, Option_read_redraw) {
+    { sp::Redraw v63; ASSERT_TRUE(sp::Option_read(sp::Option::redraw, "redraw=1", &v63) && v63 == sp::Redraw::true_); }
+    { sp::Redraw v64; ASSERT_TRUE(sp::Option_read(sp::Option::redraw, "redraw=0", &v64) && v64 == sp::Redraw::false_); }
+    { sp::Redraw v65; ASSERT_TRUE(sp::Option_read(sp::Option::redraw, "redraw=last", &v65) && v65 == sp::Redraw::last); }
+    { sp::Redraw v66; ASSERT_FALSE(sp::Option_read(sp::Option::redraw, "redraw=2", &v66)); }
+    { sp::Redraw v67; ASSERT_FALSE(sp::Option_read(sp::Option::redraw, "redraw=10", &v67)); }
+    { sp::Redraw v68; ASSERT_FALSE(sp::Option_read(sp::Option::redraw, "redraw=", &v68)); }
+}
+
+TEST(semantic_prompt, Option_read_special_key) {
+    { bool v69; ASSERT_TRUE(sp::Option_read(sp::Option::special_key, "special_key=1", &v69) && v69 == true); }
+    { bool v70; ASSERT_TRUE(sp::Option_read(sp::Option::special_key, "special_key=0", &v70) && v70 == false); }
+    { bool v71; ASSERT_FALSE(sp::Option_read(sp::Option::special_key, "special_key=x", &v71)); }
+}
+
+TEST(semantic_prompt, Option_read_click_events) {
+    { sp::ClickEvents v72; ASSERT_FALSE(sp::Option_read(sp::Option::click_events, "click_events=yes", &v72)); }
+    { sp::ClickEvents v73; ASSERT_FALSE(sp::Option_read(sp::Option::click_events, "click_events=0", &v73)); }
+    { sp::ClickEvents v74; ASSERT_TRUE(sp::Option_read(sp::Option::click_events, "click_events=1", &v74) && v74 == sp::ClickEvents::absolute); }
+    { sp::ClickEvents v75; ASSERT_TRUE(sp::Option_read(sp::Option::click_events, "click_events=2", &v75) && v75 == sp::ClickEvents::relative); }
+}
+
+TEST(semantic_prompt, Option_read_exit_code) {
+    { int32_t v76; ASSERT_TRUE(sp::Option_read(sp::Option::exit_code, "42", &v76) && v76 == 42); }
+    { int32_t v77; ASSERT_TRUE(sp::Option_read(sp::Option::exit_code, "0", &v77) && v77 == 0); }
+    { int32_t v78; ASSERT_TRUE(sp::Option_read(sp::Option::exit_code, "-1", &v78) && v78 == -1); }
+    { int32_t v79; ASSERT_FALSE(sp::Option_read(sp::Option::exit_code, "abc", &v79)); }
+    { int32_t v80; ASSERT_TRUE(sp::Option_read(sp::Option::exit_code, "127;aid=foo", &v80) && v80 == 127); }
+}

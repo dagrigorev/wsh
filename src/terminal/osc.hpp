@@ -4,7 +4,8 @@
  * report_pwd.zig, mouse_shape.zig, clipboard_operation.zig, color.zig,
  * kitty_color.zig, kitty_dnd_protocol.zig, rxvt_extension.zig,
  * kitty_text_sizing.zig, context_signal.zig, iterm2.zig,
- * kitty_clipboard_protocol.zig, and src/terminal/osc/kitty_metadata.zig
+ * kitty_clipboard_protocol.zig, semantic_prompt.zig, and
+ * src/terminal/osc/kitty_metadata.zig
  * Copyright (c) 2024 Mitchell Hashimoto, Ghostty contributors
  * MIT License — see THIRD_PARTY_NOTICES.md
  *
@@ -28,7 +29,7 @@
  * Wisp: PARSERS NOT YET TRANSLITERATED. osc/parsers/ holds one file per
  * command family. Only the ones named above are here; the rest — osc9,
  * kitty_desktop_notification,
- * and semantic_prompt — arrive in
+ * — arrive in
  * later slices. Until then end() returns null for their states, exactly as
  * it would for an invalid sequence, and Command keeps a tag for each so the
  * dispatch in end() already has upstream's shape.
@@ -43,8 +44,11 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include <string>
+
 #include "color.hpp"
 #include "kitty/color.hpp"
+#include "../os/string_encoding.hpp"
 #include "../datastruct/segmented_list.hpp"
 
 namespace wisp {
@@ -777,6 +781,366 @@ struct OSC {
 
 } /* namespace kitty_clipboard_protocol */
 
+/* ─── osc/parsers/semantic_prompt.zig: types ───────────────────────────── */
+
+/* https://gitlab.freedesktop.org/Per_Bothner/specifications/blob/master/proposals/semantic-prompts.md */
+namespace semantic_prompt {
+
+/* ClickEvents can either be a click_events=1 or click_events=2.
+ * The click_events=1 sends a click event with the absolute coordinates
+ * of the click.
+ * The click_events=2 sends a click event with the coordinates of the click
+ * relative to the prompt area.
+ * See https://github.com/ghostty-org/ghostty/issues/10865 and
+ * https://github.com/kovidgoyal/kitty/issues/9500
+ * for further details. */
+enum class ClickEvents : uint8_t { absolute, relative };
+
+enum class Option : uint8_t {
+    aid,
+    cl,
+    prompt_kind,
+    err,
+    cmdline,
+    cmdline_url,
+
+    /* https://sw.kovidgoyal.net/kitty/shell-integration/#notes-for-shell-developers
+     * Kitty supports a "redraw" option for prompt_start. This is extended
+     * by Ghostty with the "last" option. See Redraw the type for more details. */
+    redraw,
+
+    /* Use a special key instead of arrow keys to move the cursor on
+     * mouse click. Useful if arrow keys have side-effets like triggering
+     * auto-complete. The shell integration script should bind the special
+     * key as needed.
+     * See: https://sw.kovidgoyal.net/kitty/shell-integration/#notes-for-shell-developers */
+    special_key,
+
+    /* If true, the shell is capable of handling mouse click events.
+     * Ghostty will then send a click event to the shell when the user
+     * clicks somewhere in the prompt. The shell can then move the cursor
+     * to that position or perform some other appropriate action. If false,
+     * Ghostty may generate a number of fake key events to move the cursor
+     * which is not very robust.
+     * See: https://sw.kovidgoyal.net/kitty/shell-integration/#notes-for-shell-developers */
+    click_events,
+
+    /* Not technically an option that can be set with k=v and only
+     * present currently with command 'D' but its easier to just
+     * parse it into our options. */
+    exit_code,
+};
+
+/* The `cl` option specifies what kind of cursor key sequences are handled
+ * by the application for click-to-move-cursor functionality.
+ *
+ * `line` allows movement within one input line. `multiple` allows movement
+ * across lines with left/right sequences. The two vertical modes additionally
+ * allow up/down sequences, with `smart_vertical` permitting editor-aware
+ * column clamping. */
+enum class Click : uint8_t {
+    /* Value: "line". Allows motion within a single input line using
+     * standard left/right arrow escape sequences. Only a single left/right
+     * sequence should be emitted for double-width characters. */
+    line,
+
+    /* Value: "m". Allows movement between different lines in the same
+     * group, but only using left/right arrow escape sequences. */
+    multiple,
+
+    /* Value: "v". Like `multiple` but cursor up/down should be used. The
+     * terminal should be conservative when moving between lines: move the
+     * cursor left to the start of line, emit the needed up/down sequences,
+     * then move the cursor right to the clicked destination. */
+    conservative_vertical,
+
+    /* Value: "w". Like `conservative_vertical` but specifies that there
+     * are no spurious spaces at the end of the line, and the application
+     * editor handles "smart vertical movement" (moving 2 lines up from
+     * position 20, where the intermediate line is 15 chars wide and the
+     * destination is 18 chars wide, ends at position 18). */
+    smart_vertical,
+};
+
+inline bool parseClick(const char *value, size_t len, Click *out) {
+    if (len == 1) {
+        switch (value[0]) {
+            case 'm': *out = Click::multiple; return true;
+            case 'v': *out = Click::conservative_vertical; return true;
+            case 'w': *out = Click::smart_vertical; return true;
+            default: return false;
+        }
+    }
+    if (len == 4 && memcmp(value, "line", 4) == 0) {
+        *out = Click::line;
+        return true;
+    }
+    return false;
+}
+
+enum class PromptKind : uint8_t {
+    initial,
+    right,
+    continuation,
+    secondary,
+};
+
+inline bool PromptKind_init(uint8_t c, PromptKind *out) {
+    switch (c) {
+        case 'i': *out = PromptKind::initial; return true;
+        case 'r': *out = PromptKind::right; return true;
+        case 'c': *out = PromptKind::continuation; return true;
+        case 's': *out = PromptKind::secondary; return true;
+        default: return false;
+    }
+}
+
+/* The values for the `redraw` extension to OSC133. This was
+ * started by Kitty[1] and extended by Ghostty (the "last" option).
+ *
+ * [1]: https://sw.kovidgoyal.net/kitty/shell-integration/#notes-for-shell-developers
+ *
+ * Wisp: `true` and `false` are C++ keywords, so those members are
+ * true_ and false_. */
+enum class Redraw : uint8_t {
+    /* The shell supports redrawing the full prompt and all continuations.
+     * This is the default value, it does not need to be explicitly set
+     * unless it is to reset a prior other value. */
+    true_,
+
+    /* The shell does NOT support redrawing. In this case, Ghostty will NOT
+     * clear any prompt lines on resize. */
+    false_,
+
+    /* The shell supports redrawing only the LAST line of the prompt.
+     * Ghostty will only clear the last line of the prompt on resize.
+     *
+     * This is specifically introduced because Bash only redraws the last
+     * line. It is literally the only shell that does this and it does this
+     * because its bad and they should feel bad. Don't be like Bash. */
+    last,
+};
+
+inline const char *Option_key(Option self) {
+    switch (self) {
+        case Option::aid: return "aid";
+        case Option::cl: return "cl";
+        case Option::prompt_kind: return "k";
+        case Option::err: return "err";
+        case Option::redraw: return "redraw";
+        case Option::special_key: return "special_key";
+        case Option::click_events: return "click_events";
+        case Option::cmdline: return "cmdline";
+        case Option::cmdline_url: return "cmdline_url";
+
+        /* special case, handled before ever calling key */
+        case Option::exit_code: break;
+    }
+    return "";
+}
+
+/* Wisp: the shared part of Option.read — find the value of the first
+ * key=value whose key matches. Upstream converts that first match and
+ * returns, whether or not it converts. Not for .exit_code. */
+inline bool Option_find(Option self, const char *raw, size_t raw_len,
+                        const char **value, size_t *value_len) {
+    const char *key = Option_key(self);
+    const size_t key_len = strlen(key);
+    const char *remaining = raw;
+    size_t remaining_len = raw_len;
+    while (remaining_len > 0) {
+        /* Length of the next value is up to the `;` or the
+         * end of the string. */
+        const char *semi = (const char *)memchr(remaining, ';', remaining_len);
+        const size_t len = semi ? (size_t)(semi - remaining) : remaining_len;
+
+        /* Grab our full value and move our cursor past the `;` */
+        const char *full = remaining;
+
+        /* Parse our key=value and verify our key matches our
+         * expectation. */
+        const char *eq = (const char *)memchr(full, '=', len);
+        if (eq) {
+            const size_t eql_idx = (size_t)(eq - full);
+            if (eql_idx == key_len && memcmp(full, key, key_len) == 0) {
+                *value = full + eql_idx + 1;
+                *value_len = len - eql_idx - 1;
+                return true;
+            }
+        }
+
+        /* No match! */
+        if (len < remaining_len) {
+            remaining += len + 1;
+            remaining_len -= len + 1;
+            continue;
+        }
+
+        break;
+    }
+
+    /* Not found */
+    return false;
+}
+
+/* Read the option value from the raw options string.
+ *
+ * The raw options string is the raw unparsed data after the
+ * OSC 133 command. e.g. for `133;A;aid=14;cl=line`, the
+ * raw options string would be `aid=14;cl=line`.
+ *
+ * Any errors in the raw string will return null since the OSC133
+ * specification says to ignore unknown or malformed options.
+ *
+ * Wisp: self.Type() depends on the option, so Option.read is one overload
+ * per result type, each false for null: ZStr for .aid, .err, .cmdline and
+ * .cmdline_url; Click for .cl; PromptKind for .prompt_kind; Redraw for
+ * .redraw; bool for .special_key; ClickEvents for .click_events; int32_t for
+ * .exit_code. */
+inline bool Option_read(Option self, const char *raw, size_t raw_len, ZStr *out) {
+    /* assert(self is .aid, .err, .cmdline or .cmdline_url) */
+    const char *v; size_t n;
+    if (!Option_find(self, raw, raw_len, &v, &n)) return false;
+    *out = ZStr(v, n);
+    return true;
+}
+inline bool Option_read(Option self, const char *raw, size_t raw_len, Click *out) {
+    /* assert(self == .cl) */
+    const char *v; size_t n;
+    if (!Option_find(self, raw, raw_len, &v, &n)) return false;
+    return parseClick(v, n, out);
+}
+inline bool Option_read(Option self, const char *raw, size_t raw_len, PromptKind *out) {
+    /* assert(self == .prompt_kind) */
+    const char *v; size_t n;
+    if (!Option_find(self, raw, raw_len, &v, &n)) return false;
+    if (n != 1) return false;
+    return PromptKind_init((uint8_t)v[0], out);
+}
+inline bool Option_read(Option self, const char *raw, size_t raw_len, Redraw *out) {
+    /* assert(self == .redraw) */
+    const char *v; size_t n;
+    if (!Option_find(self, raw, raw_len, &v, &n)) return false;
+    if (n == 1 && v[0] == '0') { *out = Redraw::false_; return true; }
+    if (n == 1 && v[0] == '1') { *out = Redraw::true_; return true; }
+    if (n == 4 && memcmp(v, "last", 4) == 0) { *out = Redraw::last; return true; }
+    return false;
+}
+inline bool Option_read(Option self, const char *raw, size_t raw_len, bool *out) {
+    /* assert(self == .special_key) */
+    const char *v; size_t n;
+    if (!Option_find(self, raw, raw_len, &v, &n)) return false;
+    if (n != 1) return false;
+    switch (v[0]) {
+        case '0': *out = false; return true;
+        case '1': *out = true; return true;
+        default: return false;
+    }
+}
+inline bool Option_read(Option self, const char *raw, size_t raw_len, ClickEvents *out) {
+    /* assert(self == .click_events) */
+    const char *v; size_t n;
+    if (!Option_find(self, raw, raw_len, &v, &n)) return false;
+    if (n != 1) return false;
+    switch (v[0]) {
+        case '1': *out = ClickEvents::absolute; return true;
+        case '2': *out = ClickEvents::relative; return true;
+        default: return false;
+    }
+}
+inline bool Option_read(Option self, const char *raw, size_t raw_len, int32_t *out) {
+    /* assert(self == .exit_code) */
+    (void)self;
+    if (raw_len == 0) return false;
+    /* If we're looking for exit_code we special case it.
+     * as the first value. */
+    const char *semi = (const char *)memchr(raw, ';', raw_len);
+    const size_t len = semi ? (size_t)(semi - raw) : raw_len;
+
+    /* std.fmt.parseInt(i32, full, 10) catch null */
+    size_t i = 0;
+    bool neg = false;
+    if (i < len && (raw[i] == '+' || raw[i] == '-')) {
+        neg = raw[i] == '-';
+        i++;
+    }
+    if (i >= len) return false;
+    int64_t v = 0;
+    for (; i < len; i++) {
+        if (raw[i] < '0' || raw[i] > '9') return false;
+        v = v * 10 + (raw[i] - '0');
+        if (v > (int64_t)INT32_MAX + 1) return false;
+    }
+    if (neg) v = -v;
+    if (v > INT32_MAX || v < INT32_MIN) return false;
+    *out = (int32_t)v;
+    return true;
+}
+inline bool Option_read(Option self, const char *raw, ZStr *out) { return Option_read(self, raw, strlen(raw), out); }
+inline bool Option_read(Option self, const char *raw, Click *out) { return Option_read(self, raw, strlen(raw), out); }
+inline bool Option_read(Option self, const char *raw, PromptKind *out) { return Option_read(self, raw, strlen(raw), out); }
+inline bool Option_read(Option self, const char *raw, Redraw *out) { return Option_read(self, raw, strlen(raw), out); }
+inline bool Option_read(Option self, const char *raw, bool *out) { return Option_read(self, raw, strlen(raw), out); }
+inline bool Option_read(Option self, const char *raw, ClickEvents *out) { return Option_read(self, raw, strlen(raw), out); }
+inline bool Option_read(Option self, const char *raw, int32_t *out) { return Option_read(self, raw, strlen(raw), out); }
+
+/* A single semantic prompt command.
+ *
+ * Technically according to the spec, not all commands have options
+ * but it is easier to be "liberal in what we accept" here since
+ * all except one do and the spec does also say to ignore unknown
+ * options. So, I think this is a fair interpretation. */
+struct Command {
+    enum class Action : uint8_t {
+        fresh_line,                           /* 'L' */
+        fresh_line_new_prompt,                /* 'A' */
+        new_command,                          /* 'N' */
+        prompt_start,                         /* 'P' */
+        end_prompt_start_input,               /* 'B' */
+        end_prompt_start_input_terminate_eol, /* 'I' */
+        end_input_start_output,               /* 'C' */
+        end_command,                          /* 'D' */
+    };
+
+    Action action;
+    ZStr options_unvalidated;
+
+    Command() : action(Action::fresh_line), options_unvalidated() {}
+
+    static Command init(Action action) {
+        Command c;
+        c.action = action;
+        c.options_unvalidated = ZStr();
+        return c;
+    }
+
+    /* Read an option for this command. Returns null if unset or invalid.
+     * Wisp: overloaded on the result type, see Option_read. */
+    template <typename T>
+    bool readOption(Option option, T *out) const {
+        return Option_read(option, options_unvalidated.ptr, options_unvalidated.len, out);
+    }
+
+    /* Write the decoded command line (if any) to the writer. If an error
+     * occurs garbage may have been written to the writer.
+     *
+     * Wisp: false is error.DecodeError. */
+    bool writeCommandLine(std::string *writer) const {
+        ZStr command_line;
+        if (readOption(Option::cmdline, &command_line)) {
+            return ::wisp::os::string_encoding::printfQDecode(
+                writer, command_line.ptr, command_line.len);
+        }
+        if (readOption(Option::cmdline_url, &command_line)) {
+            return ::wisp::os::string_encoding::urlPercentDecode(
+                writer, command_line.ptr, command_line.len);
+        }
+        return true;
+    }
+};
+
+} /* namespace semantic_prompt */
+
 struct Command {
     /* NOTE: Order matters, see LibEnum documentation. */
     enum class Key : uint8_t {
@@ -888,6 +1252,9 @@ struct Command {
          * request. */
         Terminator terminator;   /* = .st */
     } kitty_color_protocol;
+
+    /* OSC 133 and OSC 9;12 semantic prompts */
+    semantic_prompt::Command semantic_prompt;
 
     /* Kitty clipboard protocol (OSC 5522) */
     kitty_clipboard_protocol::OSC kitty_clipboard_protocol;
@@ -2158,6 +2525,65 @@ inline Command *parse(Parser *parser, bool has_ch, uint8_t terminator_ch) {
 }
 } /* namespace kitty_clipboard_protocol */
 
+namespace semantic_prompt {
+/* Parse OSC 133, semantic prompts */
+inline Command *parse(Parser *parser, bool, uint8_t) {
+    typedef ::wisp::terminal::osc::semantic_prompt::Command SP;
+    typedef SP::Action A;
+    if (!parser->has_capture) {
+        parser->state = Parser::State::invalid;
+        return nullptr;
+    }
+    const char *data = parser->capture.trailing();
+    const size_t data_len = parser->capture.trailing_len();
+    if (data_len == 0) {
+        parser->state = Parser::State::invalid;
+        return nullptr;
+    }
+
+    /* All valid cases terminate within this block. Any fallthroughs
+     * are invalid. This makes some of our parse logic a little less
+     * repetitive.
+     *
+     * Wisp: every case but 'L' is the same shape — init the action, then
+     * take "<c>" alone or "<c>;options". */
+    bool with_options;
+    A action;
+    switch (data[0]) {
+        case 'A': action = A::fresh_line_new_prompt; with_options = true; break;
+        case 'B': action = A::end_prompt_start_input; with_options = true; break;
+        case 'I': action = A::end_prompt_start_input_terminate_eol; with_options = true; break;
+        case 'C': action = A::end_input_start_output; with_options = true; break;
+        case 'D': action = A::end_command; with_options = true; break;
+        case 'L': action = A::fresh_line; with_options = false; break;
+        case 'N': action = A::new_command; with_options = true; break;
+        case 'P': action = A::prompt_start; with_options = true; break;
+        default: goto invalid;
+    }
+
+    if (!with_options) {
+        if (data_len > 1) goto invalid;
+        parser->command = Command();
+        parser->command.key = Command::Key::semantic_prompt;
+        parser->command.semantic_prompt = SP::init(action);
+        return &parser->command;
+    }
+
+    parser->command = Command();
+    parser->command.key = Command::Key::semantic_prompt;
+    parser->command.semantic_prompt = SP::init(action);
+    if (data_len == 1) return &parser->command;
+    if (data[1] != ';') goto invalid;
+    parser->command.semantic_prompt.options_unvalidated = ZStr(data + 2, data_len - 2);
+    return &parser->command;
+
+invalid:
+    /* Any fallthroughs are invalid */
+    parser->state = Parser::State::invalid;
+    return nullptr;
+}
+} /* namespace semantic_prompt */
+
 namespace kitty_dnd_protocol {
 inline Command *parse(Parser *parser, bool has_ch, uint8_t terminator_ch) {
     /* assert(parser.state == .@"72") */
@@ -2622,8 +3048,8 @@ inline Command *Parser::end(bool has_ch, uint8_t ch) {
          * transliterated. */
         case S::s99: return nullptr;
 
-        /* Wisp: parsers.semantic_prompt — not yet transliterated. */
-        case S::s133: return nullptr;
+        case S::s133:
+            return parsers::semantic_prompt::parse(this, has_ch, ch);
 
         case S::s552: return nullptr;
 
