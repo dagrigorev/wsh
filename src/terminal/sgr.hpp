@@ -1,25 +1,16 @@
-/* Ported from Ghostty src/terminal/sgr.zig
+/* Transliterated from Ghostty src/terminal/sgr.zig
  * Copyright (c) 2024 Mitchell Hashimoto, Ghostty contributors
  * MIT License — see THIRD_PARTY_NOTICES.md
  *
- * SGR (Select Graphic Rendition) attribute parsing: turning the parameters of
- * a CSI ... m sequence into styling attributes.
+ * SGR (Select Graphic Rendition) attrinvbute parsing and types.
  *
- * The parameter meanings are ECMA-48 plus two widely-implemented extensions:
- * the 38/48/58 extended color forms, and the 4:N underline styles originating
- * with Kitty. Because those are published standards rather than invented
- * behavior, this file is written against the specifications and the tests
- * assert the specified values, instead of asserting whatever the port happens
- * to produce.
+ * TRANSLITERATION, see parser.hpp for the Zig-to-C++ mapping. Comments are
+ * upstream's unless marked "Wisp:".
  *
- * Porting notes:
- *   - Zig's tagged union becomes a tag plus flat payload fields. A real C++
- *     union is not worth it here: an Attribute is transient, never stored per
- *     cell, and RGB has user-provided constructors which a union would then
- *     have to manage by hand.
- *   - Zig's `?Attribute` return becomes a bool plus an out parameter.
- *   - Unknown sequences report the parameter span rather than copying it, so
- *     the caller can decide whether to keep or log it.
+ * Wisp: union(Tag) is a tag plus one field per payload type. Tag names that
+ * start with a digit use upstream's own C ABI renames (256_fg is fg_256,
+ * 8_bright_bg is bright_bg_8, ...). The C ABI padding/cval helpers are not
+ * carried over; there is no C ABI here.
  */
 
 #pragma once
@@ -30,340 +21,474 @@
 #include <stdint.h>
 
 #include "color.hpp"
+#include "parser.hpp"
 
 namespace wisp {
 namespace terminal {
+namespace sgr {
 
-/* ─── underline styles ───────────────────────────────────────────────────── */
+typedef ::wisp::terminal::parser::SepList SepList;
 
-/* Selected by the 4:N form. 4 on its own means single. */
-enum class Underline : uint8_t {
-    none   = 0,
-    single = 1,
-    dbl    = 2,   /* "double" is a keyword */
-    curly  = 3,
-    dotted = 4,
-    dashed = 5,
-};
-
-/* ─── attributes ─────────────────────────────────────────────────────────── */
-
-enum class AttributeTag : uint8_t {
-    unset,                  /* SGR 0, or an empty parameter list */
-    unknown,                /* unrecognized; see unknown_start/unknown_len */
-
-    bold,
-    reset_bold,             /* SGR 22, which also resets faint */
-    italic,
-    reset_italic,
-    faint,
-
-    underline,              /* payload: underline */
-    underline_color,        /* payload: rgb */
-    underline_color_256,    /* payload: idx */
-    reset_underline_color,
-
-    overline,
-    reset_overline,
-    blink,
-    reset_blink,
-    inverse,
-    reset_inverse,
-    invisible,
-    reset_invisible,
-    strikethrough,
-    reset_strikethrough,
-
-    direct_color_fg,        /* payload: rgb */
-    direct_color_bg,        /* payload: rgb */
-
-    fg_8,                   /* payload: idx, a color::Name 0-7 */
-    bg_8,
-    bright_fg_8,            /* payload: idx, a color::Name 8-15 */
-    bright_bg_8,
-
-    fg_256,                 /* payload: idx, a palette index */
-    bg_256,
-
-    reset_fg,
-    reset_bg,
-};
-
+/* Attribute type for SGR */
 struct Attribute {
-    AttributeTag tag;
-    Underline    underline;
-    RGB          rgb;
-    uint8_t      idx;
+    enum class Tag : uint8_t {
+        /* Unset all attributes */
+        unset,
 
-    /* For `unknown`: the span of parameters that were not understood. */
-    uint16_t unknown_start;
-    uint16_t unknown_len;
+        /* Unknown attribute, the raw CSI command parameters are here. */
+        unknown,
+
+        /* Bold the text. */
+        bold,
+        reset_bold,
+
+        /* Italic text. */
+        italic,
+        reset_italic,
+
+        /* Faint/dim text.
+         * Note: reset faint is the same SGR code as reset bold */
+        faint,
+
+        /* Underline the text */
+        underline,
+        underline_color,
+        underline_color_256,
+        reset_underline_color,
+
+        /* Overline the text */
+        overline,
+        reset_overline,
+
+        /* Blink the text */
+        blink,
+        reset_blink,
+
+        /* Invert fg/bg colors. */
+        inverse,
+        reset_inverse,
+
+        /* Invisible */
+        invisible,
+        reset_invisible,
+
+        /* Strikethrough the text. */
+        strikethrough,
+        reset_strikethrough,
+
+        /* Set foreground color as RGB values. */
+        direct_color_fg,
+
+        /* Set background color as RGB values. */
+        direct_color_bg,
+
+        /* Set the background/foreground as a named color attribute. */
+        bg_8,
+        fg_8,
+
+        /* Reset the fg/bg to their default values. */
+        reset_fg,
+        reset_bg,
+
+        /* Set the background/foreground as a named bright color attribute. */
+        bright_bg_8,
+        bright_fg_8,
+
+        /* Set background color as 256-color palette. */
+        bg_256,
+
+        /* Set foreground color as 256-color palette. */
+        fg_256,
+    };
+
+    struct Unknown {
+        /* Full is the full SGR input. */
+        const uint16_t *full;
+        size_t full_len;
+
+        /* Partial is the remaining, where we got hung up. */
+        const uint16_t *partial;
+        size_t partial_len;
+    };
+
+    enum class Underline : uint8_t {
+        none = 0,
+        single = 1,
+        double_ = 2,
+        curly = 3,
+        dotted = 4,
+        dashed = 5,
+    };
+
+    Tag tag;
+
+    /* Wisp: payloads. `unknown` for .unknown; `underline` for .underline;
+     * `rgb` for .underline_color, .direct_color_fg and .direct_color_bg;
+     * `index` for the 256 variants; `name` for the 8 variants. */
+    Unknown unknown;
+    Underline underline;
+    RGB rgb;
+    uint8_t index;
+    Name name;
 
     Attribute()
-        : tag(AttributeTag::unset), underline(Underline::none), rgb(),
-          idx(0), unknown_start(0), unknown_len(0) {}
+        : tag(Tag::unset), unknown(), underline(Underline::none), rgb(),
+          index(0), name(Name::black) {}
+
+    static Attribute make(Tag t) {
+        Attribute a;
+        a.tag = t;
+        return a;
+    }
+    static Attribute makeUnderline(Underline u) {
+        Attribute a = make(Tag::underline);
+        a.underline = u;
+        return a;
+    }
+    static Attribute makeRgb(Tag t, uint8_t r, uint8_t g, uint8_t b) {
+        Attribute a = make(t);
+        a.rgb = RGB(r, g, b);
+        return a;
+    }
+    static Attribute makeIndex(Tag t, uint8_t idx) {
+        Attribute a = make(t);
+        a.index = idx;
+        return a;
+    }
+    static Attribute makeName(Tag t, uint16_t v) {
+        Attribute a = make(t);
+        a.name = (Name)v;
+        return a;
+    }
+    static Attribute makeUnknown(const uint16_t *full, size_t full_len,
+                                 const uint16_t *partial, size_t partial_len) {
+        Attribute a = make(Tag::unknown);
+        a.unknown.full = full;
+        a.unknown.full_len = full_len;
+        a.unknown.partial = partial;
+        a.unknown.partial_len = partial_len;
+        return a;
+    }
 };
 
-/* ─── parser ─────────────────────────────────────────────────────────────── */
+/* Parser parses the attributes from a list of SGR parameters. */
+struct Parser {
+    const uint16_t *params; /* = &.{} */
+    size_t params_len;
+    SepList params_sep;     /* = .initEmpty() */
+    size_t idx;             /* = 0 */
 
-/* Parses one CSI ... m parameter list into successive attributes.
- *
- * `colon_set` marks, per parameter index, whether that parameter was separated
- * from the previous one by a colon rather than a semicolon. That distinction
- * matters: colons introduce a sub-parameter list, which is only meaningful
- * after 4, 38, 48 and 58. Callers that do not track separators may pass null,
- * which is treated as all-semicolons.
- */
-struct SgrParser {
-    const uint16_t *params;
-    size_t          params_len;
-    const uint8_t  *colon_set;   /* one byte per parameter, or null */
-    size_t          idx;
+    /* Empty state parser. */
+    Parser() : params(nullptr), params_len(0), params_sep(), idx(0) {}
 
-    SgrParser()
-        : params(nullptr), params_len(0), colon_set(nullptr), idx(0) {}
+    Parser(const uint16_t *p, size_t len, SepList sep = SepList())
+        : params(p), params_len(len), params_sep(sep), idx(0) {}
 
-    SgrParser(const uint16_t *p, size_t n, const uint8_t *colons = nullptr)
-        : params(p), params_len(n), colon_set(colons), idx(0) {}
-
-    bool is_colon(size_t i) const {
-        return colon_set != nullptr && i < params_len && colon_set[i] != 0;
-    }
-
-    /* Produce the next attribute. Returns false when the list is exhausted.
-     *
-     * An empty parameter list yields a single `unset`, because CSI m with no
-     * parameters means SGR 0. */
+    /* Next returns the next attribute or null if there are no more attributes.
+     * Wisp: ?Attribute is the bool return plus *out. */
     bool next(Attribute *out) {
+        typedef Attribute::Tag T;
         if (idx >= params_len) {
-            /* One past the end yields unset for an empty list, then stops. */
-            const bool empty_list = (idx == 0 && params_len == 0);
-            idx++;
-            if (empty_list) {
-                *out = Attribute();
-                out->tag = AttributeTag::unset;
+            /* We're more likely to not be done than to be done. */
+
+            /* Add one to ensure we don't loop on unset */
+            const bool first = idx == 0;
+            idx += 1;
+
+            /* If we're at index zero it means we must have an empty list
+             * and an empty list implicitly means unset, otherwise we're
+             * done and return null. */
+            if (first) {
+                *out = Attribute::make(T::unset);
                 return true;
             }
             return false;
         }
 
-        const size_t start = idx;
-        const uint16_t p = params[idx];
-        idx++;
+        const uint16_t *slice = params + idx;
+        const size_t slice_len = params_len - idx;
+        /* Call inlined for performance reasons. */
+        const bool colon = params_sep.isSet(idx);
+        idx += 1;
 
-        *out = Attribute();
+        /* Our last one will have an idx be the last value. */
+        if (slice_len == 0) return false;
 
-        /* A colon may only introduce a sub-parameter list after these. */
-        if (is_colon(start) && p != 4 && p != 38 && p != 48 && p != 58) {
-            return emit_unknown(out, start);
+        /* If we have a colon separator then we need to ensure we're
+         * parsing a value that allows it. */
+        if (colon) {
+            /* Colons are fairly rare in the wild. */
+            switch (slice[0]) {
+                case 4: case 38: case 48: case 58: break;
+
+                default: {
+                    /* In real world use it's very rare
+                     * that we receive an invalid sequence. */
+
+                    /* Consume all the colon separated
+                     * values and return them as unknown. */
+                    const size_t start = idx;
+                    while (params_sep.isSet(idx)) idx += 1;
+                    idx += 1;
+                    const size_t n = idx - start + 1;
+                    *out = Attribute::makeUnknown(params, params_len, slice,
+                                                  n < slice_len ? n : slice_len);
+                    return true;
+                }
+            }
         }
 
-        switch (p) {
-            case 0:  out->tag = AttributeTag::unset; return true;
-            case 1:  out->tag = AttributeTag::bold; return true;
-            case 2:  out->tag = AttributeTag::faint; return true;
-            case 3:  out->tag = AttributeTag::italic; return true;
+        switch (slice[0]) {
+            case 0: *out = Attribute::make(T::unset); return true;
+
+            case 1: *out = Attribute::make(T::bold); return true;
+
+            case 2: *out = Attribute::make(T::faint); return true;
+
+            case 3: *out = Attribute::make(T::italic); return true;
 
             case 4: {
-                out->tag = AttributeTag::underline;
-                /* 4:N selects a style; bare 4 is single. */
-                if (idx < params_len && is_colon(idx)) {
-                    const uint16_t style = params[idx];
-                    idx++;
-                    if (style > 5) return emit_unknown(out, start);
-                    out->underline = (Underline)style;
-                } else {
-                    out->underline = Underline::single;
+                if (colon) {
+                    /* Colons are fairly rare in the wild. */
+
+                    /* A trailing colon with no following sub-param
+                     * (e.g. "ESC[58:4:m") leaves the colon separator
+                     * bit set on the last param without adding another
+                     * entry, so we can see param 4 with a colon but
+                     * nothing after it. */
+                    if (slice_len < 2) break;
+
+                    if (isColon()) {
+                        /* Invalid/unknown SGRs are just not very likely. */
+                        consumeUnknownColon();
+                        break;
+                    }
+
+                    idx += 1;
+                    Attribute::Underline u;
+                    switch (slice[1]) {
+                        case 0: u = Attribute::Underline::none; break;
+                        case 1: u = Attribute::Underline::single; break;
+                        case 2: u = Attribute::Underline::double_; break;
+                        case 3: u = Attribute::Underline::curly; break;
+                        case 4: u = Attribute::Underline::dotted; break;
+                        case 5: u = Attribute::Underline::dashed; break;
+
+                        /* For unknown underline styles,
+                         * just render a single underline. */
+                        default: u = Attribute::Underline::single; break;
+                    }
+                    *out = Attribute::makeUnderline(u);
+                    return true;
                 }
+
+                *out = Attribute::makeUnderline(Attribute::Underline::single);
                 return true;
             }
 
-            case 5:  out->tag = AttributeTag::blink; return true;
-            /* 6 is "rapid blink"; treated as blink, as everyone does. */
-            case 6:  out->tag = AttributeTag::blink; return true;
-            case 7:  out->tag = AttributeTag::inverse; return true;
-            case 8:  out->tag = AttributeTag::invisible; return true;
-            case 9:  out->tag = AttributeTag::strikethrough; return true;
+            case 5: *out = Attribute::make(T::blink); return true;
 
-            /* 21 is double underline in practice. ECMA-48 assigns it "bold
-             * off", but no terminal implements that meaning. */
-            case 21:
-                out->tag = AttributeTag::underline;
-                out->underline = Underline::dbl;
-                return true;
+            case 6: *out = Attribute::make(T::blink); return true;
 
-            case 22: out->tag = AttributeTag::reset_bold; return true;
-            case 23: out->tag = AttributeTag::reset_italic; return true;
+            case 7: *out = Attribute::make(T::inverse); return true;
 
-            case 24:
-                out->tag = AttributeTag::underline;
-                out->underline = Underline::none;
-                return true;
+            case 8: *out = Attribute::make(T::invisible); return true;
 
-            case 25: out->tag = AttributeTag::reset_blink; return true;
-            case 27: out->tag = AttributeTag::reset_inverse; return true;
-            case 28: out->tag = AttributeTag::reset_invisible; return true;
-            case 29: out->tag = AttributeTag::reset_strikethrough; return true;
+            case 9: *out = Attribute::make(T::strikethrough); return true;
+
+            case 21: *out = Attribute::makeUnderline(Attribute::Underline::double_); return true;
+
+            case 22: *out = Attribute::make(T::reset_bold); return true;
+
+            case 23: *out = Attribute::make(T::reset_italic); return true;
+
+            case 24: *out = Attribute::makeUnderline(Attribute::Underline::none); return true;
+
+            case 25: *out = Attribute::make(T::reset_blink); return true;
+
+            case 27: *out = Attribute::make(T::reset_inverse); return true;
+
+            case 28: *out = Attribute::make(T::reset_invisible); return true;
+
+            case 29: *out = Attribute::make(T::reset_strikethrough); return true;
 
             case 30: case 31: case 32: case 33:
             case 34: case 35: case 36: case 37:
-                out->tag = AttributeTag::fg_8;
-                out->idx = (uint8_t)(p - 30);
+                *out = Attribute::makeName(T::fg_8, (uint16_t)(slice[0] - 30));
                 return true;
 
-            case 38: return parse_extended(out, start, true);
-            case 39: out->tag = AttributeTag::reset_fg; return true;
+            case 38:
+                if (slice_len >= 2) {
+                    /* We are very likely to have enough parameters. */
+                    switch (slice[1]) {
+                        /* `2` indicates direct-color (r, g, b).
+                         * We need at least 3 more params for this to make sense. */
+                        case 2:
+                            if (parseDirectColor(T::direct_color_fg, slice, slice_len, colon, out)) return true;
+                            break;
+
+                        /* `5` indicates indexed color. */
+                        case 5:
+                            if (slice_len >= 3) {
+                                idx += 2;
+                                *out = Attribute::makeIndex(T::fg_256, (uint8_t)slice[2]);
+                                return true;
+                            }
+                            break;
+
+                        default: break;
+                    }
+                }
+                break;
+
+            case 39: *out = Attribute::make(T::reset_fg); return true;
 
             case 40: case 41: case 42: case 43:
             case 44: case 45: case 46: case 47:
-                out->tag = AttributeTag::bg_8;
-                out->idx = (uint8_t)(p - 40);
+                *out = Attribute::makeName(T::bg_8, (uint16_t)(slice[0] - 40));
                 return true;
 
-            case 48: return parse_extended(out, start, false);
-            case 49: out->tag = AttributeTag::reset_bg; return true;
+            case 48:
+                if (slice_len >= 2) {
+                    switch (slice[1]) {
+                        /* `2` indicates direct-color (r, g, b).
+                         * We need at least 3 more params for this to make sense. */
+                        case 2:
+                            if (parseDirectColor(T::direct_color_bg, slice, slice_len, colon, out)) return true;
+                            break;
 
-            case 53: out->tag = AttributeTag::overline; return true;
-            case 55: out->tag = AttributeTag::reset_overline; return true;
+                        /* `5` indicates indexed color. */
+                        case 5:
+                            if (slice_len >= 3) {
+                                idx += 2;
+                                *out = Attribute::makeIndex(T::bg_256, (uint8_t)slice[2]);
+                                return true;
+                            }
+                            break;
 
-            case 58: return parse_underline_color(out, start);
-            case 59: out->tag = AttributeTag::reset_underline_color; return true;
+                        default: break;
+                    }
+                }
+                break;
+
+            case 49: *out = Attribute::make(T::reset_bg); return true;
+
+            case 53: *out = Attribute::make(T::overline); return true;
+            case 55: *out = Attribute::make(T::reset_overline); return true;
+
+            case 58:
+                if (slice_len >= 2) {
+                    switch (slice[1]) {
+                        /* `2` indicates direct-color (r, g, b).
+                         * We need at least 3 more params for this to make sense. */
+                        case 2:
+                            if (parseDirectColor(T::underline_color, slice, slice_len, colon, out)) return true;
+                            break;
+
+                        /* `5` indicates indexed color. */
+                        case 5:
+                            if (slice_len >= 3) {
+                                idx += 2;
+                                *out = Attribute::makeIndex(T::underline_color_256, (uint8_t)slice[2]);
+                                return true;
+                            }
+                            break;
+                        default: break;
+                    }
+                }
+                break;
+
+            case 59: *out = Attribute::make(T::reset_underline_color); return true;
 
             case 90: case 91: case 92: case 93:
             case 94: case 95: case 96: case 97:
-                out->tag = AttributeTag::bright_fg_8;
-                out->idx = (uint8_t)(p - 90 + 8);
+                /* 82 instead of 90 to offset to "bright" colors */
+                *out = Attribute::makeName(T::bright_fg_8, (uint16_t)(slice[0] - 82));
                 return true;
 
             case 100: case 101: case 102: case 103:
             case 104: case 105: case 106: case 107:
-                out->tag = AttributeTag::bright_bg_8;
-                out->idx = (uint8_t)(p - 100 + 8);
+                *out = Attribute::makeName(T::bright_bg_8, (uint16_t)(slice[0] - 92));
+                return true;
+
+            default: break;
+        }
+
+        *out = Attribute::makeUnknown(params, params_len, slice, slice_len);
+        return true;
+    }
+
+    /* Wisp: ?Attribute is the bool return plus *out. */
+    bool parseDirectColor(Attribute::Tag tag, const uint16_t *slice, size_t slice_len,
+                          bool colon, Attribute *out) {
+        /* Any direct color style must have at least 5 values. */
+        if (slice_len < 5) return false;
+
+        /* Only used for direct color sets (38, 48, 58) and subparam 2.
+         * assert(slice[1] == 2) */
+
+        /* Note: We use @truncate because the value should be 0 to 255. If
+         * it isn't, the behavior is undefined so we just... truncate it. */
+
+        /* If we don't have a colon, then we expect exactly 3 semicolon
+         * separated values. */
+        if (!colon) {
+            /* Semicolons are much more common than colons. */
+            idx += 4;
+            *out = Attribute::makeRgb(tag, (uint8_t)slice[2], (uint8_t)slice[3], (uint8_t)slice[4]);
+            return true;
+        }
+
+        /* We have a colon, we might have either 5 or 6 values depending
+         * on if the colorspace is present. */
+        const size_t count = countColon();
+        switch (count) {
+            case 3:
+                /* This is the much more common case in the wild. */
+                idx += 4;
+                *out = Attribute::makeRgb(tag, (uint8_t)slice[2], (uint8_t)slice[3], (uint8_t)slice[4]);
+                return true;
+
+            case 4:
+                idx += 5;
+                *out = Attribute::makeRgb(tag, (uint8_t)slice[3], (uint8_t)slice[4], (uint8_t)slice[5]);
                 return true;
 
             default:
-                return emit_unknown(out, start);
+                /* Invalid/unknown SGRs just don't happen very often at all. */
+                consumeUnknownColon();
+                return false;
         }
     }
 
-private:
-    bool emit_unknown(Attribute *out, size_t start) {
-        /* Swallow any colon-joined sub-parameters so the caller does not see
-         * them as separate attributes. */
-        while (idx < params_len && is_colon(idx)) idx++;
+    /* Returns true if the present position has a colon separator.
+     * This always returns false for the last value since it has no
+     * separator. */
+    bool isColon() const { return params_sep.isSet(idx); }
 
-        *out = Attribute();
-        out->tag = AttributeTag::unknown;
-        out->unknown_start = (uint16_t)start;
-        out->unknown_len = (uint16_t)(idx - start);
-        return true;
+    size_t countColon() const {
+        size_t count = 0;
+        size_t i = idx;
+        while (i < params_len - 1 && params_sep.isSet(i)) {
+            count += 1;
+            i += 1;
+        }
+        return count;
     }
 
-    /* Read the value at `idx`, advancing past it. Returns false at end. */
-    bool take(uint16_t *v) {
-        if (idx >= params_len) return false;
-        *v = params[idx];
-        idx++;
-        return true;
-    }
-
-    /* Abandon a malformed extended-color sequence, consuming the parameters
-     * that belonged to it before reporting it unknown.
-     *
-     * This matters for more than tidiness. Leaving the tail unconsumed would
-     * let it be reparsed as ordinary attributes, and a trailing 0 in, say,
-     * "38;2;300;0;0" would then be read as SGR 0 and reset everything. A bad
-     * color must not clear unrelated styling. */
-    bool abandon_extended(Attribute *out, size_t start, size_t declared_end) {
-        if (declared_end > params_len) declared_end = params_len;
-        if (idx < declared_end) idx = declared_end;
-        return emit_unknown(out, start);
-    }
-
-    /* 38/48: extended foreground or background color.
-     *
-     *   ...;5;N        palette index N
-     *   ...;2;R;G;B    direct color
-     *
-     * The colon form additionally allows a colorspace slot that is ignored:
-     *   ...:2::R:G:B
-     */
-    bool parse_extended(Attribute *out, size_t start, bool is_fg) {
-        uint16_t kind;
-        if (!take(&kind)) return emit_unknown(out, start);
-
-        if (kind == 5) {
-            const size_t end = start + 3;   /* 38, 5, N */
-            uint16_t n;
-            if (!take(&n) || n > 255) return abandon_extended(out, start, end);
-            out->tag = is_fg ? AttributeTag::fg_256 : AttributeTag::bg_256;
-            out->idx = (uint8_t)n;
-            return true;
-        }
-
-        if (kind == 2) {
-            /* In the colon form an empty colorspace slot may precede the
-             * components, giving four values instead of three. */
-            const size_t avail = params_len - idx;
-            const bool colon_form = is_colon(start + 1);
-            const bool has_colorspace = colon_form && avail >= 4;
-            if (has_colorspace) idx++;
-
-            /* The form spans the selector, the kind, three components, and
-             * the optional colorspace slot. End is exclusive. */
-            const size_t end = start + 5 + (has_colorspace ? 1 : 0);
-
-            uint16_t c[3];
-            for (int i = 0; i < 3; i++) {
-                if (!take(&c[i]) || c[i] > 255) {
-                    return abandon_extended(out, start, end);
-                }
-            }
-            out->tag = is_fg ? AttributeTag::direct_color_fg
-                             : AttributeTag::direct_color_bg;
-            out->rgb = RGB((uint8_t)c[0], (uint8_t)c[1], (uint8_t)c[2]);
-            return true;
-        }
-
-        return emit_unknown(out, start);
-    }
-
-    /* 58: underline color, same extended forms as 38/48. */
-    bool parse_underline_color(Attribute *out, size_t start) {
-        uint16_t kind;
-        if (!take(&kind)) return emit_unknown(out, start);
-
-        if (kind == 5) {
-            const size_t end = start + 3;
-            uint16_t n;
-            if (!take(&n) || n > 255) return abandon_extended(out, start, end);
-            out->tag = AttributeTag::underline_color_256;
-            out->idx = (uint8_t)n;
-            return true;
-        }
-
-        if (kind == 2) {
-            const size_t avail = params_len - idx;
-            const bool colon_form = is_colon(start + 1);
-            const bool has_colorspace = colon_form && avail >= 4;
-            if (has_colorspace) idx++;
-
-            const size_t end = start + 5 + (has_colorspace ? 1 : 0);
-
-            uint16_t c[3];
-            for (int i = 0; i < 3; i++) {
-                if (!take(&c[i]) || c[i] > 255) {
-                    return abandon_extended(out, start, end);
-                }
-            }
-            out->tag = AttributeTag::underline_color;
-            out->rgb = RGB((uint8_t)c[0], (uint8_t)c[1], (uint8_t)c[2]);
-            return true;
-        }
-
-        return emit_unknown(out, start);
+    /* Consumes all the remaining parameters separated by a colon and
+     * returns an unknown attribute. */
+    void consumeUnknownColon() {
+        const size_t count = countColon();
+        idx += count + 1;
     }
 };
+
+} /* namespace sgr */
+
+/* Wisp adapter, not upstream: style.hpp is not transliterated yet and names
+ * the underline style unqualified. */
+typedef sgr::Attribute::Underline Underline;
 
 } /* namespace terminal */
 } /* namespace wisp */

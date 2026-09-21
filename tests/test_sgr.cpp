@@ -1,354 +1,367 @@
-/* Tests for src/terminal/sgr.hpp.
- *
- * Related to Ghostty src/terminal/sgr.zig
+/* Transliterated from the test blocks in Ghostty src/terminal/sgr.zig
  * Copyright (c) 2024 Mitchell Hashimoto, Ghostty contributors
  * MIT License — see THIRD_PARTY_NOTICES.md
  *
- * Expectations here come from ECMA-48 and the documented 38/48/58 and 4:N
- * extensions, not from the port's own output.
+ * Upstream's tests: same inputs, same assertions, same names. These replace
+ * the tests written for the earlier reimplementation of sgr.hpp.
+ *
+ * "sgr: Attribute C compat" only references the C ABI type, which is not
+ * carried over, and has no counterpart here.
  */
 
 #include "test_helpers.h"
 #include "sgr.hpp"
 
 using namespace wisp::terminal;
+using sgr::Attribute;
+using sgr::Parser;
+using sgr::SepList;
+typedef Attribute::Tag T;
 
-/* Parse a parameter list and return the single attribute it should yield. */
-static bool one(const uint16_t *p, size_t n, Attribute *out,
-                const uint8_t *colons = nullptr) {
-    SgrParser parser(p, n, colons);
-    if (!parser.next(out)) return false;
-    Attribute extra;
-    /* Must be exactly one attribute. */
-    return !parser.next(&extra);
-}
 
-/* ─── basics ─────────────────────────────────────────────────────────────── */
-
-TEST(sgr, empty_list_is_unset) {
-    /* CSI m with no parameters means SGR 0. */
+static Attribute testParse(const uint16_t *params, size_t len) {
+    Parser p(params, len);
     Attribute a;
-    SgrParser parser(nullptr, 0, nullptr);
-    ASSERT_TRUE(parser.next(&a));
-    ASSERT_TRUE(a.tag == AttributeTag::unset);
-    ASSERT_FALSE(parser.next(&a));
+    const bool ok = p.next(&a);
+    (void)ok;
+    return a;
 }
 
-TEST(sgr, zero_is_unset) {
-    const uint16_t p[] = {0};
+static Attribute testParseColon(const uint16_t *params, size_t len) {
+    Parser p(params, len);
+    /* Mark all parameters except the last as having a colon after. */
+    for (size_t i = 0; i + 1 < len; i++) p.params_sep.set(i);
     Attribute a;
-    ASSERT_TRUE(one(p, 1, &a));
-    ASSERT_TRUE(a.tag == AttributeTag::unset);
+    const bool ok = p.next(&a);
+    (void)ok;
+    return a;
 }
 
-TEST(sgr, simple_on_codes) {
-    struct { uint16_t code; AttributeTag tag; } cases[] = {
-        {1, AttributeTag::bold},
-        {2, AttributeTag::faint},
-        {3, AttributeTag::italic},
-        {5, AttributeTag::blink},
-        {7, AttributeTag::inverse},
-        {8, AttributeTag::invisible},
-        {9, AttributeTag::strikethrough},
-        {53, AttributeTag::overline},
+#define PARSE(...) ([&] { static const uint16_t v_[] = { __VA_ARGS__ }; return testParse(v_, sizeof(v_) / sizeof(v_[0])); }())
+#define PARSE_COLON(...) ([&] { static const uint16_t v_[] = { __VA_ARGS__ }; return testParseColon(v_, sizeof(v_) / sizeof(v_[0])); }())
+
+static bool is(Parser &p, T tag) {
+    Attribute a;
+    return p.next(&a) && a.tag == tag;
+}
+
+static bool done(Parser &p) {
+    Attribute a;
+    return !p.next(&a);
+}
+
+static bool rgb(const Attribute &a, T tag, uint8_t r, uint8_t g, uint8_t b) {
+    return a.tag == tag && a.rgb.r == r && a.rgb.g == g && a.rgb.b == b;
+}
+
+TEST(sgr, Parser) {
+    ASSERT_TRUE(testParse(nullptr, 0).tag == T::unset);
+    ASSERT_TRUE(PARSE(0).tag == T::unset);
+
+    ASSERT_TRUE(rgb(PARSE(38, 2, 40, 44, 52), T::direct_color_fg, 40, 44, 52));
+
+    ASSERT_TRUE(PARSE(38, 2, 44, 52).tag == T::unknown);
+
+    ASSERT_TRUE(rgb(PARSE(48, 2, 40, 44, 52), T::direct_color_bg, 40, 44, 52));
+
+    ASSERT_TRUE(PARSE(48, 2, 44, 52).tag == T::unknown);
+}
+
+TEST(sgr, Parser_multiple) {
+    static const uint16_t params[] = { 0, 38, 2, 40, 44, 52 };
+    Parser p(params, 6);
+    ASSERT_TRUE(is(p, T::unset));
+    ASSERT_TRUE(is(p, T::direct_color_fg));
+    ASSERT_TRUE(done(p));
+    ASSERT_TRUE(done(p));
+}
+
+TEST(sgr, unsupported_with_colon) {
+    static const uint16_t params[] = { 0, 4, 1 };
+    SepList list;
+    list.set(0);
+    Parser p(params, 3, list);
+    ASSERT_TRUE(is(p, T::unknown));
+    ASSERT_TRUE(is(p, T::bold));
+    ASSERT_TRUE(done(p));
+}
+
+TEST(sgr, unsupported_with_multiple_colon) {
+    static const uint16_t params[] = { 0, 4, 2, 1 };
+    SepList list;
+    list.set(0);
+    list.set(1);
+    Parser p(params, 4, list);
+    ASSERT_TRUE(is(p, T::unknown));
+    ASSERT_TRUE(is(p, T::bold));
+    ASSERT_TRUE(done(p));
+}
+
+TEST(sgr, bold) {
+    ASSERT_TRUE(PARSE(1).tag == T::bold);
+    ASSERT_TRUE(PARSE(22).tag == T::reset_bold);
+}
+
+TEST(sgr, italic) {
+    ASSERT_TRUE(PARSE(3).tag == T::italic);
+    ASSERT_TRUE(PARSE(23).tag == T::reset_italic);
+}
+
+TEST(sgr, underline) {
+    ASSERT_TRUE(PARSE(4).tag == T::underline);
+
+    const Attribute v = PARSE(24);
+    ASSERT_TRUE(v.tag == T::underline);
+    ASSERT_TRUE(v.underline == Attribute::Underline::none);
+}
+
+TEST(sgr, underline_styles) {
+    struct { uint16_t n; Attribute::Underline u; } cases[] = {
+        { 2, Attribute::Underline::double_ },
+        { 0, Attribute::Underline::none },
+        { 1, Attribute::Underline::single },
+        { 3, Attribute::Underline::curly },
+        { 4, Attribute::Underline::dotted },
+        { 5, Attribute::Underline::dashed },
     };
-    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
-        const uint16_t p[] = {cases[i].code};
-        Attribute a;
-        ASSERT_TRUE(one(p, 1, &a));
-        ASSERT_TRUE(a.tag == cases[i].tag);
+    for (size_t i = 0; i < 6; i++) {
+        const uint16_t params[] = { 4, cases[i].n };
+        const Attribute v = testParseColon(params, 2);
+        ASSERT_TRUE(v.tag == T::underline);
+        ASSERT_TRUE(v.underline == cases[i].u);
     }
 }
 
-TEST(sgr, reset_codes) {
-    struct { uint16_t code; AttributeTag tag; } cases[] = {
-        {22, AttributeTag::reset_bold},
-        {23, AttributeTag::reset_italic},
-        {25, AttributeTag::reset_blink},
-        {27, AttributeTag::reset_inverse},
-        {28, AttributeTag::reset_invisible},
-        {29, AttributeTag::reset_strikethrough},
-        {39, AttributeTag::reset_fg},
-        {49, AttributeTag::reset_bg},
-        {55, AttributeTag::reset_overline},
-        {59, AttributeTag::reset_underline_color},
-    };
-    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
-        const uint16_t p[] = {cases[i].code};
-        Attribute a;
-        ASSERT_TRUE(one(p, 1, &a));
-        ASSERT_TRUE(a.tag == cases[i].tag);
-    }
+TEST(sgr, underline_style_with_more) {
+    static const uint16_t params[] = { 4, 2, 1 };
+    SepList list;
+    list.set(0);
+    Parser p(params, 3, list);
+
+    ASSERT_TRUE(is(p, T::underline));
+    ASSERT_TRUE(is(p, T::bold));
+    ASSERT_TRUE(done(p));
 }
 
-/* ─── underline ──────────────────────────────────────────────────────────── */
+TEST(sgr, underline_style_with_too_many_colons) {
+    static const uint16_t params[] = { 4, 2, 3, 1 };
+    SepList list;
+    list.set(0);
+    list.set(1);
+    Parser p(params, 4, list);
 
-TEST(sgr, bare_4_is_single_underline) {
-    const uint16_t p[] = {4};
-    Attribute a;
-    ASSERT_TRUE(one(p, 1, &a));
-    ASSERT_TRUE(a.tag == AttributeTag::underline);
-    ASSERT_TRUE(a.underline == Underline::single);
+    ASSERT_TRUE(is(p, T::unknown));
+    ASSERT_TRUE(is(p, T::bold));
+    ASSERT_TRUE(done(p));
 }
 
-TEST(sgr, 24_turns_underline_off) {
-    /* Represented as underline with style none, not a separate reset tag. */
-    const uint16_t p[] = {24};
-    Attribute a;
-    ASSERT_TRUE(one(p, 1, &a));
-    ASSERT_TRUE(a.tag == AttributeTag::underline);
-    ASSERT_TRUE(a.underline == Underline::none);
+TEST(sgr, blink) {
+    ASSERT_TRUE(PARSE(5).tag == T::blink);
+    ASSERT_TRUE(PARSE(6).tag == T::blink);
+    ASSERT_TRUE(PARSE(25).tag == T::reset_blink);
 }
 
-TEST(sgr, 21_is_double_underline) {
-    /* ECMA-48 assigns 21 to "bold off", but every terminal treats it as
-     * double underline, so that is what is implemented. */
-    const uint16_t p[] = {21};
-    Attribute a;
-    ASSERT_TRUE(one(p, 1, &a));
-    ASSERT_TRUE(a.tag == AttributeTag::underline);
-    ASSERT_TRUE(a.underline == Underline::dbl);
+TEST(sgr, inverse) {
+    ASSERT_TRUE(PARSE(7).tag == T::inverse);
+    ASSERT_TRUE(PARSE(27).tag == T::reset_inverse);
 }
 
-TEST(sgr, colon_underline_styles) {
-    const Underline want[] = {
-        Underline::none, Underline::single, Underline::dbl,
-        Underline::curly, Underline::dotted, Underline::dashed,
-    };
-    for (uint16_t style = 0; style <= 5; style++) {
-        const uint16_t p[] = {4, style};
-        const uint8_t colons[] = {0, 1};   /* the style is colon-joined */
-        Attribute a;
-        ASSERT_TRUE(one(p, 2, &a, colons));
-        ASSERT_TRUE(a.tag == AttributeTag::underline);
-        ASSERT_TRUE(a.underline == want[style]);
-    }
+TEST(sgr, strikethrough) {
+    ASSERT_TRUE(PARSE(9).tag == T::strikethrough);
+    ASSERT_TRUE(PARSE(29).tag == T::reset_strikethrough);
 }
 
-TEST(sgr, colon_underline_out_of_range_is_unknown) {
-    const uint16_t p[] = {4, 6};
-    const uint8_t colons[] = {0, 1};
-    Attribute a;
-    ASSERT_TRUE(one(p, 2, &a, colons));
-    ASSERT_TRUE(a.tag == AttributeTag::unknown);
+TEST(sgr, _8_color) {
+    static const uint16_t params[] = { 31, 43, 90, 103 };
+    Parser p(params, 4);
+    Attribute v;
+
+    ASSERT_TRUE(p.next(&v) && v.tag == T::fg_8 && v.name == Name::red);
+    ASSERT_TRUE(p.next(&v) && v.tag == T::bg_8 && v.name == Name::yellow);
+    ASSERT_TRUE(p.next(&v) && v.tag == T::bright_fg_8 && v.name == Name::bright_black);
+    ASSERT_TRUE(p.next(&v) && v.tag == T::bright_bg_8 && v.name == Name::bright_yellow);
 }
 
-/* ─── 8-color ────────────────────────────────────────────────────────────── */
-
-TEST(sgr, fg_and_bg_8_color) {
-    for (uint16_t i = 0; i < 8; i++) {
-        const uint16_t fg[] = {(uint16_t)(30 + i)};
-        Attribute a;
-        ASSERT_TRUE(one(fg, 1, &a));
-        ASSERT_TRUE(a.tag == AttributeTag::fg_8);
-        ASSERT_EQ(a.idx, i);
-
-        const uint16_t bg[] = {(uint16_t)(40 + i)};
-        Attribute b;
-        ASSERT_TRUE(one(bg, 1, &b));
-        ASSERT_TRUE(b.tag == AttributeTag::bg_8);
-        ASSERT_EQ(b.idx, i);
-    }
+TEST(sgr, _256_color) {
+    static const uint16_t params[] = { 38, 5, 161, 48, 5, 236 };
+    Parser p(params, 6);
+    ASSERT_TRUE(is(p, T::fg_256));
+    ASSERT_TRUE(is(p, T::bg_256));
+    ASSERT_TRUE(done(p));
 }
 
-TEST(sgr, bright_fg_and_bg_map_to_palette_8_through_15) {
-    for (uint16_t i = 0; i < 8; i++) {
-        const uint16_t fg[] = {(uint16_t)(90 + i)};
-        Attribute a;
-        ASSERT_TRUE(one(fg, 1, &a));
-        ASSERT_TRUE(a.tag == AttributeTag::bright_fg_8);
-        ASSERT_EQ(a.idx, i + 8);
-
-        const uint16_t bg[] = {(uint16_t)(100 + i)};
-        Attribute b;
-        ASSERT_TRUE(one(bg, 1, &b));
-        ASSERT_TRUE(b.tag == AttributeTag::bright_bg_8);
-        ASSERT_EQ(b.idx, i + 8);
-    }
+TEST(sgr, _256_color_underline) {
+    static const uint16_t params[] = { 58, 5, 9 };
+    Parser p(params, 3);
+    ASSERT_TRUE(is(p, T::underline_color_256));
+    ASSERT_TRUE(done(p));
 }
 
-/* ─── extended color ─────────────────────────────────────────────────────── */
-
-TEST(sgr, palette_256_fg_and_bg) {
-    const uint16_t fg[] = {38, 5, 200};
-    Attribute a;
-    ASSERT_TRUE(one(fg, 3, &a));
-    ASSERT_TRUE(a.tag == AttributeTag::fg_256);
-    ASSERT_EQ(a.idx, 200);
-
-    const uint16_t bg[] = {48, 5, 17};
-    Attribute b;
-    ASSERT_TRUE(one(bg, 3, &b));
-    ASSERT_TRUE(b.tag == AttributeTag::bg_256);
-    ASSERT_EQ(b.idx, 17);
+TEST(sgr, _24_bit_bg_color) {
+    ASSERT_TRUE(rgb(PARSE_COLON(48, 2, 1, 2, 3), T::direct_color_bg, 1, 2, 3));
 }
 
-TEST(sgr, direct_color_fg_and_bg) {
-    const uint16_t fg[] = {38, 2, 10, 20, 30};
-    Attribute a;
-    ASSERT_TRUE(one(fg, 5, &a));
-    ASSERT_TRUE(a.tag == AttributeTag::direct_color_fg);
-    ASSERT_EQ(a.rgb.r, 10);
-    ASSERT_EQ(a.rgb.g, 20);
-    ASSERT_EQ(a.rgb.b, 30);
-
-    const uint16_t bg[] = {48, 2, 255, 128, 0};
-    Attribute b;
-    ASSERT_TRUE(one(bg, 5, &b));
-    ASSERT_TRUE(b.tag == AttributeTag::direct_color_bg);
-    ASSERT_EQ(b.rgb.r, 255);
-    ASSERT_EQ(b.rgb.g, 128);
-    ASSERT_EQ(b.rgb.b, 0);
+TEST(sgr, underline_color) {
+    ASSERT_TRUE(rgb(PARSE_COLON(58, 2, 1, 2, 3), T::underline_color, 1, 2, 3));
+    ASSERT_TRUE(rgb(PARSE_COLON(58, 2, 0, 1, 2, 3), T::underline_color, 1, 2, 3));
 }
 
-TEST(sgr, direct_color_colon_form_skips_colorspace) {
-    /* 38:2::R:G:B — the empty slot after 2 is a colorspace id, ignored. */
-    const uint16_t p[] = {38, 2, 0, 1, 2, 3};
-    const uint8_t colons[] = {0, 1, 1, 1, 1, 1};
-    Attribute a;
-    ASSERT_TRUE(one(p, 6, &a, colons));
-    ASSERT_TRUE(a.tag == AttributeTag::direct_color_fg);
-    ASSERT_EQ(a.rgb.r, 1);
-    ASSERT_EQ(a.rgb.g, 2);
-    ASSERT_EQ(a.rgb.b, 3);
+TEST(sgr, reset_underline_color) {
+    static const uint16_t params[] = { 59 };
+    Parser p(params, 1);
+    ASSERT_TRUE(is(p, T::reset_underline_color));
 }
 
-TEST(sgr, component_above_255_is_rejected) {
-    const uint16_t p[] = {38, 2, 300, 0, 0};
-    Attribute a;
-    ASSERT_TRUE(one(p, 5, &a));
-    ASSERT_TRUE(a.tag == AttributeTag::unknown);
+TEST(sgr, invisible) {
+    static const uint16_t params[] = { 8, 28 };
+    Parser p(params, 2);
+    ASSERT_TRUE(is(p, T::invisible));
+    ASSERT_TRUE(is(p, T::reset_invisible));
 }
 
-TEST(sgr, malformed_color_does_not_leak_a_reset) {
-    /* The tail of a rejected extended-color sequence must be consumed with
-     * it. If it were reparsed, the trailing 0 here would be read as SGR 0 and
-     * reset every attribute — a bad color must not clear unrelated styling. */
-    const uint16_t p[] = {38, 2, 300, 0, 0};
-    SgrParser parser(p, 5, nullptr);
-
-    Attribute a;
-    ASSERT_TRUE(parser.next(&a));
-    ASSERT_TRUE(a.tag == AttributeTag::unknown);
-
-    /* Nothing further, and in particular no unset. */
-    ASSERT_FALSE(parser.next(&a));
+TEST(sgr, underline_bg_and_fg) {
+    static const uint16_t params[] = { 4, 38, 2, 255, 247, 219, 48, 2, 242, 93, 147, 4 };
+    Parser p(params, 12);
+    Attribute v;
+    ASSERT_TRUE(p.next(&v) && v.tag == T::underline && v.underline == Attribute::Underline::single);
+    ASSERT_TRUE(p.next(&v) && rgb(v, T::direct_color_fg, 255, 247, 219));
+    ASSERT_TRUE(p.next(&v) && rgb(v, T::direct_color_bg, 242, 93, 147));
+    ASSERT_TRUE(p.next(&v) && v.tag == T::underline && v.underline == Attribute::Underline::single);
 }
 
-TEST(sgr, malformed_color_still_allows_later_attributes) {
-    /* Consuming the bad sequence must not swallow what legitimately follows. */
-    const uint16_t p[] = {38, 2, 300, 0, 0, 1};
-    SgrParser parser(p, 6, nullptr);
-
-    Attribute a;
-    ASSERT_TRUE(parser.next(&a));
-    ASSERT_TRUE(a.tag == AttributeTag::unknown);
-
-    ASSERT_TRUE(parser.next(&a));
-    ASSERT_TRUE(a.tag == AttributeTag::bold);
-
-    ASSERT_FALSE(parser.next(&a));
+TEST(sgr, direct_color_fg_missing_color) {
+    /* This used to crash */
+    static const uint16_t params[] = { 38, 5 };
+    Parser p(params, 2);
+    Attribute v;
+    while (p.next(&v)) {}
 }
 
-TEST(sgr, palette_index_above_255_is_rejected) {
-    const uint16_t p[] = {38, 5, 256};
-    Attribute a;
-    ASSERT_TRUE(one(p, 3, &a));
-    ASSERT_TRUE(a.tag == AttributeTag::unknown);
+TEST(sgr, direct_color_bg_missing_color) {
+    /* This used to crash */
+    static const uint16_t params[] = { 48, 5 };
+    Parser p(params, 2);
+    Attribute v;
+    while (p.next(&v)) {}
 }
 
-TEST(sgr, truncated_extended_color_is_unknown) {
-    const uint16_t p[] = {38, 2, 10};   /* missing g and b */
-    Attribute a;
-    ASSERT_TRUE(one(p, 3, &a));
-    ASSERT_TRUE(a.tag == AttributeTag::unknown);
+TEST(sgr, direct_fg_bg_underline_ignore_optional_color_space) {
+    /* These behaviors have been verified against xterm. */
 
-    const uint16_t q[] = {38};          /* missing everything */
-    Attribute b;
-    ASSERT_TRUE(one(q, 1, &b));
-    ASSERT_TRUE(b.tag == AttributeTag::unknown);
+    /* Colon version should skip the optional color space identifier */
+    /* 3 8 : 2 : Pi : Pr : Pg : Pb */
+    ASSERT_TRUE(rgb(PARSE_COLON(38, 2, 0, 1, 2, 3), T::direct_color_fg, 1, 2, 3));
+    /* 4 8 : 2 : Pi : Pr : Pg : Pb */
+    ASSERT_TRUE(rgb(PARSE_COLON(48, 2, 0, 1, 2, 3), T::direct_color_bg, 1, 2, 3));
+    /* 5 8 : 2 : Pi : Pr : Pg : Pb */
+    ASSERT_TRUE(rgb(PARSE_COLON(58, 2, 0, 1, 2, 3), T::underline_color, 1, 2, 3));
+
+    /* Semicolon version should not parse optional color space identifier */
+    /* 3 8 ; 2 ; Pr ; Pg ; Pb */
+    ASSERT_TRUE(rgb(PARSE(38, 2, 0, 1, 2, 3), T::direct_color_fg, 0, 1, 2));
+    /* 4 8 ; 2 ; Pr ; Pg ; Pb */
+    ASSERT_TRUE(rgb(PARSE(48, 2, 0, 1, 2, 3), T::direct_color_bg, 0, 1, 2));
+    /* 5 8 ; 2 ; Pr ; Pg ; Pb */
+    ASSERT_TRUE(rgb(PARSE(58, 2, 0, 1, 2, 3), T::underline_color, 0, 1, 2));
 }
 
-TEST(sgr, underline_color_58) {
-    const uint16_t pal[] = {58, 5, 42};
-    Attribute a;
-    ASSERT_TRUE(one(pal, 3, &a));
-    ASSERT_TRUE(a.tag == AttributeTag::underline_color_256);
-    ASSERT_EQ(a.idx, 42);
+TEST(sgr, direct_fg_colon_with_too_many_colons) {
+    static const uint16_t params[] = { 38, 2, 0, 1, 2, 3, 4, 1 };
+    SepList list;
+    for (size_t i = 0; i < 6; i++) list.set(i);
+    Parser p(params, 8, list);
 
-    const uint16_t rgb[] = {58, 2, 1, 2, 3};
-    Attribute b;
-    ASSERT_TRUE(one(rgb, 5, &b));
-    ASSERT_TRUE(b.tag == AttributeTag::underline_color);
-    ASSERT_EQ(b.rgb.r, 1);
-    ASSERT_EQ(b.rgb.b, 3);
+    ASSERT_TRUE(is(p, T::unknown));
+    ASSERT_TRUE(is(p, T::bold));
+    ASSERT_TRUE(done(p));
 }
 
-/* ─── sequences ──────────────────────────────────────────────────────────── */
+TEST(sgr, direct_fg_colon_with_colorspace_and_extra_param) {
+    static const uint16_t params[] = { 38, 2, 0, 1, 2, 3, 1 };
+    SepList list;
+    for (size_t i = 0; i < 5; i++) list.set(i);
+    Parser p(params, 7, list);
 
-TEST(sgr, multiple_attributes_in_one_sequence) {
-    /* CSI 1;4;31 m — bold, underline, red foreground. */
-    const uint16_t p[] = {1, 4, 31};
-    SgrParser parser(p, 3, nullptr);
+    Attribute v;
+    ASSERT_TRUE(p.next(&v) && rgb(v, T::direct_color_fg, 1, 2, 3));
 
-    Attribute a;
-    ASSERT_TRUE(parser.next(&a));
-    ASSERT_TRUE(a.tag == AttributeTag::bold);
-
-    ASSERT_TRUE(parser.next(&a));
-    ASSERT_TRUE(a.tag == AttributeTag::underline);
-    ASSERT_TRUE(a.underline == Underline::single);
-
-    ASSERT_TRUE(parser.next(&a));
-    ASSERT_TRUE(a.tag == AttributeTag::fg_8);
-    ASSERT_EQ(a.idx, 1);
-
-    ASSERT_FALSE(parser.next(&a));
+    ASSERT_TRUE(is(p, T::bold));
+    ASSERT_TRUE(done(p));
 }
 
-TEST(sgr, extended_color_then_more_attributes) {
-    /* The extended form must consume exactly its own parameters. */
-    const uint16_t p[] = {38, 5, 9, 1};
-    SgrParser parser(p, 4, nullptr);
+TEST(sgr, direct_fg_colon_no_colorspace_and_extra_param) {
+    static const uint16_t params[] = { 38, 2, 1, 2, 3, 1 };
+    SepList list;
+    for (size_t i = 0; i < 4; i++) list.set(i);
+    Parser p(params, 6, list);
 
-    Attribute a;
-    ASSERT_TRUE(parser.next(&a));
-    ASSERT_TRUE(a.tag == AttributeTag::fg_256);
-    ASSERT_EQ(a.idx, 9);
+    Attribute v;
+    ASSERT_TRUE(p.next(&v) && rgb(v, T::direct_color_fg, 1, 2, 3));
 
-    ASSERT_TRUE(parser.next(&a));
-    ASSERT_TRUE(a.tag == AttributeTag::bold);
-
-    ASSERT_FALSE(parser.next(&a));
+    ASSERT_TRUE(is(p, T::bold));
+    ASSERT_TRUE(done(p));
 }
 
-TEST(sgr, unknown_code_reports_span_and_continues) {
-    const uint16_t p[] = {1, 12345, 1};
-    SgrParser parser(p, 3, nullptr);
+/* Kakoune sent this complex SGR sequence that caused invalid behavior. */
+TEST(sgr, kakoune_input) {
+    /* This used to crash */
+    static const uint16_t params[] = { 0, 4, 3, 38, 2, 175, 175, 215, 58, 2, 0, 190, 80, 70 };
+    SepList list;
+    list.set(1);
+    list.set(8);
+    list.set(9);
+    list.set(10);
+    list.set(11);
+    list.set(12);
+    Parser p(params, 14, list);
 
-    Attribute a;
-    ASSERT_TRUE(parser.next(&a));
-    ASSERT_TRUE(a.tag == AttributeTag::bold);
+    Attribute v;
+    ASSERT_TRUE(p.next(&v) && v.tag == T::unset);
+    ASSERT_TRUE(p.next(&v) && v.tag == T::underline && v.underline == Attribute::Underline::curly);
+    ASSERT_TRUE(p.next(&v) && rgb(v, T::direct_color_fg, 175, 175, 215));
+    ASSERT_TRUE(p.next(&v) && rgb(v, T::underline_color, 190, 80, 70));
 
-    ASSERT_TRUE(parser.next(&a));
-    ASSERT_TRUE(a.tag == AttributeTag::unknown);
-    ASSERT_EQ(a.unknown_start, 1);
-    ASSERT_EQ(a.unknown_len, 1);
-
-    /* Parsing recovers rather than abandoning the rest. */
-    ASSERT_TRUE(parser.next(&a));
-    ASSERT_TRUE(a.tag == AttributeTag::bold);
-
-    ASSERT_FALSE(parser.next(&a));
+    /* try testing.expect(p.next() == null); */
 }
 
-TEST(sgr, stray_colon_parameter_is_unknown) {
-    /* A colon is only meaningful after 4, 38, 48 or 58. */
-    const uint16_t p[] = {1, 2};
-    const uint8_t colons[] = {1, 0};
-    SgrParser parser(p, 2, colons);
+/* Discussion #5930, another input sent by kakoune */
+TEST(sgr, kakoune_input_issue_underline_fg_and_bg) {
+    /* echo -e "\033[4:3;38;2;51;51;51;48;2;170;170;170;58;2;255;97;136mset everything in one sequence, broken\033[m" */
 
-    Attribute a;
-    ASSERT_TRUE(parser.next(&a));
-    ASSERT_TRUE(a.tag == AttributeTag::unknown);
+    /* This used to crash */
+    static const uint16_t params[] = { 4, 3, 38, 2, 51, 51, 51, 48, 2, 170, 170, 170, 58, 2, 255, 97, 136 };
+    SepList list;
+    list.set(0);
+    Parser p(params, 17, list);
+
+    Attribute v;
+    ASSERT_TRUE(p.next(&v) && v.tag == T::underline && v.underline == Attribute::Underline::curly);
+    ASSERT_TRUE(p.next(&v) && rgb(v, T::direct_color_fg, 51, 51, 51));
+    ASSERT_TRUE(p.next(&v) && rgb(v, T::direct_color_bg, 170, 170, 170));
+    ASSERT_TRUE(p.next(&v) && rgb(v, T::underline_color, 255, 97, 136));
+
+    ASSERT_TRUE(done(p));
+}
+
+/* Fuzz crash: afl-out/stream/default/crashes/id:000021
+ * Input "ESC [ 5 8 : 4 : m" produces params [58, 4] with colon
+ * separator bits set at indices 0 and 1. The trailing colon causes
+ * the second iteration to see param 4 (underline) with a colon,
+ * triggering assert(slice.len >= 2) with slice.len == 1. */
+TEST(sgr, underline_colon_with_trailing_separator_and_short_slice) {
+    static const uint16_t params[] = { 58, 4 };
+    SepList list;
+    list.set(0);
+    list.set(1);
+    Parser p(params, 2, list);
+
+    /* 58:4 is not a valid underline color (sub-param 4 is not 2 or 5),
+     * so it falls through as unknown. */
+    ASSERT_TRUE(is(p, T::unknown));
+
+    /* Param 4 with a trailing colon but no sub-param is malformed,
+     * so it also falls through as unknown rather than panicking. */
+    ASSERT_TRUE(is(p, T::unknown));
+
+    ASSERT_TRUE(done(p));
 }

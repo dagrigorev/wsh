@@ -232,7 +232,8 @@ inline void stream_init(Stream *s, Terminal *t) {
  *
  * The style is the cursor's rather than the screen's because it is a property
  * of what will be written next, not of anything already on the screen. */
-inline void stream_apply_sgr(Terminal *t, const Attribute &a) {
+inline void stream_apply_sgr(Terminal *t, const sgr::Attribute &a) {
+    typedef sgr::Attribute::Tag AttributeTag;
     style::Style &st = t->active->cursor.style;
 
     switch (a.tag) {
@@ -260,7 +261,7 @@ inline void stream_apply_sgr(Terminal *t, const Attribute &a) {
             break;
         case AttributeTag::underline_color_256:
             st.underline_color.tag = style::StyleColor::Tag::palette;
-            st.underline_color.palette = a.idx;
+            st.underline_color.palette = a.index;
             break;
         case AttributeTag::reset_underline_color:
             st.underline_color.tag = style::StyleColor::Tag::none;
@@ -294,16 +295,22 @@ inline void stream_apply_sgr(Terminal *t, const Attribute &a) {
 
         case AttributeTag::fg_8:
         case AttributeTag::bright_fg_8:
+            st.fg_color.tag = style::StyleColor::Tag::palette;
+            st.fg_color.palette = (uint8_t)a.name;
+            break;
         case AttributeTag::fg_256:
             st.fg_color.tag = style::StyleColor::Tag::palette;
-            st.fg_color.palette = a.idx;
+            st.fg_color.palette = a.index;
             break;
 
         case AttributeTag::bg_8:
         case AttributeTag::bright_bg_8:
+            st.bg_color.tag = style::StyleColor::Tag::palette;
+            st.bg_color.palette = (uint8_t)a.name;
+            break;
         case AttributeTag::bg_256:
             st.bg_color.tag = style::StyleColor::Tag::palette;
-            st.bg_color.palette = a.idx;
+            st.bg_color.palette = a.index;
             break;
 
         case AttributeTag::reset_fg:
@@ -469,18 +476,8 @@ inline void stream_csi(Terminal *t, const CsiView &a) {
         }
 
         case 'm': {
-            /* The colon flags are a bitmask here and one byte per parameter
-             * there, because sgr.hpp was written before the parser existed
-             * and takes what was convenient to give it then. */
-            uint8_t colons[parser::MAX_PARAMS];
-            for (size_t i = 0; i < parser::MAX_PARAMS; i++) {
-                /* Upstream marks the separator after a parameter; sgr.hpp
-                 * asks whether a parameter was joined to the one before. */
-                colons[i] = (i > 0 && a.params_sep.isSet(i - 1)) ? 1 : 0;
-            }
-
-            SgrParser p(a.params, a.param_count, colons);
-            Attribute attr;
+            sgr::Parser p(a.params, a.param_count, a.params_sep);
+            sgr::Attribute attr;
             while (p.next(&attr)) stream_apply_sgr(t, attr);
             break;
         }
