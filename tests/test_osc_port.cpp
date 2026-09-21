@@ -428,3 +428,67 @@ TEST(clipboard_operation, OSC_52_clear_clipboard) {
     ASSERT_TRUE(cmd->clipboard_contents.kind == 'c');
     ASSERT_TRUE(cmd->clipboard_contents.data.eql(""));
 }
+
+/* rxvt_extension.zig */
+
+TEST(rxvt_extension, OSC_777_show_desktop_notification_with_title) {
+    Parser p; /* .init(null) */
+
+    const char *input = "777;notify;Title;Body";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+
+    Command *cmd = p.end('\x1b');
+    ASSERT_TRUE(cmd != nullptr);
+    ASSERT_TRUE(cmd->key == Command::Key::show_desktop_notification);
+    ASSERT_TRUE(cmd->show_desktop_notification.title.eql("Title"));
+    ASSERT_TRUE(cmd->show_desktop_notification.body.eql("Body"));
+}
+
+/* kitty_dnd_protocol.zig */
+
+static Command *feed_end(Parser &p, const char *input, bool has_ch, uint8_t ch) {
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    return has_ch ? p.end(ch) : p.end();
+}
+
+TEST(kitty_dnd_protocol, OSC_72_metadata_only_no_payload) {
+    Parser p(true);
+    Command *cmd = feed_end(p, "72;t=a", true, '\x1b');
+    ASSERT_TRUE(cmd && cmd->key == Command::Key::kitty_dnd_protocol);
+    ASSERT_TRUE(cmd->kitty_dnd_protocol.metadata.eql("t=a"));
+    ASSERT_FALSE(cmd->kitty_dnd_protocol.has_payload);
+}
+
+TEST(kitty_dnd_protocol, OSC_72_metadata_and_empty_payload) {
+    Parser p(true);
+    Command *cmd = feed_end(p, "72;t=a;", true, '\x1b');
+    ASSERT_TRUE(cmd && cmd->key == Command::Key::kitty_dnd_protocol);
+    ASSERT_TRUE(cmd->kitty_dnd_protocol.metadata.eql("t=a"));
+    ASSERT_TRUE(cmd->kitty_dnd_protocol.has_payload);
+    ASSERT_TRUE(cmd->kitty_dnd_protocol.payload.eql(""));
+}
+
+TEST(kitty_dnd_protocol, OSC_72_metadata_and_non_empty_payload) {
+    Parser p(true);
+    Command *cmd = feed_end(p, "72;t=a:i=5;text/plain text/uri-list", true, '\x1b');
+    ASSERT_TRUE(cmd && cmd->key == Command::Key::kitty_dnd_protocol);
+    ASSERT_TRUE(cmd->kitty_dnd_protocol.metadata.eql("t=a:i=5"));
+    ASSERT_TRUE(cmd->kitty_dnd_protocol.has_payload);
+    ASSERT_TRUE(cmd->kitty_dnd_protocol.payload.eql("text/plain text/uri-list"));
+}
+
+TEST(kitty_dnd_protocol, OSC_72_empty_metadata_with_payload) {
+    Parser p(true);
+    Command *cmd = feed_end(p, "72;;payload", true, '\x1b');
+    ASSERT_TRUE(cmd && cmd->key == Command::Key::kitty_dnd_protocol);
+    ASSERT_TRUE(cmd->kitty_dnd_protocol.metadata.eql(""));
+    ASSERT_TRUE(cmd->kitty_dnd_protocol.has_payload);
+    ASSERT_TRUE(cmd->kitty_dnd_protocol.payload.eql("payload"));
+}
+
+TEST(kitty_dnd_protocol, OSC_72_BEL_terminator_recorded) {
+    Parser p(true);
+    Command *cmd = feed_end(p, "72;t=q", true, 0x07);
+    ASSERT_TRUE(cmd && cmd->key == Command::Key::kitty_dnd_protocol);
+    ASSERT_TRUE(cmd->kitty_dnd_protocol.terminator == Terminator::bel);
+}

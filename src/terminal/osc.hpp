@@ -357,6 +357,26 @@ struct Command {
         Terminator       terminator;   /* = .st */
     } color_operation;
 
+    /* Kitty's drag and drop protocol (OSC 72), osc/parsers/kitty_dnd_protocol.zig
+     * OSC. Only the raw metadata and payload are captured. */
+    struct {
+        /* The raw metadata that was received. */
+        ZStr metadata;
+        /* The raw payload. Null (has_payload false) when the OSC had no
+         * `;` after the metadata; an empty payload is distinct from no
+         * payload. */
+        bool has_payload;
+        ZStr payload;
+        /* The terminator used for this OSC, so any response can match it. */
+        Terminator terminator;
+    } kitty_dnd_protocol;
+
+    /* Show a desktop notification (OSC 9 or OSC 777) */
+    struct {
+        ZStr title;
+        ZStr body;
+    } show_desktop_notification;
+
     /* Start a hyperlink (OSC 8) */
     struct {
         bool has_id;   /* Wisp: id: ?[:0]const u8 = null */
@@ -1104,6 +1124,82 @@ inline Command *parse(Parser *parser, bool has_ch, uint8_t terminator_ch) {
 }
 } /* namespace clipboard_operation */
 
+namespace kitty_dnd_protocol {
+inline Command *parse(Parser *parser, bool has_ch, uint8_t terminator_ch) {
+    /* assert(parser.state == .@"72") */
+    if (!parser->has_capture) {
+        parser->state = Parser::State::invalid;
+        return nullptr;
+    }
+    Parser::Capture *cap = &parser->capture;
+
+    const char *data = cap->trailing();
+    const size_t data_len = cap->trailing_len();
+
+    ZStr metadata(data, data_len);
+    bool has_payload = false;
+    ZStr payload;
+    const char *sep = (const char *)memchr(data, ';', data_len);
+    if (sep) {
+        const size_t i = (size_t)(sep - data);
+        metadata = ZStr(data, i);
+        has_payload = true;
+        payload = ZStr(data + i + 1, data_len - (i + 1));
+    }
+
+    parser->command = Command();
+    parser->command.key = Command::Key::kitty_dnd_protocol;
+    parser->command.kitty_dnd_protocol.metadata = metadata;
+    parser->command.kitty_dnd_protocol.has_payload = has_payload;
+    parser->command.kitty_dnd_protocol.payload = payload;
+    parser->command.kitty_dnd_protocol.terminator = terminator_init(has_ch, terminator_ch);
+
+    return &parser->command;
+}
+} /* namespace kitty_dnd_protocol */
+
+namespace rxvt_extension {
+/* Parse OSC 777 */
+inline Command *parse(Parser *parser, bool, uint8_t) {
+    if (!parser->has_capture) {
+        parser->state = Parser::State::invalid;
+        return nullptr;
+    }
+    Parser::Capture *cap = &parser->capture;
+    /* ensure that we are sentinel terminated */
+    if (!cap->writer.writeByte(0)) {
+        parser->state = Parser::State::invalid;
+        return nullptr;
+    }
+    char *data = cap->trailing();
+    const size_t data_len = cap->trailing_len();
+    const char *semi = (const char *)memchr(data, ';', data_len);
+    if (!semi) {
+        parser->state = Parser::State::invalid;
+        return nullptr;
+    }
+    const size_t k = (size_t)(semi - data);
+    if (!(k == 6 && memcmp(data, "notify", 6) == 0)) {
+        /* log.warn("unknown rxvt extension: {s}") */
+        parser->state = Parser::State::invalid;
+        return nullptr;
+    }
+    const char *semi2 = (const char *)memchr(data + k + 1, ';', data_len - (k + 1));
+    if (!semi2) {
+        /* log.warn("rxvt notify extension is missing the title") */
+        parser->state = Parser::State::invalid;
+        return nullptr;
+    }
+    const size_t t = (size_t)(semi2 - data);
+    data[t] = 0;
+    parser->command = Command();
+    parser->command.key = Command::Key::show_desktop_notification;
+    parser->command.show_desktop_notification.title = ZStr(data + k + 1, t - (k + 1));
+    parser->command.show_desktop_notification.body = ZStr(data + t + 1, data_len - 1 - (t + 1));
+    return &parser->command;
+}
+} /* namespace rxvt_extension */
+
 namespace color {
 
 using ::wisp::terminal::osc::color::Operation;
@@ -1483,8 +1579,8 @@ inline Command *Parser::end(bool has_ch, uint8_t ch) {
         /* Wisp: parsers.kitty_text_sizing — not yet transliterated. */
         case S::s66: return nullptr;
 
-        /* Wisp: parsers.kitty_dnd_protocol — not yet transliterated. */
-        case S::s72: return nullptr;
+        case S::s72:
+            return parsers::kitty_dnd_protocol::parse(this, has_ch, ch);
 
         case S::s77: return nullptr;
 
@@ -1497,8 +1593,7 @@ inline Command *Parser::end(bool has_ch, uint8_t ch) {
 
         case S::s552: return nullptr;
 
-        /* Wisp: parsers.rxvt_extension — not yet transliterated. */
-        case S::s777: return nullptr;
+        case S::s777: return parsers::rxvt_extension::parse(this, has_ch, ch);
 
         /* Wisp: parsers.iterm2 — not yet transliterated. */
         case S::s1337: return nullptr;
