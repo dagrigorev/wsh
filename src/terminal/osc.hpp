@@ -3,7 +3,8 @@
  * change_window_title.zig, change_window_icon.zig, hyperlink.zig,
  * report_pwd.zig, mouse_shape.zig, clipboard_operation.zig, color.zig,
  * kitty_color.zig, kitty_dnd_protocol.zig, rxvt_extension.zig,
- * kitty_text_sizing.zig, context_signal.zig, iterm2.zig
+ * kitty_text_sizing.zig, context_signal.zig, iterm2.zig,
+ * kitty_clipboard_protocol.zig, and src/terminal/osc/kitty_metadata.zig
  * Copyright (c) 2024 Mitchell Hashimoto, Ghostty contributors
  * MIT License — see THIRD_PARTY_NOTICES.md
  *
@@ -26,7 +27,7 @@
  *
  * Wisp: PARSERS NOT YET TRANSLITERATED. osc/parsers/ holds one file per
  * command family. Only the ones named above are here; the rest — osc9,
- * kitty_clipboard_protocol, kitty_desktop_notification,
+ * kitty_desktop_notification,
  * and semantic_prompt — arrive in
  * later slices. Until then end() returns null for their states, exactly as
  * it would for an invalid sequence, and Command keeps a tag for each so the
@@ -542,6 +543,240 @@ struct Command {
 
 } /* namespace context_signal */
 
+/* ─── osc/kitty_metadata.zig ────────────────────────────────────────────── */
+
+/* Helpers for parsing metadata shared by Kitty OSC protocols.
+ *
+ * Kitty OSC 99 and OSC 5522 encode metadata as colon-separated `key=value`
+ * fields. The iterator in this module lazily searches that metadata for one
+ * key, preserving the order of repeated values without allocating.
+ *
+ * Parsing is intentionally tolerant. Whitespace around keys and values is
+ * trimmed, while malformed fields, non-matching keys, and invalid values are
+ * skipped. Returned values are slices of the original metadata and remain
+ * valid only as long as that input remains valid. */
+namespace kitty_metadata {
+
+/* Wisp: std.ascii.whitespace */
+inline bool is_ascii_whitespace(char c) {
+    return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == 0x0b || c == 0x0c;
+}
+
+/* Return an iterator over values whose key exactly matches `key`.
+ *
+ * If `valid_value_characters` is non-null, every byte in a returned value must
+ * appear in that character set. Passing null disables value validation.
+ *
+ * Wisp: upstream makes key and validator comptime parameters of the type;
+ * here they are runtime fields. */
+struct ValueIterator {
+    const char *key;
+    const char *valid_value_characters;   /* nullptr: no validation */
+    const char *metadata;
+    size_t      metadata_len;
+    size_t      pos;
+
+    /* Initialize an iterator borrowing `metadata`. */
+    ValueIterator(const char *key_, const char *valid, const char *md, size_t md_len)
+        : key(key_), valid_value_characters(valid), metadata(md),
+          metadata_len(md_len), pos(0) {}
+
+    /* Return the next valid matching value, or null when none remain.
+     * The returned slice borrows the metadata passed to `init`. */
+    bool next(ZStr *out) {
+        const size_t key_len = strlen(key);
+        while (pos < metadata_len) {
+            const char *colon = (const char *)memchr(metadata + pos, ':', metadata_len - pos);
+            const size_t end = colon ? (size_t)(colon - metadata) : metadata_len;
+            const char *field = metadata + pos;
+            const size_t field_len = end - pos;
+            pos = end < metadata_len ? end + 1 : end;
+
+            const char *eq = (const char *)memchr(field, '=', field_len);
+            if (!eq) continue;
+            const size_t equals = (size_t)(eq - field);
+
+            const char *k = field;
+            size_t k_len = equals;
+            while (k_len > 0 && is_ascii_whitespace(k[0])) { k++; k_len--; }
+            while (k_len > 0 && is_ascii_whitespace(k[k_len - 1])) k_len--;
+            if (!(k_len == key_len && memcmp(k, key, key_len) == 0)) continue;
+
+            const char *v = field + equals + 1;
+            size_t v_len = field_len - equals - 1;
+            while (v_len > 0 && is_ascii_whitespace(v[0])) { v++; v_len--; }
+            while (v_len > 0 && is_ascii_whitespace(v[v_len - 1])) v_len--;
+            if (valid_value_characters) {
+                bool ok = true;
+                for (size_t i = 0; i < v_len; i++) {
+                    if (!strchr(valid_value_characters, v[i]) || v[i] == 0) { ok = false; break; }
+                }
+                if (!ok) continue;
+            }
+
+            *out = ZStr(v, v_len);
+            return true;
+        }
+
+        return false;
+    }
+};
+
+} /* namespace kitty_metadata */
+
+/* ─── osc/parsers/kitty_clipboard_protocol.zig: types ──────────────────── */
+
+/* Kitty's clipboard protocol (OSC 5522)
+ * Specification: https://sw.kovidgoyal.net/kitty/clipboard/
+ * https://rockorager.dev/misc/bracketed-paste-mime/ */
+namespace kitty_clipboard_protocol {
+
+/* Wisp: std.meta.stringToEnum over a name table. */
+inline bool name_to_index(const char *const *names, size_t count,
+                          const char *s, size_t len, size_t *out) {
+    for (size_t i = 0; i < count; i++) {
+        if (strlen(names[i]) == len && memcmp(names[i], s, len) == 0) {
+            *out = i;
+            return true;
+        }
+    }
+    return false;
+}
+
+enum class Location : uint8_t {
+    primary,
+};
+
+inline bool Location_init(const char *str, size_t len, Location *out) {
+    static const char *const names[] = { "primary" };
+    size_t i;
+    if (!name_to_index(names, 1, str, len, &i)) return false;
+    *out = (Location)i;
+    return true;
+}
+
+enum class Operation : uint8_t {
+    read,
+    walias,
+    wdata,
+    write,
+};
+
+inline bool Operation_init(const char *str, size_t len, Operation *out) {
+    static const char *const names[] = { "read", "walias", "wdata", "write" };
+    size_t i;
+    if (!name_to_index(names, 4, str, len, &i)) return false;
+    *out = (Operation)i;
+    return true;
+}
+
+/* Wisp: errno.h defines EBUSY, EFBIG, EINVAL, EIO, ENOSYS and EPERM as
+ * macros, so those members carry a trailing underscore. */
+enum class Status : uint8_t {
+    DATA,
+    DONE,
+    EBUSY_,
+    EFBIG_,
+    EINVAL_,
+    EIO_,
+    ENOSYS_,
+    EPERM_,
+    OK,
+};
+
+inline bool Status_init(const char *str, size_t len, Status *out) {
+    static const char *const names[] = {
+        "DATA", "DONE", "EBUSY", "EFBIG", "EINVAL", "EIO", "ENOSYS", "EPERM", "OK",
+    };
+    size_t i;
+    if (!name_to_index(names, 9, str, len, &i)) return false;
+    *out = (Status)i;
+    return true;
+}
+
+enum class Option : uint8_t {
+    id,
+    loc,
+    mime,
+    name,
+    password,
+    pw,
+    status,
+    type,
+};
+
+inline const char *Option_name(Option o) {
+    static const char *const names[] = {
+        "id", "loc", "mime", "name", "password", "pw", "status", "type",
+    };
+    return names[(size_t)o];
+}
+
+/* Characters that are valid in identifiers. */
+static const char valid_identifier_characters[] =
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_+.";
+
+inline bool isValidIdentifier(const char *str, size_t len) {
+    if (len == 0) return false;
+    for (size_t i = 0; i < len; i++) {
+        if (str[i] == 0 || !strchr(valid_identifier_characters, str[i])) return false;
+    }
+    return true;
+}
+
+struct OSC {
+    /* The raw metadata that was received. It can be parsed by using the
+     * `readOption` method. */
+    ZStr metadata;
+    /* The raw payload. It may be Base64 encoded, check the `e` option.
+     * Wisp: ?[]const u8 is has_payload plus payload. */
+    bool has_payload;
+    ZStr payload;
+    /* The terminator that was used in case we need to send a response. */
+    Terminator terminator;
+
+    OSC() : metadata(), has_payload(false), payload(), terminator(Terminator::st) {}
+
+    /* Decode an option from the metadata.
+     *
+     * Wisp: key.Type() depends on the option, so there is one reader per
+     * type: the string options (.id, .mime, .name, .password, .pw), .loc,
+     * .status and .type. Each returns false for null. Option.read takes only
+     * the first matching value and returns null if it does not parse. */
+    bool readString(Option key, ZStr *out) const {
+        /* assert(key is .id, .mime, .name, .password or .pw) */
+        kitty_metadata::ValueIterator it(Option_name(key), nullptr, metadata.ptr, metadata.len);
+        ZStr value;
+        if (!it.next(&value)) return false;
+        if (key == Option::id) {
+            /* parseIdentifier */
+            if (!isValidIdentifier(value.ptr, value.len)) return false;
+        }
+        *out = value;
+        return true;
+    }
+    bool readLoc(Location *out) const {
+        kitty_metadata::ValueIterator it("loc", nullptr, metadata.ptr, metadata.len);
+        ZStr value;
+        if (!it.next(&value)) return false;
+        return Location_init(value.ptr, value.len, out);
+    }
+    bool readStatus(Status *out) const {
+        kitty_metadata::ValueIterator it("status", nullptr, metadata.ptr, metadata.len);
+        ZStr value;
+        if (!it.next(&value)) return false;
+        return Status_init(value.ptr, value.len, out);
+    }
+    bool readType(Operation *out) const {
+        kitty_metadata::ValueIterator it("type", nullptr, metadata.ptr, metadata.len);
+        ZStr value;
+        if (!it.next(&value)) return false;
+        return Operation_init(value.ptr, value.len, out);
+    }
+};
+
+} /* namespace kitty_clipboard_protocol */
+
 struct Command {
     /* NOTE: Order matters, see LibEnum documentation. */
     enum class Key : uint8_t {
@@ -653,6 +888,9 @@ struct Command {
          * request. */
         Terminator terminator;   /* = .st */
     } kitty_color_protocol;
+
+    /* Kitty clipboard protocol (OSC 5522) */
+    kitty_clipboard_protocol::OSC kitty_clipboard_protocol;
 
     /* OSC 3008: hierarchical context signalling */
     context_signal::Command context_signal;
@@ -1886,6 +2124,40 @@ inline Command *parse(Parser *parser, bool, uint8_t) {
 }
 } /* namespace iterm2 */
 
+namespace kitty_clipboard_protocol {
+inline Command *parse(Parser *parser, bool has_ch, uint8_t terminator_ch) {
+    /* assert(parser.state == .@"5522") */
+    if (!parser->has_capture) {
+        parser->state = Parser::State::invalid;
+        return nullptr;
+    }
+    Parser::Capture *cap = &parser->capture;
+
+    const char *data = cap->trailing();
+    const size_t data_len = cap->trailing_len();
+
+    ZStr metadata(data, data_len);
+    bool has_payload = false;
+    ZStr payload;
+    const char *semi = (const char *)memchr(data, ';', data_len);
+    if (semi) {
+        const size_t start = (size_t)(semi - data);
+        metadata = ZStr(data, start);
+        has_payload = true;
+        payload = ZStr(data + start + 1, data_len - (start + 1));
+    }
+
+    parser->command = Command();
+    parser->command.key = Command::Key::kitty_clipboard_protocol;
+    parser->command.kitty_clipboard_protocol.metadata = metadata;
+    parser->command.kitty_clipboard_protocol.has_payload = has_payload;
+    parser->command.kitty_clipboard_protocol.payload = payload;
+    parser->command.kitty_clipboard_protocol.terminator = terminator_init(has_ch, terminator_ch);
+
+    return &parser->command;
+}
+} /* namespace kitty_clipboard_protocol */
+
 namespace kitty_dnd_protocol {
 inline Command *parse(Parser *parser, bool has_ch, uint8_t terminator_ch) {
     /* assert(parser.state == .@"72") */
@@ -2360,8 +2632,8 @@ inline Command *Parser::end(bool has_ch, uint8_t ch) {
         case S::s1337:
             return parsers::iterm2::parse(this, has_ch, ch);
 
-        /* Wisp: parsers.kitty_clipboard_protocol — not yet transliterated. */
-        case S::s5522: return nullptr;
+        case S::s5522:
+            return parsers::kitty_clipboard_protocol::parse(this, has_ch, ch);
     }
     return nullptr;
 }

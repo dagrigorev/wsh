@@ -1012,3 +1012,527 @@ TEST(iterm2, OSC_1337_test_CurrentDir_with_non_empty_value) {
     ASSERT_TRUE(cmd && cmd->key == Command::Key::report_pwd);
     ASSERT_TRUE(cmd->report_pwd.value.eql("abc123"));
 }
+
+/* kitty_clipboard_protocol.zig */
+
+namespace kcp = wisp::terminal::osc::kitty_clipboard_protocol;
+
+TEST(kitty_clipboard_protocol, OSC_5522_empty_metadata_and_missing_payload) {
+    Parser p(true);
+    Command *cmd = feed_end(p, "5522;", true, '\x1b');
+    ASSERT_TRUE(cmd && cmd->key == Command::Key::kitty_clipboard_protocol);
+    const kcp::OSC &k = cmd->kitty_clipboard_protocol;
+    ZStr v;
+    kcp::Location loc;
+    kcp::Status st;
+    kcp::Operation op;
+    (void)v; (void)loc; (void)st; (void)op;
+    ASSERT_TRUE(k.metadata.eql(""));
+    ASSERT_FALSE(k.has_payload);
+    ASSERT_FALSE(k.readString(kcp::Option::id, &v));
+    ASSERT_FALSE(k.readLoc(&loc));
+    ASSERT_FALSE(k.readString(kcp::Option::mime, &v));
+    ASSERT_FALSE(k.readString(kcp::Option::name, &v));
+    ASSERT_FALSE(k.readString(kcp::Option::password, &v));
+    ASSERT_FALSE(k.readString(kcp::Option::pw, &v));
+    ASSERT_FALSE(k.readStatus(&st));
+    ASSERT_FALSE(k.readType(&op));
+}
+
+TEST(kitty_clipboard_protocol, OSC_5522_empty_metadata_and_empty_payload) {
+    Parser p(true);
+    Command *cmd = feed_end(p, "5522;;", true, '\x1b');
+    ASSERT_TRUE(cmd && cmd->key == Command::Key::kitty_clipboard_protocol);
+    const kcp::OSC &k = cmd->kitty_clipboard_protocol;
+    ZStr v;
+    kcp::Location loc;
+    kcp::Status st;
+    kcp::Operation op;
+    (void)v; (void)loc; (void)st; (void)op;
+    ASSERT_TRUE(k.metadata.eql(""));
+    ASSERT_TRUE(k.has_payload && k.payload.eql(""));
+    ASSERT_FALSE(k.readString(kcp::Option::id, &v));
+    ASSERT_FALSE(k.readLoc(&loc));
+    ASSERT_FALSE(k.readString(kcp::Option::mime, &v));
+    ASSERT_FALSE(k.readString(kcp::Option::name, &v));
+    ASSERT_FALSE(k.readString(kcp::Option::password, &v));
+    ASSERT_FALSE(k.readString(kcp::Option::pw, &v));
+    ASSERT_FALSE(k.readStatus(&st));
+    ASSERT_FALSE(k.readType(&op));
+}
+
+TEST(kitty_clipboard_protocol, OSC_5522_non_empty_metadata_and_payload) {
+    Parser p(true);
+    Command *cmd = feed_end(p, "5522;type=read;dGV4dC9wbGFpbg==", true, '\x1b');
+    ASSERT_TRUE(cmd && cmd->key == Command::Key::kitty_clipboard_protocol);
+    const kcp::OSC &k = cmd->kitty_clipboard_protocol;
+    ZStr v;
+    kcp::Location loc;
+    kcp::Status st;
+    kcp::Operation op;
+    (void)v; (void)loc; (void)st; (void)op;
+    ASSERT_TRUE(k.metadata.eql("type=read"));
+    ASSERT_TRUE(k.has_payload && k.payload.eql("dGV4dC9wbGFpbg=="));
+    ASSERT_FALSE(k.readString(kcp::Option::id, &v));
+    ASSERT_FALSE(k.readLoc(&loc));
+    ASSERT_FALSE(k.readString(kcp::Option::mime, &v));
+    ASSERT_FALSE(k.readString(kcp::Option::name, &v));
+    ASSERT_FALSE(k.readString(kcp::Option::password, &v));
+    ASSERT_FALSE(k.readString(kcp::Option::pw, &v));
+    ASSERT_FALSE(k.readStatus(&st));
+    ASSERT_TRUE(k.readType(&op) && op == kcp::Operation::read);
+}
+
+TEST(kitty_clipboard_protocol, OSC_5522_empty_id) {
+    Parser p(true);
+    Command *cmd = feed_end(p, "5522;id=", true, '\x1b');
+    ASSERT_TRUE(cmd && cmd->key == Command::Key::kitty_clipboard_protocol);
+    const kcp::OSC &k = cmd->kitty_clipboard_protocol;
+    ZStr v;
+    kcp::Location loc;
+    kcp::Status st;
+    kcp::Operation op;
+    (void)v; (void)loc; (void)st; (void)op;
+    ASSERT_FALSE(k.readString(kcp::Option::id, &v));
+}
+
+TEST(kitty_clipboard_protocol, OSC_5522_valid_id) {
+    Parser p(true);
+    Command *cmd = feed_end(p, "5522;id=5c076ad9-d36f-4705-847b-d4dbf356cc0d", true, '\x1b');
+    ASSERT_TRUE(cmd && cmd->key == Command::Key::kitty_clipboard_protocol);
+    const kcp::OSC &k = cmd->kitty_clipboard_protocol;
+    ZStr v;
+    kcp::Location loc;
+    kcp::Status st;
+    kcp::Operation op;
+    (void)v; (void)loc; (void)st; (void)op;
+    ASSERT_TRUE(k.readString(kcp::Option::id, &v) && v.eql("5c076ad9-d36f-4705-847b-d4dbf356cc0d"));
+}
+
+TEST(kitty_clipboard_protocol, OSC_5522_invalid_id) {
+    Parser p(true);
+    Command *cmd = feed_end(p, "5522;id=*42*", true, '\x1b');
+    ASSERT_TRUE(cmd && cmd->key == Command::Key::kitty_clipboard_protocol);
+    const kcp::OSC &k = cmd->kitty_clipboard_protocol;
+    ZStr v;
+    kcp::Location loc;
+    kcp::Status st;
+    kcp::Operation op;
+    (void)v; (void)loc; (void)st; (void)op;
+    ASSERT_FALSE(k.readString(kcp::Option::id, &v));
+}
+
+TEST(kitty_clipboard_protocol, OSC_5522_invalid_status) {
+    Parser p(true);
+    Command *cmd = feed_end(p, "5522;status=BOBR", true, '\x1b');
+    ASSERT_TRUE(cmd && cmd->key == Command::Key::kitty_clipboard_protocol);
+    const kcp::OSC &k = cmd->kitty_clipboard_protocol;
+    ZStr v;
+    kcp::Location loc;
+    kcp::Status st;
+    kcp::Operation op;
+    (void)v; (void)loc; (void)st; (void)op;
+    ASSERT_FALSE(k.readStatus(&st));
+}
+
+TEST(kitty_clipboard_protocol, OSC_5522_valid_status) {
+    Parser p(true);
+    Command *cmd = feed_end(p, "5522;status=DONE", true, '\x1b');
+    ASSERT_TRUE(cmd && cmd->key == Command::Key::kitty_clipboard_protocol);
+    const kcp::OSC &k = cmd->kitty_clipboard_protocol;
+    ZStr v;
+    kcp::Location loc;
+    kcp::Status st;
+    kcp::Operation op;
+    (void)v; (void)loc; (void)st; (void)op;
+    ASSERT_TRUE(k.readStatus(&st) && st == kcp::Status::DONE);
+}
+
+TEST(kitty_clipboard_protocol, OSC_5522_invalid_location) {
+    Parser p(true);
+    Command *cmd = feed_end(p, "5522;loc=bobr", true, '\x1b');
+    ASSERT_TRUE(cmd && cmd->key == Command::Key::kitty_clipboard_protocol);
+    const kcp::OSC &k = cmd->kitty_clipboard_protocol;
+    ZStr v;
+    kcp::Location loc;
+    kcp::Status st;
+    kcp::Operation op;
+    (void)v; (void)loc; (void)st; (void)op;
+    ASSERT_FALSE(k.readLoc(&loc));
+}
+
+TEST(kitty_clipboard_protocol, OSC_5522_valid_location) {
+    Parser p(true);
+    Command *cmd = feed_end(p, "5522;loc=primary", true, '\x1b');
+    ASSERT_TRUE(cmd && cmd->key == Command::Key::kitty_clipboard_protocol);
+    const kcp::OSC &k = cmd->kitty_clipboard_protocol;
+    ZStr v;
+    kcp::Location loc;
+    kcp::Status st;
+    kcp::Operation op;
+    (void)v; (void)loc; (void)st; (void)op;
+    ASSERT_TRUE(k.readLoc(&loc) && loc == kcp::Location::primary);
+}
+
+TEST(kitty_clipboard_protocol, OSC_5522_password_1) {
+    Parser p(true);
+    Command *cmd = feed_end(p, "5522;pw=R2hvc3R0eQ==:name=Qk9CUiBLVVJXQQ==", true, '\x1b');
+    ASSERT_TRUE(cmd && cmd->key == Command::Key::kitty_clipboard_protocol);
+    const kcp::OSC &k = cmd->kitty_clipboard_protocol;
+    ZStr v;
+    kcp::Location loc;
+    kcp::Status st;
+    kcp::Operation op;
+    (void)v; (void)loc; (void)st; (void)op;
+    ASSERT_TRUE(k.readString(kcp::Option::pw, &v) && v.eql("R2hvc3R0eQ=="));
+    ASSERT_TRUE(k.readString(kcp::Option::name, &v) && v.eql("Qk9CUiBLVVJXQQ=="));
+}
+
+TEST(kitty_clipboard_protocol, OSC_5522_password_2) {
+    Parser p(true);
+    Command *cmd = feed_end(p, "5522;password=R2hvc3R0eQ==", true, '\x1b');
+    ASSERT_TRUE(cmd && cmd->key == Command::Key::kitty_clipboard_protocol);
+    const kcp::OSC &k = cmd->kitty_clipboard_protocol;
+    ZStr v;
+    kcp::Location loc;
+    kcp::Status st;
+    kcp::Operation op;
+    (void)v; (void)loc; (void)st; (void)op;
+    ASSERT_TRUE(k.readString(kcp::Option::password, &v) && v.eql("R2hvc3R0eQ=="));
+}
+
+TEST(kitty_clipboard_protocol, OSC_5522_example_1) {
+    Parser p(true);
+    Command *cmd = feed_end(p, "5522;type=read:status=OK", true, '\x1b');
+    ASSERT_TRUE(cmd && cmd->key == Command::Key::kitty_clipboard_protocol);
+    const kcp::OSC &k = cmd->kitty_clipboard_protocol;
+    ZStr v;
+    kcp::Location loc;
+    kcp::Status st;
+    kcp::Operation op;
+    (void)v; (void)loc; (void)st; (void)op;
+    ASSERT_FALSE(k.has_payload);
+    ASSERT_FALSE(k.readString(kcp::Option::id, &v));
+    ASSERT_FALSE(k.readLoc(&loc));
+    ASSERT_FALSE(k.readString(kcp::Option::mime, &v));
+    ASSERT_FALSE(k.readString(kcp::Option::name, &v));
+    ASSERT_FALSE(k.readString(kcp::Option::password, &v));
+    ASSERT_FALSE(k.readString(kcp::Option::pw, &v));
+    ASSERT_TRUE(k.readStatus(&st) && st == kcp::Status::OK);
+    ASSERT_TRUE(k.readType(&op) && op == kcp::Operation::read);
+}
+
+TEST(kitty_clipboard_protocol, OSC_5522_example_2) {
+    Parser p(true);
+    Command *cmd = feed_end(p, "5522;type=read:mime=dGV4dC9wbGFpbg==;R2hvc3R0eQ==", true, '\x1b');
+    ASSERT_TRUE(cmd && cmd->key == Command::Key::kitty_clipboard_protocol);
+    const kcp::OSC &k = cmd->kitty_clipboard_protocol;
+    ZStr v;
+    kcp::Location loc;
+    kcp::Status st;
+    kcp::Operation op;
+    (void)v; (void)loc; (void)st; (void)op;
+    ASSERT_TRUE(k.has_payload && k.payload.eql("R2hvc3R0eQ=="));
+    ASSERT_FALSE(k.readString(kcp::Option::id, &v));
+    ASSERT_FALSE(k.readLoc(&loc));
+    ASSERT_TRUE(k.readString(kcp::Option::mime, &v) && v.eql("dGV4dC9wbGFpbg=="));
+    ASSERT_FALSE(k.readString(kcp::Option::name, &v));
+    ASSERT_FALSE(k.readString(kcp::Option::password, &v));
+    ASSERT_FALSE(k.readString(kcp::Option::pw, &v));
+    ASSERT_FALSE(k.readStatus(&st));
+    ASSERT_TRUE(k.readType(&op) && op == kcp::Operation::read);
+}
+
+TEST(kitty_clipboard_protocol, OSC_5522_example_3) {
+    Parser p(true);
+    Command *cmd = feed_end(p, "5522;type=read:status=OK", true, '\x1b');
+    ASSERT_TRUE(cmd && cmd->key == Command::Key::kitty_clipboard_protocol);
+    const kcp::OSC &k = cmd->kitty_clipboard_protocol;
+    ZStr v;
+    kcp::Location loc;
+    kcp::Status st;
+    kcp::Operation op;
+    (void)v; (void)loc; (void)st; (void)op;
+    ASSERT_FALSE(k.has_payload);
+    ASSERT_FALSE(k.readString(kcp::Option::id, &v));
+    ASSERT_FALSE(k.readLoc(&loc));
+    ASSERT_FALSE(k.readString(kcp::Option::mime, &v));
+    ASSERT_FALSE(k.readString(kcp::Option::name, &v));
+    ASSERT_FALSE(k.readString(kcp::Option::password, &v));
+    ASSERT_FALSE(k.readString(kcp::Option::pw, &v));
+    ASSERT_TRUE(k.readStatus(&st) && st == kcp::Status::OK);
+    ASSERT_TRUE(k.readType(&op) && op == kcp::Operation::read);
+}
+
+TEST(kitty_clipboard_protocol, OSC_5522_example_4) {
+    Parser p(true);
+    Command *cmd = feed_end(p, "5522;type=write", true, '\x1b');
+    ASSERT_TRUE(cmd && cmd->key == Command::Key::kitty_clipboard_protocol);
+    const kcp::OSC &k = cmd->kitty_clipboard_protocol;
+    ZStr v;
+    kcp::Location loc;
+    kcp::Status st;
+    kcp::Operation op;
+    (void)v; (void)loc; (void)st; (void)op;
+    ASSERT_FALSE(k.has_payload);
+    ASSERT_FALSE(k.readString(kcp::Option::id, &v));
+    ASSERT_FALSE(k.readLoc(&loc));
+    ASSERT_FALSE(k.readString(kcp::Option::mime, &v));
+    ASSERT_FALSE(k.readString(kcp::Option::name, &v));
+    ASSERT_FALSE(k.readString(kcp::Option::password, &v));
+    ASSERT_FALSE(k.readString(kcp::Option::pw, &v));
+    ASSERT_FALSE(k.readStatus(&st));
+    ASSERT_TRUE(k.readType(&op) && op == kcp::Operation::write);
+}
+
+TEST(kitty_clipboard_protocol, OSC_5522_example_5) {
+    Parser p(true);
+    Command *cmd = feed_end(p, "5522;type=wdata:mime=dGV4dC9wbGFpbg==;R2hvc3R0eQ==", true, '\x1b');
+    ASSERT_TRUE(cmd && cmd->key == Command::Key::kitty_clipboard_protocol);
+    const kcp::OSC &k = cmd->kitty_clipboard_protocol;
+    ZStr v;
+    kcp::Location loc;
+    kcp::Status st;
+    kcp::Operation op;
+    (void)v; (void)loc; (void)st; (void)op;
+    ASSERT_TRUE(k.has_payload && k.payload.eql("R2hvc3R0eQ=="));
+    ASSERT_FALSE(k.readString(kcp::Option::id, &v));
+    ASSERT_FALSE(k.readLoc(&loc));
+    ASSERT_TRUE(k.readString(kcp::Option::mime, &v) && v.eql("dGV4dC9wbGFpbg=="));
+    ASSERT_FALSE(k.readString(kcp::Option::name, &v));
+    ASSERT_FALSE(k.readString(kcp::Option::password, &v));
+    ASSERT_FALSE(k.readString(kcp::Option::pw, &v));
+    ASSERT_FALSE(k.readStatus(&st));
+    ASSERT_TRUE(k.readType(&op) && op == kcp::Operation::wdata);
+}
+
+TEST(kitty_clipboard_protocol, OSC_5522_example_6) {
+    Parser p(true);
+    Command *cmd = feed_end(p, "5522;type=wdata", true, '\x1b');
+    ASSERT_TRUE(cmd && cmd->key == Command::Key::kitty_clipboard_protocol);
+    const kcp::OSC &k = cmd->kitty_clipboard_protocol;
+    ZStr v;
+    kcp::Location loc;
+    kcp::Status st;
+    kcp::Operation op;
+    (void)v; (void)loc; (void)st; (void)op;
+    ASSERT_FALSE(k.has_payload);
+    ASSERT_FALSE(k.readString(kcp::Option::id, &v));
+    ASSERT_FALSE(k.readLoc(&loc));
+    ASSERT_FALSE(k.readString(kcp::Option::mime, &v));
+    ASSERT_FALSE(k.readString(kcp::Option::name, &v));
+    ASSERT_FALSE(k.readString(kcp::Option::password, &v));
+    ASSERT_FALSE(k.readString(kcp::Option::pw, &v));
+    ASSERT_FALSE(k.readStatus(&st));
+    ASSERT_TRUE(k.readType(&op) && op == kcp::Operation::wdata);
+}
+
+TEST(kitty_clipboard_protocol, OSC_5522_example_7) {
+    Parser p(true);
+    Command *cmd = feed_end(p, "5522;type=write:status=DONE", true, '\x1b');
+    ASSERT_TRUE(cmd && cmd->key == Command::Key::kitty_clipboard_protocol);
+    const kcp::OSC &k = cmd->kitty_clipboard_protocol;
+    ZStr v;
+    kcp::Location loc;
+    kcp::Status st;
+    kcp::Operation op;
+    (void)v; (void)loc; (void)st; (void)op;
+    ASSERT_FALSE(k.has_payload);
+    ASSERT_FALSE(k.readString(kcp::Option::id, &v));
+    ASSERT_FALSE(k.readLoc(&loc));
+    ASSERT_FALSE(k.readString(kcp::Option::mime, &v));
+    ASSERT_FALSE(k.readString(kcp::Option::name, &v));
+    ASSERT_FALSE(k.readString(kcp::Option::password, &v));
+    ASSERT_FALSE(k.readString(kcp::Option::pw, &v));
+    ASSERT_TRUE(k.readStatus(&st) && st == kcp::Status::DONE);
+    ASSERT_TRUE(k.readType(&op) && op == kcp::Operation::write);
+}
+
+TEST(kitty_clipboard_protocol, OSC_5522_example_8) {
+    Parser p(true);
+    Command *cmd = feed_end(p, "5522;type=write:status=EPERM", true, '\x1b');
+    ASSERT_TRUE(cmd && cmd->key == Command::Key::kitty_clipboard_protocol);
+    const kcp::OSC &k = cmd->kitty_clipboard_protocol;
+    ZStr v;
+    kcp::Location loc;
+    kcp::Status st;
+    kcp::Operation op;
+    (void)v; (void)loc; (void)st; (void)op;
+    ASSERT_FALSE(k.has_payload);
+    ASSERT_FALSE(k.readString(kcp::Option::id, &v));
+    ASSERT_FALSE(k.readLoc(&loc));
+    ASSERT_FALSE(k.readString(kcp::Option::mime, &v));
+    ASSERT_FALSE(k.readString(kcp::Option::name, &v));
+    ASSERT_FALSE(k.readString(kcp::Option::password, &v));
+    ASSERT_FALSE(k.readString(kcp::Option::pw, &v));
+    ASSERT_TRUE(k.readStatus(&st) && st == kcp::Status::EPERM_);
+    ASSERT_TRUE(k.readType(&op) && op == kcp::Operation::write);
+}
+
+TEST(kitty_clipboard_protocol, OSC_5522_example_9) {
+    Parser p(true);
+    Command *cmd = feed_end(p, "5522;type=walias:mime=dGV4dC9wbGFpbg==;dGV4dC9odG1sIGFwcGxpY2F0aW9uL2pzb24=", true, '\x1b');
+    ASSERT_TRUE(cmd && cmd->key == Command::Key::kitty_clipboard_protocol);
+    const kcp::OSC &k = cmd->kitty_clipboard_protocol;
+    ZStr v;
+    kcp::Location loc;
+    kcp::Status st;
+    kcp::Operation op;
+    (void)v; (void)loc; (void)st; (void)op;
+    ASSERT_TRUE(k.has_payload && k.payload.eql("dGV4dC9odG1sIGFwcGxpY2F0aW9uL2pzb24="));
+    ASSERT_FALSE(k.readString(kcp::Option::id, &v));
+    ASSERT_FALSE(k.readLoc(&loc));
+    ASSERT_TRUE(k.readString(kcp::Option::mime, &v) && v.eql("dGV4dC9wbGFpbg=="));
+    ASSERT_FALSE(k.readString(kcp::Option::name, &v));
+    ASSERT_FALSE(k.readString(kcp::Option::password, &v));
+    ASSERT_FALSE(k.readString(kcp::Option::pw, &v));
+    ASSERT_FALSE(k.readStatus(&st));
+    ASSERT_TRUE(k.readType(&op) && op == kcp::Operation::walias);
+}
+
+TEST(kitty_clipboard_protocol, OSC_5522_example_10) {
+    Parser p(true);
+    Command *cmd = feed_end(p, "5522;type=read:status=OK:password=Qk9CUiBLVVJXQQ==", true, '\x1b');
+    ASSERT_TRUE(cmd && cmd->key == Command::Key::kitty_clipboard_protocol);
+    const kcp::OSC &k = cmd->kitty_clipboard_protocol;
+    ZStr v;
+    kcp::Location loc;
+    kcp::Status st;
+    kcp::Operation op;
+    (void)v; (void)loc; (void)st; (void)op;
+    ASSERT_FALSE(k.has_payload);
+    ASSERT_FALSE(k.readString(kcp::Option::id, &v));
+    ASSERT_FALSE(k.readLoc(&loc));
+    ASSERT_FALSE(k.readString(kcp::Option::mime, &v));
+    ASSERT_FALSE(k.readString(kcp::Option::name, &v));
+    ASSERT_TRUE(k.readString(kcp::Option::password, &v) && v.eql("Qk9CUiBLVVJXQQ=="));
+    ASSERT_FALSE(k.readString(kcp::Option::pw, &v));
+    ASSERT_TRUE(k.readStatus(&st) && st == kcp::Status::OK);
+    ASSERT_TRUE(k.readType(&op) && op == kcp::Operation::read);
+}
+
+TEST(kitty_clipboard_protocol, OSC_5522_example_11) {
+    Parser p(true);
+    Command *cmd = feed_end(p, "5522;type=read:status=DATA:mime=dGV4dC9wbGFpbg==", true, '\x1b');
+    ASSERT_TRUE(cmd && cmd->key == Command::Key::kitty_clipboard_protocol);
+    const kcp::OSC &k = cmd->kitty_clipboard_protocol;
+    ZStr v;
+    kcp::Location loc;
+    kcp::Status st;
+    kcp::Operation op;
+    (void)v; (void)loc; (void)st; (void)op;
+    ASSERT_FALSE(k.has_payload);
+    ASSERT_FALSE(k.readString(kcp::Option::id, &v));
+    ASSERT_FALSE(k.readLoc(&loc));
+    ASSERT_TRUE(k.readString(kcp::Option::mime, &v) && v.eql("dGV4dC9wbGFpbg=="));
+    ASSERT_FALSE(k.readString(kcp::Option::name, &v));
+    ASSERT_FALSE(k.readString(kcp::Option::password, &v));
+    ASSERT_FALSE(k.readString(kcp::Option::pw, &v));
+    ASSERT_TRUE(k.readStatus(&st) && st == kcp::Status::DATA);
+    ASSERT_TRUE(k.readType(&op) && op == kcp::Operation::read);
+}
+
+TEST(kitty_clipboard_protocol, OSC_5522_example_12) {
+    Parser p(true);
+    Command *cmd = feed_end(p, "5522;type=read:mime=dGV4dC9wbGFpbg==:password=Qk9CUiBLVVJXQQ==", true, '\x1b');
+    ASSERT_TRUE(cmd && cmd->key == Command::Key::kitty_clipboard_protocol);
+    const kcp::OSC &k = cmd->kitty_clipboard_protocol;
+    ZStr v;
+    kcp::Location loc;
+    kcp::Status st;
+    kcp::Operation op;
+    (void)v; (void)loc; (void)st; (void)op;
+    ASSERT_FALSE(k.has_payload);
+    ASSERT_FALSE(k.readString(kcp::Option::id, &v));
+    ASSERT_FALSE(k.readLoc(&loc));
+    ASSERT_TRUE(k.readString(kcp::Option::mime, &v) && v.eql("dGV4dC9wbGFpbg=="));
+    ASSERT_FALSE(k.readString(kcp::Option::name, &v));
+    ASSERT_TRUE(k.readString(kcp::Option::password, &v) && v.eql("Qk9CUiBLVVJXQQ=="));
+    ASSERT_FALSE(k.readString(kcp::Option::pw, &v));
+    ASSERT_FALSE(k.readStatus(&st));
+    ASSERT_TRUE(k.readType(&op) && op == kcp::Operation::read);
+}
+
+TEST(kitty_clipboard_protocol, OSC_5522_example_13) {
+    Parser p(true);
+    Command *cmd = feed_end(p, "5522;type=read:status=OK", true, '\x1b');
+    ASSERT_TRUE(cmd && cmd->key == Command::Key::kitty_clipboard_protocol);
+    const kcp::OSC &k = cmd->kitty_clipboard_protocol;
+    ZStr v;
+    kcp::Location loc;
+    kcp::Status st;
+    kcp::Operation op;
+    (void)v; (void)loc; (void)st; (void)op;
+    ASSERT_FALSE(k.has_payload);
+    ASSERT_FALSE(k.readString(kcp::Option::id, &v));
+    ASSERT_FALSE(k.readLoc(&loc));
+    ASSERT_FALSE(k.readString(kcp::Option::mime, &v));
+    ASSERT_FALSE(k.readString(kcp::Option::name, &v));
+    ASSERT_FALSE(k.readString(kcp::Option::password, &v));
+    ASSERT_FALSE(k.readString(kcp::Option::pw, &v));
+    ASSERT_TRUE(k.readStatus(&st) && st == kcp::Status::OK);
+    ASSERT_TRUE(k.readType(&op) && op == kcp::Operation::read);
+}
+
+TEST(kitty_clipboard_protocol, OSC_5522_example_14) {
+    Parser p(true);
+    Command *cmd = feed_end(p, "5522;type=read:status=DATA:mime=dGV4dC9wbGFpbg==;Qk9CUiBLVVJXQQ==", true, '\x1b');
+    ASSERT_TRUE(cmd && cmd->key == Command::Key::kitty_clipboard_protocol);
+    const kcp::OSC &k = cmd->kitty_clipboard_protocol;
+    ZStr v;
+    kcp::Location loc;
+    kcp::Status st;
+    kcp::Operation op;
+    (void)v; (void)loc; (void)st; (void)op;
+    ASSERT_TRUE(k.has_payload && k.payload.eql("Qk9CUiBLVVJXQQ=="));
+    ASSERT_FALSE(k.readString(kcp::Option::id, &v));
+    ASSERT_FALSE(k.readLoc(&loc));
+    ASSERT_TRUE(k.readString(kcp::Option::mime, &v) && v.eql("dGV4dC9wbGFpbg=="));
+    ASSERT_FALSE(k.readString(kcp::Option::name, &v));
+    ASSERT_FALSE(k.readString(kcp::Option::password, &v));
+    ASSERT_FALSE(k.readString(kcp::Option::pw, &v));
+    ASSERT_TRUE(k.readStatus(&st) && st == kcp::Status::DATA);
+    ASSERT_TRUE(k.readType(&op) && op == kcp::Operation::read);
+}
+
+TEST(kitty_clipboard_protocol, OSC_5522_example_15) {
+    Parser p(true);
+    Command *cmd = feed_end(p, "5522;type=read:status=OK", true, '\x1b');
+    ASSERT_TRUE(cmd && cmd->key == Command::Key::kitty_clipboard_protocol);
+    const kcp::OSC &k = cmd->kitty_clipboard_protocol;
+    ZStr v;
+    kcp::Location loc;
+    kcp::Status st;
+    kcp::Operation op;
+    (void)v; (void)loc; (void)st; (void)op;
+    ASSERT_FALSE(k.has_payload);
+    ASSERT_FALSE(k.readString(kcp::Option::id, &v));
+    ASSERT_FALSE(k.readLoc(&loc));
+    ASSERT_FALSE(k.readString(kcp::Option::mime, &v));
+    ASSERT_FALSE(k.readString(kcp::Option::name, &v));
+    ASSERT_FALSE(k.readString(kcp::Option::password, &v));
+    ASSERT_FALSE(k.readString(kcp::Option::pw, &v));
+    ASSERT_TRUE(k.readStatus(&st) && st == kcp::Status::OK);
+    ASSERT_TRUE(k.readType(&op) && op == kcp::Operation::read);
+}
+
+/* kitty_metadata.zig */
+
+TEST(kitty_metadata, ValueIterator_skips_malformed_and_prefix_matching_keys) {
+    const char *md = "id-extra=wrong:id: id = first :id=second";
+    kitty_metadata::ValueIterator it("id", nullptr, md, strlen(md));
+
+    ZStr v;
+    ASSERT_TRUE(it.next(&v) && v.eql("first"));
+    ASSERT_TRUE(it.next(&v) && v.eql("second"));
+    ASSERT_FALSE(it.next(&v));
+}
+
+TEST(kitty_metadata, ValueIterator_skips_values_containing_disallowed_characters) {
+    const char *md = "i=a?:i=abc";
+    kitty_metadata::ValueIterator it("i", "abc", md, strlen(md));
+
+    ZStr v;
+    ASSERT_TRUE(it.next(&v) && v.eql("abc"));
+    ASSERT_FALSE(it.next(&v));
+}
