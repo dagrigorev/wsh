@@ -557,3 +557,305 @@ TEST(stream, an_osc_is_consumed) {
     f.row(0, got, sizeof(got));
     ASSERT_TRUE(strcmp(got, "text") == 0);
 }
+
+/* ─── titles ─────────────────────────────────────────────────────────────── */
+
+TEST(osc, sets_the_title) {
+    Fixture f;
+    ASSERT_TRUE(f.init(20, 4));
+    f.feed("\x1b]2;my window\x07");
+
+    ASSERT_TRUE(strcmp(f.t.title, "my window") == 0);
+    ASSERT_EQ(f.t.title_len, 9u);
+}
+
+TEST(osc, zero_sets_the_title_too) {
+    Fixture f;
+    ASSERT_TRUE(f.init(20, 4));
+    f.feed("\x1b]0;icon and title\x1b\\");
+
+    /* Nothing here has an icon, so 0 and 2 mean the same. */
+    ASSERT_TRUE(strcmp(f.t.title, "icon and title") == 0);
+}
+
+TEST(osc, a_title_can_be_cleared) {
+    Fixture f;
+    ASSERT_TRUE(f.init(20, 4));
+    f.feed("\x1b]2;something\x07\x1b]2;\x07");
+
+    ASSERT_EQ(f.t.title_len, 0u);
+    ASSERT_TRUE(strcmp(f.t.title, "") == 0);
+}
+
+TEST(osc, an_over_long_title_is_cut_to_fit) {
+    Fixture f;
+    ASSERT_TRUE(f.init(20, 4));
+
+    f.feed("\x1b]2;");
+    for (int i = 0; i < 400; i++) f.feed("t");
+    f.feed("\x07");
+
+    ASSERT_EQ(f.t.title_len, sizeof(f.t.title) - 1);
+    ASSERT_EQ(f.t.title[f.t.title_len], '\0');
+}
+
+TEST(osc, an_unknown_command_does_nothing) {
+    Fixture f;
+    ASSERT_TRUE(f.init(20, 4));
+    f.feed("\x1b]2;kept\x07\x1b]777;notify;hi\x07" "text");
+
+    ASSERT_TRUE(strcmp(f.t.title, "kept") == 0);
+    char got[32];
+    f.row(0, got, sizeof(got));
+    ASSERT_TRUE(strcmp(got, "text") == 0);
+}
+
+/* ─── hyperlinks ─────────────────────────────────────────────────────────── */
+
+static bool link_at(Fixture &f, CellCountInt x, CellCountInt y, const char *want) {
+    Pin p = page_list_active_pin(&f.t.active->pages, 0, y);
+    const uint8_t *uri = nullptr;
+    size_t len = 0;
+    if (!page_get_cell_hyperlink(&p.node->page, x, p.y, &uri, &len)) {
+        return want == nullptr;
+    }
+    return want && len == strlen(want) && memcmp(uri, want, len) == 0;
+}
+
+TEST(link, text_inside_a_link_is_linked) {
+    Fixture f;
+    ASSERT_TRUE(f.init(40, 4));
+    f.feed("see \x1b]8;;https://example.com\x1b\\here\x1b]8;;\x1b\\ now");
+
+    /* hyperlink.hpp has been ported and tested for weeks with nothing
+     * attaching links to anything. This is the first caller. */
+    ASSERT_TRUE(link_at(f, 0, 0, nullptr));
+    ASSERT_TRUE(link_at(f, 4, 0, "https://example.com"));
+    ASSERT_TRUE(link_at(f, 7, 0, "https://example.com"));
+    ASSERT_TRUE(link_at(f, 8, 0, nullptr));
+    ASSERT_TRUE(link_at(f, 9, 0, nullptr));
+}
+
+TEST(link, closing_it_stops_linking) {
+    Fixture f;
+    ASSERT_TRUE(f.init(40, 4));
+    f.feed("\x1b]8;;https://a.test\x07" "a" "\x1b]8;;\x07" "b");
+
+    ASSERT_TRUE(link_at(f, 0, 0, "https://a.test"));
+    ASSERT_TRUE(link_at(f, 1, 0, nullptr));
+    ASSERT_FALSE(f.t.active->cursor.hyperlink_active);
+}
+
+TEST(link, one_run_shares_one_entry) {
+    Fixture f;
+    ASSERT_TRUE(f.init(40, 4));
+    f.feed("\x1b]8;;https://shared.test\x07" "0123456789" "\x1b]8;;\x07");
+
+    /* Ten cells, one link: the set interns it once, which is what makes a
+     * long linked run cheap. */
+    Pin p = page_list_active_pin(&f.t.active->pages, 0, 0);
+    ASSERT_EQ(p.node->page.hyperlink_set.count(), 1u);
+}
+
+TEST(link, two_runs_of_the_same_uri_stay_two_links) {
+    Fixture f;
+    ASSERT_TRUE(f.init(40, 4));
+    f.feed("\x1b]8;;https://same.test\x07" "a" "\x1b]8;;\x07" " "
+           "\x1b]8;;https://same.test\x07" "b" "\x1b]8;;\x07");
+
+    /* No id was given, so each opening gets its own implicit one. Otherwise
+     * hovering one would highlight the other, which the program never asked
+     * for. */
+    Pin p = page_list_active_pin(&f.t.active->pages, 0, 0);
+    ASSERT_EQ(p.node->page.hyperlink_set.count(), 2u);
+}
+
+TEST(link, an_explicit_id_joins_separate_runs) {
+    Fixture f;
+    ASSERT_TRUE(f.init(40, 4));
+    f.feed("\x1b]8;id=x;https://joined.test\x07" "a" "\x1b]8;;\x07" " "
+           "\x1b]8;id=x;https://joined.test\x07" "b" "\x1b]8;;\x07");
+
+    /* The id is how a program says two separated runs are the same link. */
+    Pin p = page_list_active_pin(&f.t.active->pages, 0, 0);
+    ASSERT_EQ(p.node->page.hyperlink_set.count(), 1u);
+}
+
+TEST(link, other_parameters_are_ignored) {
+    Fixture f;
+    ASSERT_TRUE(f.init(40, 4));
+    f.feed("\x1b]8;foo=bar:id=y:baz=1;https://p.test\x07" "z" "\x1b]8;;\x07");
+
+    ASSERT_TRUE(link_at(f, 0, 0, "https://p.test"));
+    ASSERT_TRUE(strcmp(f.t.active->cursor.hyperlink_id, "y") == 0);
+}
+
+TEST(link, overwriting_a_linked_cell_releases_it) {
+    Fixture f;
+    ASSERT_TRUE(f.init(40, 4));
+    f.feed("\x1b]8;;https://gone.test\x07" "x" "\x1b]8;;\x07");
+    f.feed("\x1b[1;1H" "y");
+
+    ASSERT_TRUE(link_at(f, 0, 0, nullptr));
+    Pin p = page_list_active_pin(&f.t.active->pages, 0, 0);
+    ASSERT_EQ(p.node->page.hyperlink_set.count(), 0u);
+}
+
+TEST(link, many_distinct_links_grow_the_page_instead_of_failing) {
+    Fixture f;
+    ASSERT_TRUE(f.init(80, 4));
+
+    /* The limitation the scrolling tests documented — distinct links run a
+     * page's string storage out — is answered here by growing the page's
+     * budget. Every link should land. */
+    for (int i = 0; i < 60; i++) {
+        char seq[96];
+        const int n = snprintf(seq, sizeof(seq),
+                               "\x1b]8;;https://many.test/%03d\x07" "k", i);
+        ASSERT_TRUE(n > 0);
+        f.feed(seq);
+    }
+    f.feed("\x1b]8;;\x07");
+
+    for (int i = 0; i < 60; i++) {
+        char want[64];
+        snprintf(want, sizeof(want), "https://many.test/%03d", i);
+        ASSERT_TRUE(link_at(f, (CellCountInt)i, 0, want));
+    }
+}
+
+TEST(link, a_uri_too_long_to_hold_is_dropped_not_truncated) {
+    Fixture f;
+    ASSERT_TRUE(f.init(40, 4));
+
+    f.feed("\x1b]8;;https://");
+    for (int i = 0; i < 600; i++) f.feed("x");
+    f.feed("\x07" "t");
+
+    /* A truncated URI would still look like a link and go somewhere nobody
+     * meant. */
+    ASSERT_TRUE(link_at(f, 0, 0, nullptr));
+    char got[8];
+    f.row(0, got, sizeof(got));
+    ASSERT_TRUE(strcmp(got, "t") == 0);
+}
+
+TEST(link, belongs_to_the_screen_it_was_opened_on) {
+    Fixture f;
+    ASSERT_TRUE(f.init(40, 4));
+    f.feed("\x1b]8;;https://primary.test\x07" "a");
+    f.feed("\x1b[?1049h" "b");
+
+    /* The link is the cursor's, and the alternate screen has its own
+     * cursor. */
+    ASSERT_TRUE(link_at(f, 0, 0, nullptr));
+}
+
+/* ─── reports ────────────────────────────────────────────────────────────── */
+
+struct Replies {
+    char   buf[256];
+    size_t len;
+    Replies() : len(0) { buf[0] = '\0'; }
+};
+
+static void collect(void *ctx, const char *data, size_t len) {
+    Replies *r = (Replies *)ctx;
+    for (size_t i = 0; i < len && r->len + 1 < sizeof(r->buf); i++) {
+        r->buf[r->len++] = data[i];
+    }
+    r->buf[r->len] = '\0';
+}
+
+TEST(report, cursor_position) {
+    Fixture f;
+    ASSERT_TRUE(f.init(40, 10));
+    Replies r;
+    f.s.respond = collect;
+    f.s.respond_ctx = &r;
+
+    f.feed("\x1b[5;12H\x1b[6n");
+
+    /* Counted from one, which is what the program asking expects. */
+    ASSERT_TRUE(strcmp(r.buf, "\x1b[5;12R") == 0);
+}
+
+TEST(report, cursor_position_honours_origin_mode) {
+    Fixture f;
+    ASSERT_TRUE(f.init(40, 10));
+    Replies r;
+    f.s.respond = collect;
+    f.s.respond_ctx = &r;
+
+    f.feed("\x1b[3;8r\x1b[?6h\x1b[2;4H\x1b[6n");
+
+    /* With origin mode on, positions are relative to the region — asking
+     * where the cursor is has to answer in the same terms it was set in. */
+    ASSERT_TRUE(strcmp(r.buf, "\x1b[2;4R") == 0);
+}
+
+TEST(report, status_is_always_fine) {
+    Fixture f;
+    ASSERT_TRUE(f.init(40, 10));
+    Replies r;
+    f.s.respond = collect;
+    f.s.respond_ctx = &r;
+
+    f.feed("\x1b[5n");
+    ASSERT_TRUE(strcmp(r.buf, "\x1b[0n") == 0);
+}
+
+TEST(report, device_attributes) {
+    Fixture f;
+    ASSERT_TRUE(f.init(40, 10));
+    Replies r;
+    f.s.respond = collect;
+    f.s.respond_ctx = &r;
+
+    f.feed("\x1b[c");
+
+    /* Exactly these bytes and no more. The length used to be counted by hand
+     * and was one too many, which would have sent the program a NUL. */
+    ASSERT_EQ(r.len, 9u);
+    ASSERT_TRUE(memcmp(r.buf, "\x1b[?62;22c", 9) == 0);
+}
+
+TEST(report, secondary_device_attributes) {
+    Fixture f;
+    ASSERT_TRUE(f.init(40, 10));
+    Replies r;
+    f.s.respond = collect;
+    f.s.respond_ctx = &r;
+
+    f.feed("\x1b[>c");
+    ASSERT_EQ(r.len, 10u);
+    ASSERT_TRUE(memcmp(r.buf, "\x1b[>1;10;0c", 10) == 0);
+}
+
+TEST(report, with_nowhere_to_answer_nothing_breaks) {
+    Fixture f;
+    ASSERT_TRUE(f.init(40, 10));
+
+    /* No reply channel is a legitimate setup — a terminal reading a log file
+     * has nobody to answer — and asking must not crash it. */
+    f.feed("\x1b[6n\x1b[c" "ok");
+
+    char got[8];
+    f.row(0, got, sizeof(got));
+    ASSERT_TRUE(strcmp(got, "ok") == 0);
+}
+
+TEST(report, questions_are_not_printed) {
+    Fixture f;
+    ASSERT_TRUE(f.init(40, 10));
+    Replies r;
+    f.s.respond = collect;
+    f.s.respond_ctx = &r;
+
+    f.feed("a\x1b[6n" "b");
+
+    char got[8];
+    f.row(0, got, sizeof(got));
+    ASSERT_TRUE(strcmp(got, "ab") == 0);
+    ASSERT_TRUE(strcmp(r.buf, "\x1b[1;2R") == 0);
+}

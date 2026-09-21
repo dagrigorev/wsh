@@ -79,9 +79,28 @@ struct Cursor {
      * where the cursor is, not of the text. */
     bool pending_wrap;
 
+    /* The OSC 8 link new characters are written into, if one is open.
+     *
+     * Like the style, this is the cursor's rather than anything on the
+     * screen's: it is a property of what is written next. And like the style
+     * it is held as a value rather than an interned ID, because the ID
+     * belongs to one page and the cursor crosses pages. The strings are
+     * copied in, since the parser's buffer they arrive in is reused by the
+     * very next sequence. */
+    bool     hyperlink_active;
+    char     hyperlink_uri[512];
+    size_t   hyperlink_uri_len;
+    char     hyperlink_id[128];
+    size_t   hyperlink_id_len;
+    uint32_t hyperlink_implicit;
+
     Cursor()
         : x(0), y(0), page_pin(), page_row(nullptr), page_cell(nullptr),
-          style(), pending_wrap(false) {}
+          style(), pending_wrap(false), hyperlink_active(false),
+          hyperlink_uri_len(0), hyperlink_id_len(0), hyperlink_implicit(0) {
+        hyperlink_uri[0] = '\0';
+        hyperlink_id[0] = '\0';
+    }
 };
 
 /* ─── selections ─────────────────────────────────────────────────────────── */
@@ -338,6 +357,56 @@ inline bool screen_cursor_apply_style(Screen *s) {
                                      s->cursor.style);
 }
 
+/* Attach the cursor's open hyperlink to the cell under it, if there is one.
+ *
+ * A page runs out of room for links long before it runs out of rows, so this
+ * is the other place the page budgets pay off. A link needs room in two
+ * places — its strings in the string storage, and its entry in the link set,
+ * which is sized from a budget of its own — and either can be what is full.
+ * Both are doubled together, which costs one page rebuild rather than
+ * guessing which was the problem and possibly needing a second.
+ *
+ * A link that still cannot be attached is dropped rather than failing the
+ * write. The character is what the program sent; the link is decoration on
+ * it, and losing the decoration is better than losing the text. */
+inline bool screen_cursor_apply_hyperlink(Screen *s) {
+    if (!s->cursor.hyperlink_active) return true;
+
+    Pin p = s->cursor.page_pin.pin;
+    if (!p.valid()) return true;
+
+    const char *id = s->cursor.hyperlink_id_len ? s->cursor.hyperlink_id : nullptr;
+
+    if (page_set_cell_hyperlink(&p.node->page, s->cursor.x, p.y,
+                                s->cursor.hyperlink_uri,
+                                s->cursor.hyperlink_uri_len, id,
+                                s->cursor.hyperlink_id_len,
+                                s->cursor.hyperlink_implicit)) {
+        return true;
+    }
+
+    Capacity cap = p.node->page.capacity;
+    const size_t strings = (size_t)cap.string_bytes * 2;
+    const size_t links = (size_t)cap.hyperlink_bytes * 2;
+    if (strings > (size_t)(StringBytesInt)-1 ||
+        links > (size_t)(HyperlinkCountInt)-1) {
+        return true;
+    }
+    cap.string_bytes = (StringBytesInt)strings;
+    cap.hyperlink_bytes = (HyperlinkCountInt)links;
+
+    if (!page_list_adjust_capacity(&s->pages, p.node, cap)) return true;
+
+    screen_cursor_reload(s);
+    p = s->cursor.page_pin.pin;
+    page_set_cell_hyperlink(&p.node->page, s->cursor.x, p.y,
+                            s->cursor.hyperlink_uri,
+                            s->cursor.hyperlink_uri_len, id,
+                            s->cursor.hyperlink_id_len,
+                            s->cursor.hyperlink_implicit);
+    return true;
+}
+
 /* Erase the cell about to be written, and the other half of any wide
  * character it belongs to.
  *
@@ -441,6 +510,7 @@ inline bool screen_write_codepoint(Screen *s, uint32_t cp, int width) {
 
     screen_erase_for_write(s, s->cursor.x);
     if (!screen_cursor_apply_style(s)) return false;
+    if (!screen_cursor_apply_hyperlink(s)) return false;
 
     Cell *c = s->cursor.page_cell;
     c->set_content_tag(ContentTag::codepoint);

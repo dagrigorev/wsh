@@ -32,6 +32,8 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <stdio.h>
+#include <string.h>
 
 #include "terminal.hpp"
 #include "parser.hpp"
@@ -171,13 +173,39 @@ inline int utf8_next(Utf8 *u, uint8_t b, uint32_t out[2]) {
 
 /* ─── the stream ─────────────────────────────────────────────────────────── */
 
+/* Where answers go.
+ *
+ * Some sequences are questions — where is the cursor, what kind of terminal
+ * are you — and a program that asks one usually waits for the answer before
+ * doing anything else. A terminal that swallowed the question would leave it
+ * waiting, which from the user's side looks like the program hanging. So the
+ * stream is given somewhere to write the reply: in practice the pty the
+ * program is reading from. */
+typedef void (*StreamRespond)(void *ctx, const char *data, size_t len);
+
 struct Stream {
     Terminal *terminal;
     parser::Parser parser;
     Utf8 utf8;
 
-    Stream() : terminal(nullptr), parser(), utf8() {}
+    StreamRespond respond;
+    void         *respond_ctx;
+
+    Stream()
+        : terminal(nullptr), parser(), utf8(), respond(nullptr),
+          respond_ctx(nullptr) {}
 };
+
+inline void stream_reply(Stream *s, const char *data, size_t len) {
+    if (s->respond) s->respond(s->respond_ctx, data, len);
+}
+
+/* A fixed reply, measured rather than counted. Counting the bytes of an escape
+ * sequence by hand is exactly the kind of thing that is wrong by one, and a
+ * reply one byte too long sends the program a NUL it did not ask for. */
+inline void stream_reply_str(Stream *s, const char *text) {
+    stream_reply(s, text, strlen(text));
+}
 
 inline void stream_init(Stream *s, Terminal *t) {
     *s = Stream();
@@ -429,6 +457,170 @@ inline void stream_esc(Terminal *t, const parser::Action &a) {
     }
 }
 
+/* ─── OSC ────────────────────────────────────────────────────────────────── */
+
+/* The number before the first semicolon, and where the rest begins. */
+inline bool stream_osc_command(const char *str, size_t len, int *cmd,
+                               size_t *rest) {
+    size_t i = 0;
+    int n = 0;
+    bool any = false;
+    while (i < len && str[i] >= '0' && str[i] <= '9') {
+        n = n * 10 + (str[i] - '0');
+        any = true;
+        i++;
+    }
+    if (!any) return false;
+
+    *cmd = n;
+    *rest = (i < len && str[i] == ';') ? i + 1 : i;
+    return true;
+}
+
+/* OSC 8 — open or close a hyperlink.
+ *
+ * The format is 8;params;uri. An empty URI closes the link; anything else
+ * opens one, and every character printed after it belongs to it until it is
+ * closed. The params are key=value pairs separated by colons, and the only
+ * key anyone uses is id — which is how two separated runs of text can be told
+ * they are the same link, so that hovering one highlights both. */
+inline void stream_osc_hyperlink(Terminal *t, const char *str, size_t len) {
+    Cursor &c = t->active->cursor;
+
+    size_t semi = 0;
+    while (semi < len && str[semi] != ';') semi++;
+    if (semi >= len) return;   /* no URI part at all: malformed, ignored */
+
+    const char *params = str;
+    const size_t params_len = semi;
+    const char *uri = str + semi + 1;
+    const size_t uri_len = len - semi - 1;
+
+    if (uri_len == 0) {
+        c.hyperlink_active = false;
+        return;
+    }
+
+    /* A URI too long to hold is dropped rather than truncated. A truncated
+     * one would still look like a link and go somewhere nobody meant. */
+    if (uri_len >= sizeof(c.hyperlink_uri)) {
+        c.hyperlink_active = false;
+        return;
+    }
+
+    memcpy(c.hyperlink_uri, uri, uri_len);
+    c.hyperlink_uri[uri_len] = '\0';
+    c.hyperlink_uri_len = uri_len;
+
+    c.hyperlink_id_len = 0;
+    c.hyperlink_id[0] = '\0';
+
+    size_t i = 0;
+    while (i < params_len) {
+        size_t end = i;
+        while (end < params_len && params[end] != ':') end++;
+
+        if (end - i > 3 && memcmp(params + i, "id=", 3) == 0) {
+            const size_t id_len = end - i - 3;
+            if (id_len < sizeof(c.hyperlink_id)) {
+                memcpy(c.hyperlink_id, params + i + 3, id_len);
+                c.hyperlink_id[id_len] = '\0';
+                c.hyperlink_id_len = id_len;
+            }
+        }
+        i = end + 1;
+    }
+
+    /* A link without an id gets a fresh implicit one, so that this run is
+     * its own link even if the same URI was linked a moment ago. */
+    c.hyperlink_implicit = t->next_implicit_link++;
+    c.hyperlink_active = true;
+}
+
+inline void stream_osc(Terminal *t, const parser::Action &a) {
+    int cmd = 0;
+    size_t rest = 0;
+    if (!stream_osc_command(a.string, a.string_len, &cmd, &rest)) return;
+
+    const char *body = a.string + rest;
+    const size_t body_len = a.string_len - rest;
+
+    switch (cmd) {
+        case 0:
+        case 2: {
+            /* 0 sets the icon name and the title, 2 only the title. Nothing
+             * here has an icon, so they are the same. */
+            const size_t n = body_len < sizeof(t->title) - 1
+                                 ? body_len
+                                 : sizeof(t->title) - 1;
+            memcpy(t->title, body, n);
+            t->title[n] = '\0';
+            t->title_len = n;
+            break;
+        }
+
+        case 8:
+            stream_osc_hyperlink(t, body, body_len);
+            break;
+
+        default:
+            /* Colours, the clipboard, notifications and the rest. Nothing
+             * implements them yet, and silently doing nothing is the correct
+             * answer to a request a terminal does not support. */
+            break;
+    }
+}
+
+/* ─── reports ────────────────────────────────────────────────────────────── */
+
+/* DSR and DA — the questions.
+ *
+ * The answer to "what are you" matters more than it looks. Programs decide
+ * what to send from it, and claiming too little means they fall back to
+ * plain text while claiming too much means they send things this cannot draw.
+ * VT220 with ANSI colour is what the terminals programs are tested against
+ * report, so it is the answer that produces the output people expect. */
+inline void stream_report(Stream *st, const parser::Action &a) {
+    Terminal *t = st->terminal;
+    char buf[64];
+
+    if (a.final_byte == 'n' && a.private_marker == 0) {
+        const uint16_t what = parser::action_param_raw(a, 0, 0);
+
+        if (what == 5) {
+            /* "Are you all right?" — always yes. */
+            stream_reply_str(st, "\x1b[0n");
+            return;
+        }
+
+        if (what == 6) {
+            /* Where is the cursor, counted from one, and relative to the
+             * scroll region when origin mode says positions are. */
+            const CellCountInt base = terminal_origin_row(t);
+            const unsigned row = (unsigned)(t->active->cursor.y - base) + 1;
+            const unsigned col = (unsigned)t->active->cursor.x + 1;
+            const int n = snprintf(buf, sizeof(buf), "\x1b[%u;%uR", row, col);
+            if (n > 0) stream_reply(st, buf, (size_t)n);
+            return;
+        }
+        return;
+    }
+
+    if (a.final_byte == 'c') {
+        if (a.private_marker == 0 && parser::action_param_raw(a, 0, 0) == 0) {
+            /* DA1: a VT220 (62) with ANSI colour (22). */
+            stream_reply_str(st, "\x1b[?62;22c");
+            return;
+        }
+        if (a.private_marker == '>') {
+            /* DA2: the terminal type and a version. 1 is VT220; the version
+             * is Wisp's own and means nothing to anyone else. */
+            stream_reply_str(st, "\x1b[>1;10;0c");
+            return;
+        }
+    }
+}
+
 /* ─── feeding it ─────────────────────────────────────────────────────────── */
 
 inline void stream_print(Stream *s, uint32_t cp) {
@@ -475,7 +667,11 @@ inline void stream_feed(Stream *s, const uint8_t *data, size_t len) {
                     break;
 
                 case parser::ActionTag::csi_dispatch:
-                    stream_csi(s->terminal, a);
+                    if (a.final_byte == 'n' || a.final_byte == 'c') {
+                        stream_report(s, a);
+                    } else {
+                        stream_csi(s->terminal, a);
+                    }
                     break;
 
                 case parser::ActionTag::esc_dispatch:
@@ -483,6 +679,9 @@ inline void stream_feed(Stream *s, const uint8_t *data, size_t len) {
                     break;
 
                 case parser::ActionTag::osc_dispatch:
+                    stream_osc(s->terminal, a);
+                    break;
+
                 case parser::ActionTag::dcs_hook:
                 case parser::ActionTag::dcs_put:
                 case parser::ActionTag::dcs_unhook:

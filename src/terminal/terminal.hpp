@@ -113,13 +113,28 @@ struct Terminal {
     CellCountInt scroll_top;
     CellCountInt scroll_bot;
 
+    /* What OSC 0 and 2 last set, for the window. Kept here rather than
+     * applied anywhere, because a terminal emulator has no window — whatever
+     * hosts it reads this. */
+    char   title[256];
+    size_t title_len;
+
+    /* Handed out to OSC 8 links that did not name themselves, so that two
+     * separate runs linking the same URI stay two links rather than merging
+     * into one. That distinction is what hyperlink.hpp's implicit IDs are
+     * for. */
+    uint32_t next_implicit_link;
+
     /* One byte per column: is there a tab stop here. A bitset would be eight
      * times smaller and a great deal less obvious, for a few hundred bytes. */
     uint8_t *tabs;
 
     Terminal()
         : primary(), alternate(), active(nullptr), modes(), cols(0), rows(0),
-          scroll_top(0), scroll_bot(0), tabs(nullptr) {}
+          scroll_top(0), scroll_bot(0), title_len(0), next_implicit_link(0),
+          tabs(nullptr) {
+        title[0] = '\0';
+    }
 };
 
 /* Put tab stops back to every eighth column. */
