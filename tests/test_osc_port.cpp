@@ -911,3 +911,104 @@ TEST(context_signal, OSC_3008_start_command_with_no_fields) {
     ASSERT_FALSE(cmd->context_signal.readString(cs::Field::user, &v));
     ASSERT_FALSE(cmd->context_signal.readExit(&e));
 }
+
+/* iterm2.zig */
+
+TEST(iterm2, OSC_1337_test_valid_unimplemented_key_with_no_value) {
+    Parser p(true);
+    ASSERT_TRUE(feed_end(p, "1337;SetBadgeFormat", true, '\x1b') == nullptr);
+}
+
+TEST(iterm2, OSC_1337_test_valid_unimplemented_key_with_empty_value) {
+    Parser p(true);
+    ASSERT_TRUE(feed_end(p, "1337;SetBadgeFormat=", true, '\x1b') == nullptr);
+}
+
+TEST(iterm2, OSC_1337_test_valid_unimplemented_key_with_non_empty_value) {
+    Parser p(true);
+    ASSERT_TRUE(feed_end(p, "1337;SetBadgeFormat=abc123", true, '\x1b') == nullptr);
+}
+
+TEST(iterm2, OSC_1337_test_valid_key_with_lower_case_and_with_no_value) {
+    Parser p(true);
+    ASSERT_TRUE(feed_end(p, "1337;setbadgeformat", true, '\x1b') == nullptr);
+}
+
+TEST(iterm2, OSC_1337_test_valid_key_with_lower_case_and_with_empty_value) {
+    Parser p(true);
+    ASSERT_TRUE(feed_end(p, "1337;setbadgeformat=", true, '\x1b') == nullptr);
+}
+
+TEST(iterm2, OSC_1337_test_valid_key_with_lower_case_and_with_non_empty_value) {
+    Parser p(true);
+    ASSERT_TRUE(feed_end(p, "1337;setbadgeformat=abc123", true, '\x1b') == nullptr);
+}
+
+TEST(iterm2, OSC_1337_test_invalid_key_with_no_value) {
+    Parser p(true);
+    ASSERT_TRUE(feed_end(p, "1337;BobrKurwa", true, '\x1b') == nullptr);
+}
+
+TEST(iterm2, OSC_1337_test_invalid_key_with_empty_value) {
+    Parser p(true);
+    ASSERT_TRUE(feed_end(p, "1337;BobrKurwa=", true, '\x1b') == nullptr);
+}
+
+TEST(iterm2, OSC_1337_test_invalid_key_with_non_empty_value) {
+    Parser p(true);
+    ASSERT_TRUE(feed_end(p, "1337;BobrKurwa=abc123", true, '\x1b') == nullptr);
+}
+
+TEST(iterm2, OSC_1337_test_Copy_with_no_value) {
+    Parser p(true);
+    ASSERT_TRUE(feed_end(p, "1337;Copy", true, '\x1b') == nullptr);
+}
+
+TEST(iterm2, OSC_1337_test_Copy_with_empty_value) {
+    Parser p(true);
+    ASSERT_TRUE(feed_end(p, "1337;Copy=", true, '\x1b') == nullptr);
+}
+
+TEST(iterm2, OSC_1337_test_Copy_with_only_prefix_colon) {
+    Parser p(true);
+    ASSERT_TRUE(feed_end(p, "1337;Copy=:", true, '\x1b') == nullptr);
+}
+
+TEST(iterm2, OSC_1337_test_Copy_with_question_mark) {
+    Parser p(true);
+    ASSERT_TRUE(feed_end(p, "1337;Copy=:?", true, '\x1b') == nullptr);
+}
+
+/* "OSC: 1337: test Copy with non-empty value that is invalid base64" is
+ * skipped upstream (error.SkipZigTest): for performance reasons, base64 is
+ * not checked right now. */
+
+TEST(iterm2, OSC_1337_test_Copy_with_non_empty_value_that_is_valid_base64_but_not_prefixed_with_a_colon) {
+    Parser p(true);
+    ASSERT_TRUE(feed_end(p, "1337;Copy=YWJjMTIz", true, '\x1b') == nullptr);
+}
+
+TEST(iterm2, OSC_1337_test_Copy_with_non_empty_value_that_is_valid_base64) {
+    Parser p(true);
+    Command *cmd = feed_end(p, "1337;Copy=:YWJjMTIz", true, '\x1b');
+    ASSERT_TRUE(cmd && cmd->key == Command::Key::clipboard_contents);
+    ASSERT_TRUE(cmd->clipboard_contents.kind == 'c');
+    ASSERT_TRUE(cmd->clipboard_contents.data.eql("YWJjMTIz"));
+}
+
+TEST(iterm2, OSC_1337_test_CurrentDir_with_no_value) {
+    Parser p(true);
+    ASSERT_TRUE(feed_end(p, "1337;CurrentDir", true, '\x1b') == nullptr);
+}
+
+TEST(iterm2, OSC_1337_test_CurrentDir_with_empty_value) {
+    Parser p(true);
+    ASSERT_TRUE(feed_end(p, "1337;CurrentDir=", true, '\x1b') == nullptr);
+}
+
+TEST(iterm2, OSC_1337_test_CurrentDir_with_non_empty_value) {
+    Parser p(true);
+    Command *cmd = feed_end(p, "1337;CurrentDir=abc123", true, '\x1b');
+    ASSERT_TRUE(cmd && cmd->key == Command::Key::report_pwd);
+    ASSERT_TRUE(cmd->report_pwd.value.eql("abc123"));
+}

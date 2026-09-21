@@ -3,7 +3,7 @@
  * change_window_title.zig, change_window_icon.zig, hyperlink.zig,
  * report_pwd.zig, mouse_shape.zig, clipboard_operation.zig, color.zig,
  * kitty_color.zig, kitty_dnd_protocol.zig, rxvt_extension.zig,
- * kitty_text_sizing.zig, context_signal.zig
+ * kitty_text_sizing.zig, context_signal.zig, iterm2.zig
  * Copyright (c) 2024 Mitchell Hashimoto, Ghostty contributors
  * MIT License — see THIRD_PARTY_NOTICES.md
  *
@@ -27,7 +27,7 @@
  * Wisp: PARSERS NOT YET TRANSLITERATED. osc/parsers/ holds one file per
  * command family. Only the ones named above are here; the rest — osc9,
  * kitty_clipboard_protocol, kitty_desktop_notification,
- * semantic_prompt and iterm2 — arrive in
+ * and semantic_prompt — arrive in
  * later slices. Until then end() returns null for their states, exactly as
  * it would for an invalid sequence, and Command keeps a tag for each so the
  * dispatch in end() already has upstream's shape.
@@ -1676,6 +1676,216 @@ inline Command *parse(Parser *parser, bool, uint8_t) {
 }
 } /* namespace context_signal */
 
+namespace iterm2 {
+
+enum class Key : uint8_t {
+    AddAnnotation,
+    AddHiddenAnnotation,
+    Block,
+    Button,
+    ClearCapturedOutput,
+    ClearScrollback,
+    Copy,
+    CopyToClipboard,
+    CurrentDir,
+    CursorShape,
+    Custom,
+    Disinter,
+    EndCopy,
+    File,
+    FileEnd,
+    FilePart,
+    HighlightCursorLine,
+    MultipartFile,
+    OpenURL,
+    PopKeyLabels,
+    PushKeyLabels,
+    RemoteHost,
+    ReportCellSize,
+    ReportVariable,
+    RequestAttention,
+    RequestUpload,
+    SetBackgroundImageFile,
+    SetBadgeFormat,
+    SetColors,
+    SetKeyLabel,
+    SetMark,
+    SetProfile,
+    SetUserVar,
+    ShellIntegrationVersion,
+    StealFocus,
+    UnicodeVersion,
+};
+
+/* Instead of using `std.meta.stringToEnum` we set up a StaticStringMap so
+ * that we can get ASCII case-insensitive lookups.
+ *
+ * Wisp: map.get — a linear scan with std.ascii.eqlIgnoreCase. */
+inline bool map_get(const char *s, size_t len, Key *out) {
+    static const char *const names[] = {
+        "AddAnnotation",
+        "AddHiddenAnnotation",
+        "Block",
+        "Button",
+        "ClearCapturedOutput",
+        "ClearScrollback",
+        "Copy",
+        "CopyToClipboard",
+        "CurrentDir",
+        "CursorShape",
+        "Custom",
+        "Disinter",
+        "EndCopy",
+        "File",
+        "FileEnd",
+        "FilePart",
+        "HighlightCursorLine",
+        "MultipartFile",
+        "OpenURL",
+        "PopKeyLabels",
+        "PushKeyLabels",
+        "RemoteHost",
+        "ReportCellSize",
+        "ReportVariable",
+        "RequestAttention",
+        "RequestUpload",
+        "SetBackgroundImageFile",
+        "SetBadgeFormat",
+        "SetColors",
+        "SetKeyLabel",
+        "SetMark",
+        "SetProfile",
+        "SetUserVar",
+        "ShellIntegrationVersion",
+        "StealFocus",
+        "UnicodeVersion",
+    };
+    for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
+        if (strlen(names[i]) != len) continue;
+        bool eq = true;
+        for (size_t j = 0; j < len; j++) {
+            char a = s[j], b = names[i][j];
+            if (a >= 'A' && a <= 'Z') a = (char)(a + 32);
+            if (b >= 'A' && b <= 'Z') b = (char)(b + 32);
+            if (a != b) { eq = false; break; }
+        }
+        if (eq) {
+            *out = (Key)i;
+            return true;
+        }
+    }
+    return false;
+}
+
+/* Parse OSC 1337
+ * https://iterm2.com/documentation-escape-codes.html */
+inline Command *parse(Parser *parser, bool, uint8_t) {
+    /* assert(parser.state == .@"1337") */
+
+    if (!parser->has_capture) {
+        parser->state = Parser::State::invalid;
+        return nullptr;
+    }
+    Parser::Capture *cap = &parser->capture;
+    if (!cap->writer.writeByte(0)) {
+        parser->state = Parser::State::invalid;
+        return nullptr;
+    }
+    char *data = cap->trailing();
+    const size_t data_len = cap->trailing_len();
+
+    ZStr key_str;
+    bool has_value = false;
+    ZStr value_;
+    {
+        char *eq = (char *)memchr(data, '=', data_len);
+        if (!eq) {
+            key_str = ZStr(data, data_len - 1);
+        } else {
+            const size_t index = (size_t)(eq - data);
+            data[index] = 0;
+            key_str = ZStr(data, index);
+            has_value = true;
+            value_ = ZStr(data + index + 1, data_len - 1 - (index + 1));
+        }
+    }
+
+    Key key;
+    if (!map_get(key_str.ptr, key_str.len, &key)) {
+        parser->command = Command();
+        return nullptr;
+    }
+
+    switch (key) {
+        case Key::Copy: {
+            if (!has_value) {
+                parser->command = Command();
+                return nullptr;
+            }
+            ZStr value = value_;
+
+            /* Sending a blank entry to clear the clipboard is an OSC 52-ism,
+             * make sure that is invalid here. */
+            if (value.len == 0) {
+                parser->command = Command();
+                return nullptr;
+            }
+
+            /* base64 value must be prefixed by a colon */
+            if (value.ptr[0] != ':') {
+                parser->command = Command();
+                return nullptr;
+            }
+
+            value = ZStr(value.ptr + 1, value.len - 1);
+
+            /* Sending a blank entry to clear the clipboard is an OSC 52-ism,
+             * make sure that is invalid here. */
+            if (value.len == 0) {
+                parser->command = Command();
+                return nullptr;
+            }
+
+            /* Sending a '?' to query the clipboard is an OSC 52-ism, make sure
+             * that is invalid here. */
+            if (value.len == 1 && value.ptr[0] == '?') {
+                parser->command = Command();
+                return nullptr;
+            }
+
+            /* It would be better to check for valid base64 data here, but that
+             * would mean parsing the base64 data twice in the "normal" case. */
+
+            parser->command = Command();
+            parser->command.key = Command::Key::clipboard_contents;
+            parser->command.clipboard_contents.kind = 'c';
+            parser->command.clipboard_contents.data = value;
+            return &parser->command;
+        }
+
+        case Key::CurrentDir: {
+            if (!has_value) {
+                parser->command = Command();
+                return nullptr;
+            }
+            if (value_.len == 0) {
+                parser->command = Command();
+                return nullptr;
+            }
+            parser->command = Command();
+            parser->command.key = Command::Key::report_pwd;
+            parser->command.report_pwd.value = value_;
+            return &parser->command;
+        }
+
+        default:
+            /* log.debug("unimplemented OSC 1337: {t}") */
+            parser->command = Command();
+            return nullptr;
+    }
+}
+} /* namespace iterm2 */
+
 namespace kitty_dnd_protocol {
 inline Command *parse(Parser *parser, bool has_ch, uint8_t terminator_ch) {
     /* assert(parser.state == .@"72") */
@@ -2147,8 +2357,8 @@ inline Command *Parser::end(bool has_ch, uint8_t ch) {
 
         case S::s777: return parsers::rxvt_extension::parse(this, has_ch, ch);
 
-        /* Wisp: parsers.iterm2 — not yet transliterated. */
-        case S::s1337: return nullptr;
+        case S::s1337:
+            return parsers::iterm2::parse(this, has_ch, ch);
 
         /* Wisp: parsers.kitty_clipboard_protocol — not yet transliterated. */
         case S::s5522: return nullptr;
