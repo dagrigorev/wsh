@@ -859,3 +859,140 @@ TEST(report, questions_are_not_printed) {
     ASSERT_TRUE(strcmp(got, "ab") == 0);
     ASSERT_TRUE(strcmp(r.buf, "\x1b[1;2R") == 0);
 }
+
+/* ─── character sets ─────────────────────────────────────────────────────── */
+
+TEST(charset, line_drawing) {
+    Fixture f;
+    ASSERT_TRUE(f.init(20, 4));
+
+    /* What ncurses sends when it cannot be sure the terminal handles UTF-8.
+     * A terminal that ignored the switch draws the box as "lqqk". */
+    f.feed("\x1b(0" "lqqk" "\x1b(B");
+
+    ASSERT_EQ(screen_cell(f.t.active, 0, 0)->codepoint(), 0x250Cu);
+    ASSERT_EQ(screen_cell(f.t.active, 1, 0)->codepoint(), 0x2500u);
+    ASSERT_EQ(screen_cell(f.t.active, 2, 0)->codepoint(), 0x2500u);
+    ASSERT_EQ(screen_cell(f.t.active, 3, 0)->codepoint(), 0x2510u);
+}
+
+TEST(charset, switching_back_prints_letters_again) {
+    Fixture f;
+    ASSERT_TRUE(f.init(20, 4));
+    f.feed("\x1b(0" "x" "\x1b(B" "x");
+
+    ASSERT_EQ(screen_cell(f.t.active, 0, 0)->codepoint(), 0x2502u);
+    ASSERT_EQ(screen_cell(f.t.active, 1, 0)->codepoint(), 'x');
+}
+
+TEST(charset, a_whole_box) {
+    Fixture f;
+    ASSERT_TRUE(f.init(20, 4));
+    f.feed("\x1b(0" "lqk\r\nx x\r\nmqj" "\x1b(B");
+
+    ASSERT_EQ(screen_cell(f.t.active, 0, 0)->codepoint(), 0x250Cu);
+    ASSERT_EQ(screen_cell(f.t.active, 2, 0)->codepoint(), 0x2510u);
+    ASSERT_EQ(screen_cell(f.t.active, 0, 1)->codepoint(), 0x2502u);
+    ASSERT_EQ(screen_cell(f.t.active, 1, 1)->codepoint(), ' ');
+    ASSERT_EQ(screen_cell(f.t.active, 0, 2)->codepoint(), 0x2514u);
+    ASSERT_EQ(screen_cell(f.t.active, 2, 2)->codepoint(), 0x2518u);
+}
+
+TEST(charset, only_the_seven_bit_range_is_touched) {
+    Fixture f;
+    ASSERT_TRUE(f.init(20, 4));
+
+    /* A box-drawing character sent as UTF-8 has already been substituted by
+     * the program. Mapping it again would be wrong. */
+    f.feed("\x1b(0" "\xe2\x94\x80" "A" "\x1b(B");
+
+    ASSERT_EQ(screen_cell(f.t.active, 0, 0)->codepoint(), 0x2500u);
+    /* Uppercase is below the substituted range and passes through. */
+    ASSERT_EQ(screen_cell(f.t.active, 1, 0)->codepoint(), 'A');
+}
+
+TEST(charset, shift_out_and_shift_in) {
+    Fixture f;
+    ASSERT_TRUE(f.init(20, 4));
+
+    /* Load line drawing into G1 once, then flip with one byte each way —
+     * the reason there are slots at all. */
+    f.feed("\x1b)0" "q\x0eq\x0fq");
+
+    ASSERT_EQ(screen_cell(f.t.active, 0, 0)->codepoint(), 'q');
+    ASSERT_EQ(screen_cell(f.t.active, 1, 0)->codepoint(), 0x2500u);
+    ASSERT_EQ(screen_cell(f.t.active, 2, 0)->codepoint(), 'q');
+}
+
+TEST(charset, a_single_shift_lasts_one_character) {
+    Fixture f;
+    ASSERT_TRUE(f.init(20, 4));
+    f.feed("\x1b*0" "\x1bN" "qq");
+
+    /* That is the whole difference between a single shift and a shift. */
+    ASSERT_EQ(screen_cell(f.t.active, 0, 0)->codepoint(), 0x2500u);
+    ASSERT_EQ(screen_cell(f.t.active, 1, 0)->codepoint(), 'q');
+}
+
+TEST(charset, single_shift_three) {
+    Fixture f;
+    ASSERT_TRUE(f.init(20, 4));
+    f.feed("\x1b+A" "\x1bO" "##");
+
+    ASSERT_EQ(screen_cell(f.t.active, 0, 0)->codepoint(), 0xA3u);
+    ASSERT_EQ(screen_cell(f.t.active, 1, 0)->codepoint(), '#');
+}
+
+TEST(charset, british_replaces_one_character) {
+    Fixture f;
+    ASSERT_TRUE(f.init(20, 4));
+    f.feed("\x1b(A" "#1 a" "\x1b(B");
+
+    ASSERT_EQ(screen_cell(f.t.active, 0, 0)->codepoint(), 0xA3u);
+    ASSERT_EQ(screen_cell(f.t.active, 1, 0)->codepoint(), '1');
+    ASSERT_EQ(screen_cell(f.t.active, 3, 0)->codepoint(), 'a');
+}
+
+TEST(charset, an_unknown_set_leaves_the_slot_alone) {
+    Fixture f;
+    ASSERT_TRUE(f.init(20, 4));
+
+    /* Substituting ASCII for a set a program asked for would print the wrong
+     * characters with no sign anything was wrong. */
+    f.feed("\x1b(0" "\x1b(Z" "q");
+    ASSERT_EQ(screen_cell(f.t.active, 0, 0)->codepoint(), 0x2500u);
+}
+
+TEST(charset, saved_and_restored_with_the_cursor) {
+    Fixture f;
+    ASSERT_TRUE(f.init(20, 4));
+
+    /* Save, switch to line drawing to draw something, restore: the program
+     * expects to be printing text again, not more line drawing. */
+    f.feed("\x1b" "7" "\x1b(0" "q" "\x1b" "8" "q");
+
+    ASSERT_EQ(screen_cell(f.t.active, 0, 0)->codepoint(), 'q');
+}
+
+TEST(charset, the_alternate_screen_gives_them_back) {
+    Fixture f;
+    ASSERT_TRUE(f.init(20, 4));
+    f.feed("\x1b[?1049h" "\x1b(0" "q" "\x1b[?1049l" "q");
+
+    /* A full-screen program that left line drawing switched on must not
+     * leave the shell drawing its prompt in box pieces. */
+    ASSERT_EQ(screen_cell(f.t.active, 0, 0)->codepoint(), 'q');
+}
+
+TEST(charset, the_mapping_table_is_complete) {
+    /* Every byte in the substituted range maps to something other than
+     * itself, and nothing outside it moves. */
+    for (uint32_t c = 0x5F; c <= 0x7E; c++) {
+        ASSERT_TRUE(charset_map(Charset::dec_special, c) != c);
+        ASSERT_TRUE(charset_map(Charset::dec_special, c) >= 0xA0u);
+    }
+    for (uint32_t c = 0x20; c < 0x5F; c++) {
+        ASSERT_EQ(charset_map(Charset::dec_special, c), c);
+    }
+    ASSERT_EQ(charset_map(Charset::dec_special, 0x7F), 0x7Fu);
+}

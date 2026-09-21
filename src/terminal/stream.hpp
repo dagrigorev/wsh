@@ -321,6 +321,8 @@ inline void stream_execute(Terminal *t, uint8_t b) {
             terminal_linefeed(t);
             break;
         case 0x0D: terminal_carriage_return(t); break;
+        case 0x0E: terminal_shift_out(t); break;   /* SO: print from G1 */
+        case 0x0F: terminal_shift_in(t); break;    /* SI: back to G0 */
         default: break;
     }
 }
@@ -436,16 +438,29 @@ inline void stream_csi(Terminal *t, const parser::Action &a) {
 }
 
 inline void stream_esc(Terminal *t, const parser::Action &a) {
+    if (a.intermediate_count == 1) {
+        /* ESC ( ) * + load a set into G0 to G3. */
+        switch (a.intermediates[0]) {
+            case '(': terminal_designate_charset(t, 0, a.final_byte); return;
+            case ')': terminal_designate_charset(t, 1, a.final_byte); return;
+            case '*': terminal_designate_charset(t, 2, a.final_byte); return;
+            case '+': terminal_designate_charset(t, 3, a.final_byte); return;
+            default: return;
+        }
+    }
+
     if (a.intermediate_count > 0) {
-        /* Character set selection and the rest. Nothing here implements
-         * them, and doing nothing is right until something does — guessing
-         * would corrupt output rather than merely not improving it. */
+        /* Anything else with intermediates is not implemented, and doing
+         * nothing is right until something is — guessing would corrupt
+         * output rather than merely not improving it. */
         return;
     }
 
     switch (a.final_byte) {
-        case '7': screen_save_cursor(t->active); break;
-        case '8': screen_restore_cursor(t->active); break;
+        case '7': terminal_save_cursor(t); break;
+        case '8': terminal_restore_cursor(t); break;
+        case 'N': terminal_single_shift(t, 2); break;
+        case 'O': terminal_single_shift(t, 3); break;
         case 'D': terminal_linefeed(t); break;
         case 'E':
             terminal_carriage_return(t);

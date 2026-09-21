@@ -143,9 +143,8 @@ struct Selection {
  * since moved up. That is the opposite of what the cursor itself wants, and
  * the difference is the whole reason a pin and a coordinate are both kept.
  *
- * Upstream this also carries the character sets and the origin mode, which
- * are Terminal's state rather than the screen's. They join it when Terminal
- * does. */
+ * Upstream this also carries the character sets, which are Terminal's state
+ * rather than the screen's; terminal_save_cursor saves them beside this. */
 struct SavedCursor {
     CellCountInt x;
     CellCountInt y;

@@ -28,10 +28,9 @@
  * nothing runs on it yet.
  *
  * PARTIAL PORT. The terminal, its modes, both screens, printing, the C0
- * control characters, tab stops, scroll regions and the insert and delete
- * operations are here. The character sets, the rest of the modes and the
- * escape sequence dispatch are not, so the ledger records Terminal.zig as
- * `wip`.
+ * control characters, tab stops, scroll regions, the insert and delete
+ * operations and the character sets are here. The rest of the modes are not,
+ * so the ledger records Terminal.zig as `wip`.
  */
 
 #pragma once
@@ -44,6 +43,7 @@
 #include <string.h>
 
 #include "screen.hpp"
+#include "charsets.hpp"
 
 namespace wisp {
 namespace terminal {
@@ -84,6 +84,31 @@ struct Modes {
           alt_screen(false) {}
 };
 
+/* ─── character sets ─────────────────────────────────────────────────────── */
+
+/* Which sets are loaded, and which one is in use.
+ *
+ * Four slots, G0 to G3, each holding a set. A program loads a set into a
+ * slot with one sequence and switches to the slot with another, which is why
+ * there are two steps rather than "use this set": a program could load line
+ * drawing into G1 once and then flip between G0 and G1 with a single byte
+ * each time, which mattered when bytes cost something.
+ *
+ * gl is the slot ordinary text is printed from — G0 until SO says G1.
+ * single_shift is SS2 or SS3, which use G2 or G3 for exactly one character
+ * and then go back. */
+struct CharsetState {
+    Charset slots[4];
+    uint8_t gl;
+
+    /* 0 when none is pending, otherwise 2 or 3. */
+    uint8_t single_shift;
+
+    CharsetState() : gl(0), single_shift(0) {
+        for (int i = 0; i < 4; i++) slots[i] = Charset::ascii;
+    }
+};
+
 /* ─── the terminal ───────────────────────────────────────────────────────── */
 
 /* How far apart tab stops are when there is nothing better to say.
@@ -113,6 +138,15 @@ struct Terminal {
     CellCountInt scroll_top;
     CellCountInt scroll_bot;
 
+    CharsetState charsets;
+
+    /* The character sets as DECSC left them. They are saved alongside the
+     * cursor because a program that saves the cursor, switches to line
+     * drawing to draw a box and restores expects to be printing text again
+     * afterwards — the saved cursor has noted since it was ported that this
+     * part of it belonged to the terminal, and this is where it arrives. */
+    CharsetState saved_charsets;
+
     /* What OSC 0 and 2 last set, for the window. Kept here rather than
      * applied anywhere, because a terminal emulator has no window — whatever
      * hosts it reads this. */
@@ -131,8 +165,8 @@ struct Terminal {
 
     Terminal()
         : primary(), alternate(), active(nullptr), modes(), cols(0), rows(0),
-          scroll_top(0), scroll_bot(0), title_len(0), next_implicit_link(0),
-          tabs(nullptr) {
+          scroll_top(0), scroll_bot(0), charsets(), saved_charsets(),
+          title_len(0), next_implicit_link(0), tabs(nullptr) {
         title[0] = '\0';
     }
 };
@@ -217,6 +251,7 @@ inline void terminal_alt_screen_enter(Terminal *t) {
     if (t->modes.alt_screen) return;
 
     screen_save_cursor(&t->primary);
+    t->saved_charsets = t->charsets;
 
     t->active = &t->alternate;
     t->modes.alt_screen = true;
@@ -236,6 +271,49 @@ inline void terminal_alt_screen_leave(Terminal *t) {
     t->modes.alt_screen = false;
 
     screen_restore_cursor(&t->primary);
+    t->charsets = t->saved_charsets;
+}
+
+/* ─── character sets ─────────────────────────────────────────────────────── */
+
+/* ESC ( X and its relatives: load a set into a slot. */
+inline void terminal_designate_charset(Terminal *t, int slot, uint8_t designator) {
+    if (slot < 0 || slot > 3) return;
+    Charset cs;
+    if (charset_from_designator(designator, &cs)) t->charsets.slots[slot] = cs;
+}
+
+/* SI and SO: print from G0 or G1. */
+inline void terminal_shift_in(Terminal *t) { t->charsets.gl = 0; }
+inline void terminal_shift_out(Terminal *t) { t->charsets.gl = 1; }
+
+/* SS2 and SS3: the next character only comes from G2 or G3. */
+inline void terminal_single_shift(Terminal *t, uint8_t slot) {
+    if (slot == 2 || slot == 3) t->charsets.single_shift = slot;
+}
+
+/* The codepoint a printed character becomes under the sets in force.
+ *
+ * A single shift applies to this character and is then used up, which is the
+ * whole difference between it and a shift. */
+inline uint32_t terminal_map_charset(Terminal *t, uint32_t cp) {
+    uint8_t slot = t->charsets.gl;
+    if (t->charsets.single_shift) {
+        slot = t->charsets.single_shift;
+        t->charsets.single_shift = 0;
+    }
+    return charset_map(t->charsets.slots[slot], cp);
+}
+
+/* DECSC and DECRC for the whole terminal: the cursor, and the sets. */
+inline void terminal_save_cursor(Terminal *t) {
+    screen_save_cursor(t->active);
+    t->saved_charsets = t->charsets;
+}
+
+inline void terminal_restore_cursor(Terminal *t) {
+    screen_restore_cursor(t->active);
+    t->charsets = t->saved_charsets;
 }
 
 /* ─── printing ───────────────────────────────────────────────────────────── */
@@ -246,6 +324,7 @@ inline void terminal_alt_screen_leave(Terminal *t) {
  * tables the terminal is configured with rather than on anything here. */
 inline bool terminal_print(Terminal *t, uint32_t cp, int width) {
     Screen *s = t->active;
+    cp = terminal_map_charset(t, cp);
 
     if (t->modes.insert) {
         /* IRM: what is on the line moves right to make room, and whatever
