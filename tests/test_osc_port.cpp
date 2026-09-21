@@ -2282,3 +2282,699 @@ TEST(semantic_prompt, Option_read_exit_code) {
     { int32_t v79; ASSERT_FALSE(sp::Option_read(sp::Option::exit_code, "abc", &v79)); }
     { int32_t v80; ASSERT_TRUE(sp::Option_read(sp::Option::exit_code, "127;aid=foo", &v80) && v80 == 127); }
 }
+
+/* osc9.zig */
+
+TEST(osc9, OSC_9_show_desktop_notification) {
+    Parser p; /* .init(null) */
+    const char *input = "9;Hello world";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end('\x1b');
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::show_desktop_notification);
+    ASSERT_TRUE(cmd.show_desktop_notification.title.eql(""));
+    ASSERT_TRUE(cmd.show_desktop_notification.body.eql("Hello world"));
+}
+
+TEST(osc9, OSC_9_show_single_character_desktop_notification) {
+    Parser p; /* .init(null) */
+    const char *input = "9;H";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end('\x1b');
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::show_desktop_notification);
+    ASSERT_TRUE(cmd.show_desktop_notification.title.eql(""));
+    ASSERT_TRUE(cmd.show_desktop_notification.body.eql("H"));
+}
+
+TEST(osc9, OSC_9_1_ConEmu_sleep) {
+    Parser p; /* .init(null) */
+    const char *input = "9;1;420";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end('\x1b');
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::conemu_sleep);
+    ASSERT_TRUE(cmd.conemu_sleep.duration_ms == 420);
+}
+
+TEST(osc9, OSC_9_1_ConEmu_sleep_with_no_value_default_to_100ms) {
+    Parser p; /* .init(null) */
+    const char *input = "9;1;";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end('\x1b');
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::conemu_sleep);
+    ASSERT_TRUE(cmd.conemu_sleep.duration_ms == 100);
+}
+
+TEST(osc9, OSC_9_1_conemu_sleep_cannot_exceed_10000ms) {
+    Parser p; /* .init(null) */
+    const char *input = "9;1;12345";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end('\x1b');
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::conemu_sleep);
+    ASSERT_TRUE(cmd.conemu_sleep.duration_ms == 10000);
+}
+
+TEST(osc9, OSC_9_1_conemu_sleep_invalid_input) {
+    Parser p; /* .init(null) */
+    const char *input = "9;1;foo";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end('\x1b');
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::conemu_sleep);
+    ASSERT_TRUE(cmd.conemu_sleep.duration_ms == 100);
+}
+
+TEST(osc9, OSC_9_1_conemu_sleep_desktop_notification_1) {
+    Parser p; /* .init(null) */
+    const char *input = "9;1";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end('\x1b');
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::show_desktop_notification);
+    ASSERT_TRUE(cmd.show_desktop_notification.body.eql("1"));
+}
+
+TEST(osc9, OSC_9_1_conemu_sleep_desktop_notification_2) {
+    Parser p; /* .init(null) */
+    const char *input = "9;1a";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end('\x1b');
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::show_desktop_notification);
+    ASSERT_TRUE(cmd.show_desktop_notification.body.eql("1a"));
+}
+
+TEST(osc9, OSC_9_2_ConEmu_message_box) {
+    Parser p; /* .init(null) */
+    const char *input = "9;2;hello world";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end('\x1b');
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::conemu_show_message_box);
+    ASSERT_TRUE(cmd.conemu_show_message_box.eql("hello world"));
+}
+
+TEST(osc9, OSC_9_2_ConEmu_message_box_invalid_input) {
+    Parser p; /* .init(null) */
+    const char *input = "9;2";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end('\x1b');
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::show_desktop_notification);
+    ASSERT_TRUE(cmd.show_desktop_notification.body.eql("2"));
+}
+
+TEST(osc9, OSC_9_2_ConEmu_message_box_empty_message) {
+    Parser p; /* .init(null) */
+    const char *input = "9;2;";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end('\x1b');
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::conemu_show_message_box);
+    ASSERT_TRUE(cmd.conemu_show_message_box.eql(""));
+}
+
+TEST(osc9, OSC_9_2_ConEmu_message_box_spaces_only_message) {
+    Parser p; /* .init(null) */
+    const char *input = "9;2;   ";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end('\x1b');
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::conemu_show_message_box);
+    ASSERT_TRUE(cmd.conemu_show_message_box.eql("   "));
+}
+
+TEST(osc9, OSC_9_2_message_box_desktop_notification_1) {
+    Parser p; /* .init(null) */
+    const char *input = "9;2";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end('\x1b');
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::show_desktop_notification);
+    ASSERT_TRUE(cmd.show_desktop_notification.body.eql("2"));
+}
+
+TEST(osc9, OSC_9_2_message_box_desktop_notification_2) {
+    Parser p; /* .init(null) */
+    const char *input = "9;2a";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end('\x1b');
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::show_desktop_notification);
+    ASSERT_TRUE(cmd.show_desktop_notification.body.eql("2a"));
+}
+
+TEST(osc9, OSC_9_3_ConEmu_change_tab_title) {
+    Parser p; /* .init(null) */
+    const char *input = "9;3;foo bar";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end('\x1b');
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::conemu_change_tab_title);
+    ASSERT_TRUE(cmd.conemu_change_tab_title.value.eql("foo bar"));
+}
+
+TEST(osc9, OSC_9_3_ConEmu_change_tab_title_reset) {
+    Parser p; /* .init(null) */
+    const char *input = "9;3;";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end('\x1b');
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::conemu_change_tab_title);
+    ASSERT_TRUE(cmd.conemu_change_tab_title.tag == decltype(cmd.conemu_change_tab_title)::Tag::reset);
+}
+
+TEST(osc9, OSC_9_3_ConEmu_change_tab_title_spaces_only) {
+    Parser p; /* .init(null) */
+    const char *input = "9;3;   ";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end('\x1b');
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::conemu_change_tab_title);
+    ASSERT_TRUE(cmd.conemu_change_tab_title.value.eql("   "));
+}
+
+TEST(osc9, OSC_9_3_change_tab_title_desktop_notification_1) {
+    Parser p; /* .init(null) */
+    const char *input = "9;3";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end('\x1b');
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::show_desktop_notification);
+    ASSERT_TRUE(cmd.show_desktop_notification.body.eql("3"));
+}
+
+TEST(osc9, OSC_9_3_message_box_desktop_notification_2) {
+    Parser p; /* .init(null) */
+    const char *input = "9;3a";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end('\x1b');
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::show_desktop_notification);
+    ASSERT_TRUE(cmd.show_desktop_notification.body.eql("3a"));
+}
+
+TEST(osc9, OSC_9_4_ConEmu_progress_set) {
+    Parser p; /* .init(null) */
+    const char *input = "9;4;1;100";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end('\x1b');
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::conemu_progress_report);
+    ASSERT_TRUE(cmd.conemu_progress_report.state == ProgressReport::State::set);
+    ASSERT_TRUE(cmd.conemu_progress_report.has_progress && cmd.conemu_progress_report.progress == 100);
+}
+
+TEST(osc9, OSC_9_4_ConEmu_progress_set_overflow) {
+    Parser p; /* .init(null) */
+    const char *input = "9;4;1;900";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end('\x1b');
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::conemu_progress_report);
+    ASSERT_TRUE(cmd.conemu_progress_report.state == ProgressReport::State::set);
+    ASSERT_TRUE(cmd.conemu_progress_report.has_progress && cmd.conemu_progress_report.progress == 100);
+}
+
+TEST(osc9, OSC_9_4_ConEmu_progress_set_single_digit) {
+    Parser p; /* .init(null) */
+    const char *input = "9;4;1;9";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end('\x1b');
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::conemu_progress_report);
+    ASSERT_TRUE(cmd.conemu_progress_report.state == ProgressReport::State::set);
+    ASSERT_TRUE(cmd.conemu_progress_report.has_progress && cmd.conemu_progress_report.progress == 9);
+}
+
+TEST(osc9, OSC_9_4_ConEmu_progress_set_double_digit) {
+    Parser p; /* .init(null) */
+    const char *input = "9;4;1;94";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end('\x1b');
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::conemu_progress_report);
+    ASSERT_TRUE(cmd.conemu_progress_report.state == ProgressReport::State::set);
+    ASSERT_TRUE(cmd.conemu_progress_report.has_progress && cmd.conemu_progress_report.progress == 94);
+}
+
+TEST(osc9, OSC_9_4_ConEmu_progress_set_extra_semicolon_ignored) {
+    Parser p; /* .init(null) */
+    const char *input = "9;4;1;100";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end('\x1b');
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::conemu_progress_report);
+    ASSERT_TRUE(cmd.conemu_progress_report.state == ProgressReport::State::set);
+    ASSERT_TRUE(cmd.conemu_progress_report.has_progress && cmd.conemu_progress_report.progress == 100);
+}
+
+TEST(osc9, OSC_9_4_ConEmu_progress_remove_with_no_progress) {
+    Parser p; /* .init(null) */
+    const char *input = "9;4;0;";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end('\x1b');
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::conemu_progress_report);
+    ASSERT_TRUE(cmd.conemu_progress_report.state == ProgressReport::State::remove);
+    ASSERT_FALSE(cmd.conemu_progress_report.has_progress);
+}
+
+TEST(osc9, OSC_9_4_ConEmu_progress_remove_with_double_semicolon) {
+    Parser p; /* .init(null) */
+    const char *input = "9;4;0;;";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end('\x1b');
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::conemu_progress_report);
+    ASSERT_TRUE(cmd.conemu_progress_report.state == ProgressReport::State::remove);
+    ASSERT_FALSE(cmd.conemu_progress_report.has_progress);
+}
+
+TEST(osc9, OSC_9_4_ConEmu_progress_remove_ignores_progress) {
+    Parser p; /* .init(null) */
+    const char *input = "9;4;0;100";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end('\x1b');
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::conemu_progress_report);
+    ASSERT_TRUE(cmd.conemu_progress_report.state == ProgressReport::State::remove);
+    ASSERT_FALSE(cmd.conemu_progress_report.has_progress);
+}
+
+TEST(osc9, OSC_9_4_ConEmu_progress_remove_extra_semicolon) {
+    Parser p; /* .init(null) */
+    const char *input = "9;4;0;100;";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end('\x1b');
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::conemu_progress_report);
+    ASSERT_TRUE(cmd.conemu_progress_report.state == ProgressReport::State::remove);
+}
+
+TEST(osc9, OSC_9_4_ConEmu_progress_error) {
+    Parser p; /* .init(null) */
+    const char *input = "9;4;2";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end('\x1b');
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::conemu_progress_report);
+    ASSERT_TRUE(cmd.conemu_progress_report.state == ProgressReport::State::error);
+    ASSERT_FALSE(cmd.conemu_progress_report.has_progress);
+}
+
+TEST(osc9, OSC_9_4_ConEmu_progress_error_with_progress) {
+    Parser p; /* .init(null) */
+    const char *input = "9;4;2;100";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end('\x1b');
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::conemu_progress_report);
+    ASSERT_TRUE(cmd.conemu_progress_report.state == ProgressReport::State::error);
+    ASSERT_TRUE(cmd.conemu_progress_report.has_progress && cmd.conemu_progress_report.progress == 100);
+}
+
+TEST(osc9, OSC_9_4_progress_pause) {
+    Parser p; /* .init(null) */
+    const char *input = "9;4;4";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end('\x1b');
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::conemu_progress_report);
+    ASSERT_TRUE(cmd.conemu_progress_report.state == ProgressReport::State::pause);
+    ASSERT_FALSE(cmd.conemu_progress_report.has_progress);
+}
+
+TEST(osc9, OSC_9_4_ConEmu_progress_pause_with_progress) {
+    Parser p; /* .init(null) */
+    const char *input = "9;4;4;100";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end('\x1b');
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::conemu_progress_report);
+    ASSERT_TRUE(cmd.conemu_progress_report.state == ProgressReport::State::pause);
+    ASSERT_TRUE(cmd.conemu_progress_report.has_progress && cmd.conemu_progress_report.progress == 100);
+}
+
+TEST(osc9, OSC_9_4_progress_desktop_notification_1) {
+    Parser p; /* .init(null) */
+    const char *input = "9;4";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end('\x1b');
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::show_desktop_notification);
+    ASSERT_TRUE(cmd.show_desktop_notification.body.eql("4"));
+}
+
+TEST(osc9, OSC_9_4_progress_desktop_notification_2) {
+    Parser p; /* .init(null) */
+    const char *input = "9;4;";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end('\x1b');
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::show_desktop_notification);
+    ASSERT_TRUE(cmd.show_desktop_notification.body.eql("4;"));
+}
+
+TEST(osc9, OSC_9_4_progress_desktop_notification_3) {
+    Parser p; /* .init(null) */
+    const char *input = "9;4;5";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end('\x1b');
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::show_desktop_notification);
+    ASSERT_TRUE(cmd.show_desktop_notification.body.eql("4;5"));
+}
+
+TEST(osc9, OSC_9_4_progress_desktop_notification_4) {
+    Parser p; /* .init(null) */
+    const char *input = "9;4;5a";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end('\x1b');
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::show_desktop_notification);
+    ASSERT_TRUE(cmd.show_desktop_notification.body.eql("4;5a"));
+}
+
+TEST(osc9, OSC_9_5_ConEmu_wait_input) {
+    Parser p; /* .init(null) */
+    const char *input = "9;5";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end('\x1b');
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::conemu_wait_input);
+}
+
+TEST(osc9, OSC_9_5_ConEmu_wait_ignores_trailing_characters) {
+    Parser p; /* .init(null) */
+    const char *input = "9;5;foo";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end('\x1b');
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::conemu_wait_input);
+}
+
+TEST(osc9, OSC_9_6_ConEmu_guimacro_1) {
+    Parser p(true);
+    const char *input = "9;6;a";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end('\x1b');
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::conemu_guimacro);
+    ASSERT_TRUE(cmd.conemu_guimacro.eql("a"));
+}
+
+TEST(osc9, OSC_9_6_ConEmu_guimacro_2) {
+    Parser p(true);
+    const char *input = "9;6;ab";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end('\x1b');
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::conemu_guimacro);
+    ASSERT_TRUE(cmd.conemu_guimacro.eql("ab"));
+}
+
+TEST(osc9, OSC_9_6_ConEmu_guimacro_3_incomplete_desktop_notification) {
+    Parser p(true);
+    const char *input = "9;6";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end('\x1b');
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::show_desktop_notification);
+    ASSERT_TRUE(cmd.show_desktop_notification.body.eql("6"));
+}
+
+TEST(osc9, OSC_9_7_ConEmu_run_process_1) {
+    Parser p(true);
+    const char *input = "9;7;ab";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end('\x1b');
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::conemu_run_process);
+    ASSERT_TRUE(cmd.conemu_run_process.eql("ab"));
+}
+
+TEST(osc9, OSC_9_7_ConEmu_run_process_2) {
+    Parser p(true);
+    const char *input = "9;7;";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end('\x1b');
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::conemu_run_process);
+    ASSERT_TRUE(cmd.conemu_run_process.eql(""));
+}
+
+TEST(osc9, OSC_9_7_ConEmu_run_process_incomplete_desktop_notification) {
+    Parser p(true);
+    const char *input = "9;7";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end('\x1b');
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::show_desktop_notification);
+    ASSERT_TRUE(cmd.show_desktop_notification.body.eql("7"));
+}
+
+TEST(osc9, OSC_9_8_ConEmu_output_environment_variable_1) {
+    Parser p(true);
+    const char *input = "9;8;ab";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end('\x1b');
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::conemu_output_environment_variable);
+    ASSERT_TRUE(cmd.conemu_output_environment_variable.eql("ab"));
+}
+
+TEST(osc9, OSC_9_8_ConEmu_output_environment_variable_2) {
+    Parser p(true);
+    const char *input = "9;8;";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end('\x1b');
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::conemu_output_environment_variable);
+    ASSERT_TRUE(cmd.conemu_output_environment_variable.eql(""));
+}
+
+TEST(osc9, OSC_9_8_ConEmu_output_environment_variable_incomplete_desktop_notification) {
+    Parser p(true);
+    const char *input = "9;8";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end('\x1b');
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::show_desktop_notification);
+    ASSERT_TRUE(cmd.show_desktop_notification.body.eql("8"));
+}
+
+TEST(osc9, OSC_9_9_ConEmu_set_current_working_directory) {
+    Parser p(true);
+    const char *input = "9;9;ab";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end('\x1b');
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::report_pwd);
+    ASSERT_TRUE(cmd.report_pwd.value.eql("ab"));
+}
+
+TEST(osc9, OSC_9_9_ConEmu_set_current_working_directory_incomplete_desktop_notification) {
+    Parser p(true);
+    const char *input = "9;9";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end('\x1b');
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::show_desktop_notification);
+    ASSERT_TRUE(cmd.show_desktop_notification.body.eql("9"));
+}
+
+TEST(osc9, OSC_9_10_ConEmu_xterm_keyboard_and_output_emulation_1) {
+    Parser p(true);
+    const char *input = "9;10";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end('\x1b');
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::conemu_xterm_emulation);
+    ASSERT_TRUE(cmd.conemu_xterm_emulation.has_keyboard);
+    ASSERT_TRUE(cmd.conemu_xterm_emulation.has_keyboard && cmd.conemu_xterm_emulation.keyboard == true);
+    ASSERT_TRUE(cmd.conemu_xterm_emulation.has_output);
+    ASSERT_TRUE(cmd.conemu_xterm_emulation.has_output && cmd.conemu_xterm_emulation.output == true);
+}
+
+TEST(osc9, OSC_9_10_ConEmu_xterm_keyboard_and_output_emulation_2) {
+    Parser p(true);
+    const char *input = "9;10;0";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end('\x1b');
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::conemu_xterm_emulation);
+    ASSERT_TRUE(cmd.conemu_xterm_emulation.has_keyboard);
+    ASSERT_TRUE(cmd.conemu_xterm_emulation.has_keyboard && cmd.conemu_xterm_emulation.keyboard == false);
+    ASSERT_TRUE(cmd.conemu_xterm_emulation.has_output);
+    ASSERT_TRUE(cmd.conemu_xterm_emulation.has_output && cmd.conemu_xterm_emulation.output == false);
+}
+
+TEST(osc9, OSC_9_10_ConEmu_xterm_keyboard_and_output_emulation_3) {
+    Parser p(true);
+    const char *input = "9;10;1";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end('\x1b');
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::conemu_xterm_emulation);
+    ASSERT_TRUE(cmd.conemu_xterm_emulation.has_keyboard);
+    ASSERT_TRUE(cmd.conemu_xterm_emulation.has_keyboard && cmd.conemu_xterm_emulation.keyboard == true);
+    ASSERT_TRUE(cmd.conemu_xterm_emulation.has_output);
+    ASSERT_TRUE(cmd.conemu_xterm_emulation.has_output && cmd.conemu_xterm_emulation.output == true);
+}
+
+TEST(osc9, OSC_9_10_ConEmu_xterm_keyboard_and_output_emulation_4) {
+    Parser p(true);
+    const char *input = "9;10;2";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end('\x1b');
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::conemu_xterm_emulation);
+    ASSERT_FALSE(cmd.conemu_xterm_emulation.has_keyboard);
+    ASSERT_TRUE(cmd.conemu_xterm_emulation.has_output);
+    ASSERT_TRUE(cmd.conemu_xterm_emulation.has_output && cmd.conemu_xterm_emulation.output == false);
+}
+
+TEST(osc9, OSC_9_10_ConEmu_xterm_keyboard_and_output_emulation_5) {
+    Parser p(true);
+    const char *input = "9;10;3";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end('\x1b');
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::conemu_xterm_emulation);
+    ASSERT_FALSE(cmd.conemu_xterm_emulation.has_keyboard);
+    ASSERT_TRUE(cmd.conemu_xterm_emulation.has_output);
+    ASSERT_TRUE(cmd.conemu_xterm_emulation.has_output && cmd.conemu_xterm_emulation.output == true);
+}
+
+TEST(osc9, OSC_9_10_ConEmu_xterm_keyboard_and_output_emulation_6) {
+    Parser p(true);
+    const char *input = "9;10;4";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end('\x1b');
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::show_desktop_notification);
+    ASSERT_TRUE(cmd.show_desktop_notification.body.eql("10;4"));
+}
+
+TEST(osc9, OSC_9_10_ConEmu_xterm_keyboard_and_output_emulation_7) {
+    Parser p(true);
+    const char *input = "9;10;";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end('\x1b');
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::show_desktop_notification);
+    ASSERT_TRUE(cmd.show_desktop_notification.body.eql("10;"));
+}
+
+TEST(osc9, OSC_9_10_ConEmu_xterm_keyboard_and_output_emulation_8) {
+    Parser p(true);
+    const char *input = "9;10;abc";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end('\x1b');
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::show_desktop_notification);
+    ASSERT_TRUE(cmd.show_desktop_notification.body.eql("10;abc"));
+}
+
+TEST(osc9, OSC_9_11_ConEmu_comment) {
+    Parser p(true);
+    const char *input = "9;11;ab";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end('\x1b');
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::conemu_comment);
+    ASSERT_TRUE(cmd.conemu_comment.eql("ab"));
+}
+
+TEST(osc9, OSC_9_11_ConEmu_comment_incomplete_desktop_notification) {
+    Parser p(true);
+    const char *input = "9;11";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end('\x1b');
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::show_desktop_notification);
+    ASSERT_TRUE(cmd.show_desktop_notification.body.eql("11"));
+}
+
+TEST(osc9, OSC_9_12_ConEmu_mark_prompt_start_1) {
+    Parser p(true);
+    const char *input = "9;12";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end('\x1b');
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::semantic_prompt);
+}
+
+TEST(osc9, OSC_9_12_ConEmu_mark_prompt_start_2) {
+    Parser p(true);
+    const char *input = "9;12;abc";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end('\x1b');
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::semantic_prompt);
+}

@@ -27,8 +27,8 @@
  * Comments are upstream's unless marked "Wisp:".
  *
  * Wisp: PARSERS NOT YET TRANSLITERATED. osc/parsers/ holds one file per
- * command family. Only the ones named above are here; the rest — osc9,
- * kitty_desktop_notification,
+ * command family. Only the ones named above are here; the rest —
+ * kitty_desktop_notification
  * — arrive in
  * later slices. Until then end() returns null for their states, exactly as
  * it would for an invalid sequence, and Command keeps a tag for each so the
@@ -1141,6 +1141,40 @@ struct Command {
 
 } /* namespace semantic_prompt */
 
+/* ─── osc.zig: Command.ProgressReport ──────────────────────────────────── */
+
+struct ProgressReport {
+    enum class State : uint8_t {
+        remove,
+        set,
+        error,
+        indeterminate,
+        pause,
+    };
+
+    State state;
+    /* Wisp: ?u8 = null is has_progress plus progress. */
+    bool has_progress;
+    uint8_t progress;
+
+    ProgressReport() : state(State::remove), has_progress(false), progress(0) {}
+
+    /* sync with ghostty_action_progress_report_s */
+    struct C {
+        int state;
+        int8_t progress;
+    };
+
+    C cval() const {
+        C c;
+        c.state = (int)state;
+        c.progress = has_progress
+            ? (int8_t)(progress > 100 ? 100 : progress)
+            : (int8_t)-1;
+        return c;
+    }
+};
+
 struct Command {
     /* NOTE: Order matters, see LibEnum documentation. */
     enum class Key : uint8_t {
@@ -1262,6 +1296,56 @@ struct Command {
     /* OSC 3008: hierarchical context signalling */
     context_signal::Command context_signal;
 
+    /* ConEmu sleep (OSC 9;1) */
+    struct {
+        uint16_t duration_ms;
+    } conemu_sleep;
+
+    /* ConEmu show GUI message box (OSC 9;2) */
+    ZStr conemu_show_message_box;
+
+    /* ConEmu change tab title (OSC 9;3)
+     * Wisp: union(enum) { reset, value } is a tag plus value. */
+    struct {
+        enum class Tag : uint8_t { reset, value };
+        Tag tag;
+        ZStr value;
+    } conemu_change_tab_title;
+
+    /* ConEmu progress report (OSC 9;4) */
+    ProgressReport conemu_progress_report;
+
+    /* ConEmu wait input (OSC 9;5): no payload */
+
+    /* ConEmu GUI macro (OSC 9;6) */
+    ZStr conemu_guimacro;
+
+    /* ConEmu run process (OSC 9;7) */
+    ZStr conemu_run_process;
+
+    /* ConEmu output environment variable (OSC 9;8) */
+    ZStr conemu_output_environment_variable;
+
+    /* ConEmu XTerm keyboard and output emulation (OSC 9;10)
+     * https://conemu.github.io/en/TerminalModes.html
+     *
+     * Wisp: each ?bool is has_x plus x. */
+    struct {
+        /* null => do not change
+         * false => turn off
+         * true => turn on */
+        bool has_keyboard;
+        bool keyboard;
+        /* null => do not change
+         * false => turn off
+         * true => turn on */
+        bool has_output;
+        bool output;
+    } conemu_xterm_emulation;
+
+    /* ConEmu comment (OSC 9;11) */
+    ZStr conemu_comment;
+
     /* Kitty text sizing protocol (OSC 66) */
     kitty_text_sizing::OSC kitty_text_sizing;
 
@@ -1301,6 +1385,12 @@ struct Command {
         color_operation.op = color::Operation::osc_4;
         color_operation.terminator = Terminator::st;
         kitty_color_protocol.terminator = Terminator::st;
+        conemu_sleep.duration_ms = 0;
+        conemu_change_tab_title.tag = decltype(conemu_change_tab_title)::Tag::reset;
+        conemu_xterm_emulation.has_keyboard = false;
+        conemu_xterm_emulation.keyboard = false;
+        conemu_xterm_emulation.has_output = false;
+        conemu_xterm_emulation.output = false;
         hyperlink_start.has_id = false;
         hyperlink_start.id = ZStr();
         hyperlink_start.uri = ZStr();
@@ -2584,6 +2674,260 @@ invalid:
 }
 } /* namespace semantic_prompt */
 
+namespace osc9 {
+
+/* Wisp: std.fmt.parseUnsigned(T, buf, 10) for T of max_value. '_'
+ * separators are not reproduced (see parsers::color::parse_u9). */
+inline bool parse_unsigned(const char *buf, size_t len, uint64_t max_value, uint64_t *out) {
+    if (len == 0) return false;
+    uint64_t v = 0;
+    for (size_t i = 0; i < len; i++) {
+        if (buf[i] < '0' || buf[i] > '9') return false;
+        const uint64_t d = (uint64_t)(buf[i] - '0');
+        if (v > (max_value - d) / 10) return false;
+        v = v * 10 + d;
+    }
+    *out = v;
+    return true;
+}
+
+inline Command *xterm_emulation(Parser *parser, bool has_keyboard, bool keyboard, bool output) {
+    parser->command = Command();
+    parser->command.key = Command::Key::conemu_xterm_emulation;
+    parser->command.conemu_xterm_emulation.has_keyboard = has_keyboard;
+    parser->command.conemu_xterm_emulation.keyboard = keyboard;
+    parser->command.conemu_xterm_emulation.has_output = true;
+    parser->command.conemu_xterm_emulation.output = output;
+    return &parser->command;
+}
+
+/* Wisp: the recurring "write a NUL, re-read trailing, take data[start ..
+ * len - 1 :0]" step. False when the write fails, after marking the parser
+ * invalid. */
+inline bool terminated_tail(Parser *parser, size_t start, ZStr *out) {
+    Parser::Capture *cap = &parser->capture;
+    if (!cap->writer.writeByte(0)) {
+        parser->state = Parser::State::invalid;
+        return false;
+    }
+    const char *data = cap->trailing();
+    const size_t data_len = cap->trailing_len();
+    *out = ZStr(data + start, data_len - 1 - start);
+    return true;
+}
+
+/* Parse OSC 9, which could be an iTerm2 notification or a ConEmu extension. */
+inline Command *parse(Parser *parser, bool, uint8_t) {
+    typedef ProgressReport::State PS;
+    if (!parser->has_capture) {
+        parser->state = Parser::State::invalid;
+        return nullptr;
+    }
+    Parser::Capture *cap = &parser->capture;
+
+    /* Check first to see if this is a ConEmu OSC
+     * https://conemu.github.io/en/AnsiEscapeCodes.html#ConEmu_specific_OSC */
+    {
+        const char *data = cap->trailing();
+        const size_t data_len = cap->trailing_len();
+        if (data_len == 0) goto not_conemu;
+        switch (data[0]) {
+            /* Check for OSC 9;1 9;10 9;11 9;12 */
+            case '1': {
+                if (data_len < 2) goto not_conemu;
+                switch (data[1]) {
+                    /* OSC 9;1 sleep */
+                    case ';': {
+                        uint64_t num;
+                        uint16_t duration_ms = 100;
+                        if (parse_unsigned(data + 2, data_len - 2, 0xFFFF, &num)) {
+                            duration_ms = (uint16_t)(num < 10000 ? num : 10000);
+                        }
+                        parser->command = Command();
+                        parser->command.key = Command::Key::conemu_sleep;
+                        parser->command.conemu_sleep.duration_ms = duration_ms;
+                        return &parser->command;
+                    }
+                    /* OSC 9;10 xterm keyboard and output emulation */
+                    case '0': {
+                        if (data_len == 2) return xterm_emulation(parser, true, true, true);
+                        if (data_len < 4) goto not_conemu;
+                        if (data[2] != ';') goto not_conemu;
+                        switch (data[3]) {
+                            case '0': return xterm_emulation(parser, true, false, false);
+                            case '1': return xterm_emulation(parser, true, true, true);
+                            case '2': return xterm_emulation(parser, false, false, false);
+                            case '3': return xterm_emulation(parser, false, false, true);
+                            default: goto not_conemu;
+                        }
+                    }
+                    /* OSC 9;11 comment */
+                    case '1': {
+                        if (data_len < 3) goto not_conemu;
+                        if (data[2] != ';') goto not_conemu;
+                        ZStr v;
+                        if (!terminated_tail(parser, 3, &v)) return nullptr;
+                        parser->command = Command();
+                        parser->command.key = Command::Key::conemu_comment;
+                        parser->command.conemu_comment = v;
+                        return &parser->command;
+                    }
+                    /* OSC 9;12 mark prompt start */
+                    case '2': {
+                        parser->command = Command();
+                        parser->command.key = Command::Key::semantic_prompt;
+                        parser->command.semantic_prompt =
+                            ::wisp::terminal::osc::semantic_prompt::Command::init(
+                                ::wisp::terminal::osc::semantic_prompt::Command::Action::fresh_line_new_prompt);
+                        return &parser->command;
+                    }
+                    default: goto not_conemu;
+                }
+            }
+            /* OSC 9;2 show message box */
+            case '2': {
+                if (data_len < 2) goto not_conemu;
+                if (data[1] != ';') goto not_conemu;
+                ZStr v;
+                if (!terminated_tail(parser, 2, &v)) return nullptr;
+                parser->command = Command();
+                parser->command.key = Command::Key::conemu_show_message_box;
+                parser->command.conemu_show_message_box = v;
+                return &parser->command;
+            }
+            /* OSC 9;3 change tab title */
+            case '3': {
+                if (data_len < 2) goto not_conemu;
+                if (data[1] != ';') goto not_conemu;
+                if (data_len == 2) {
+                    parser->command = Command();
+                    parser->command.key = Command::Key::conemu_change_tab_title;
+                    parser->command.conemu_change_tab_title.tag =
+                        decltype(parser->command.conemu_change_tab_title)::Tag::reset;
+                    return &parser->command;
+                }
+                ZStr v;
+                if (!terminated_tail(parser, 2, &v)) return nullptr;
+                parser->command = Command();
+                parser->command.key = Command::Key::conemu_change_tab_title;
+                parser->command.conemu_change_tab_title.tag =
+                    decltype(parser->command.conemu_change_tab_title)::Tag::value;
+                parser->command.conemu_change_tab_title.value = v;
+                return &parser->command;
+            }
+            /* OSC 9;4 progress report */
+            case '4': {
+                if (data_len < 2) goto not_conemu;
+                if (data[1] != ';') goto not_conemu;
+                if (data_len < 3) goto not_conemu;
+                PS state;
+                switch (data[2]) {
+                    case '0': state = PS::remove; break;
+                    case '1': state = PS::set; break;
+                    case '2': state = PS::error; break;
+                    case '3': state = PS::indeterminate; break;
+                    case '4': state = PS::pause; break;
+                    default: goto not_conemu;
+                }
+                parser->command = Command();
+                parser->command.key = Command::Key::conemu_progress_report;
+                parser->command.conemu_progress_report.state = state;
+                /* '1' sets .progress = 0 */
+                if (state == PS::set) {
+                    parser->command.conemu_progress_report.has_progress = true;
+                    parser->command.conemu_progress_report.progress = 0;
+                }
+                switch (state) {
+                    case PS::remove:
+                    case PS::indeterminate:
+                        break;
+                    case PS::set:
+                    case PS::error:
+                    case PS::pause: {
+                        if (data_len < 4) break;
+                        if (data[3] != ';') break;
+                        /* parse the progress value */
+                        uint64_t v;
+                        if (!parse_unsigned(data + 4, data_len - 4, SIZE_MAX, &v)) {
+                            parser->command.conemu_progress_report.has_progress = false;
+                        } else {
+                            parser->command.conemu_progress_report.has_progress = true;
+                            parser->command.conemu_progress_report.progress =
+                                (uint8_t)(v > 100 ? 100 : v);
+                        }
+                        break;
+                    }
+                }
+                return &parser->command;
+            }
+            /* OSC 9;5 wait for input */
+            case '5': {
+                parser->command = Command();
+                parser->command.key = Command::Key::conemu_wait_input;
+                return &parser->command;
+            }
+            /* OSC 9;6 guimacro */
+            case '6': {
+                if (data_len < 2) goto not_conemu;
+                if (data[1] != ';') goto not_conemu;
+                ZStr v;
+                if (!terminated_tail(parser, 2, &v)) return nullptr;
+                parser->command = Command();
+                parser->command.key = Command::Key::conemu_guimacro;
+                parser->command.conemu_guimacro = v;
+                return &parser->command;
+            }
+            /* OSC 9;7 run process */
+            case '7': {
+                if (data_len < 2) goto not_conemu;
+                if (data[1] != ';') goto not_conemu;
+                ZStr v;
+                if (!terminated_tail(parser, 2, &v)) return nullptr;
+                parser->command = Command();
+                parser->command.key = Command::Key::conemu_run_process;
+                parser->command.conemu_run_process = v;
+                return &parser->command;
+            }
+            /* OSC 9;8 output environment variable */
+            case '8': {
+                if (data_len < 2) goto not_conemu;
+                if (data[1] != ';') goto not_conemu;
+                ZStr v;
+                if (!terminated_tail(parser, 2, &v)) return nullptr;
+                parser->command = Command();
+                parser->command.key = Command::Key::conemu_output_environment_variable;
+                parser->command.conemu_output_environment_variable = v;
+                return &parser->command;
+            }
+            /* OSC 9;9 current working directory */
+            case '9': {
+                if (data_len < 2) goto not_conemu;
+                if (data[1] != ';') goto not_conemu;
+                ZStr v;
+                if (!terminated_tail(parser, 2, &v)) return nullptr;
+                parser->command = Command();
+                parser->command.key = Command::Key::report_pwd;
+                parser->command.report_pwd.value = v;
+                return &parser->command;
+            }
+            default: goto not_conemu;
+        }
+    }
+
+not_conemu:
+    /* If it's not a ConEmu OSC, it's an iTerm2 notification */
+    {
+        ZStr body;
+        if (!terminated_tail(parser, 0, &body)) return nullptr;
+        parser->command = Command();
+        parser->command.key = Command::Key::show_desktop_notification;
+        parser->command.show_desktop_notification.title = ZStr();
+        parser->command.show_desktop_notification.body = body;
+        return &parser->command;
+    }
+}
+} /* namespace osc9 */
+
 namespace kitty_dnd_protocol {
 inline Command *parse(Parser *parser, bool has_ch, uint8_t terminator_ch) {
     /* assert(parser.state == .@"72") */
@@ -3012,8 +3356,8 @@ inline Command *Parser::end(bool has_ch, uint8_t ch) {
         case S::s8:
             return parsers::hyperlink::parse(this, has_ch, ch);
 
-        /* Wisp: parsers.osc9 — not yet transliterated. */
-        case S::s9: return nullptr;
+        case S::s9:
+            return parsers::osc9::parse(this, has_ch, ch);
 
         case S::s21:
             return parsers::kitty_color::parse(this, has_ch, ch);
