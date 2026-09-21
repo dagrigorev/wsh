@@ -1,7 +1,8 @@
 /* Transliterated from Ghostty src/terminal/osc.zig, src/terminal/osc/
  * encoding.zig and these files under src/terminal/osc/parsers/:
  * change_window_title.zig, change_window_icon.zig, hyperlink.zig,
- * report_pwd.zig, mouse_shape.zig, clipboard_operation.zig, color.zig
+ * report_pwd.zig, mouse_shape.zig, clipboard_operation.zig, color.zig,
+ * kitty_color.zig, kitty_dnd_protocol.zig, rxvt_extension.zig
  * Copyright (c) 2024 Mitchell Hashimoto, Ghostty contributors
  * MIT License — see THIRD_PARTY_NOTICES.md
  *
@@ -24,9 +25,8 @@
  *
  * Wisp: PARSERS NOT YET TRANSLITERATED. osc/parsers/ holds one file per
  * command family. Only the ones named above are here; the rest — osc9,
- * kitty_color, kitty_text_sizing,
- * kitty_clipboard_protocol, kitty_dnd_protocol, kitty_desktop_notification,
- * context_signal, semantic_prompt, rxvt_extension and iterm2 — arrive in
+ * kitty_text_sizing, kitty_clipboard_protocol, kitty_desktop_notification,
+ * context_signal, semantic_prompt and iterm2 — arrive in
  * later slices. Until then end() returns null for their states, exactly as
  * it would for an invalid sequence, and Command keeps a tag for each so the
  * dispatch in end() already has upstream's shape.
@@ -42,6 +42,7 @@
 #include <string.h>
 
 #include "color.hpp"
+#include "kitty/color.hpp"
 #include "../datastruct/segmented_list.hpp"
 
 namespace wisp {
@@ -357,6 +358,19 @@ struct Command {
         Terminator       terminator;   /* = .st */
     } color_operation;
 
+    /* Kitty color protocol, OSC 21
+     * https://sw.kovidgoyal.net/kitty/color-stack/#id1
+     *
+     * Wisp: kitty_color.OSC, declared here (see kitty/color.hpp). */
+    struct {
+        /* list of requests */
+        ::wisp::terminal::kitty::color::RequestList list;
+
+        /* We must reply with the same string terminator (ST) as used in the
+         * request. */
+        Terminator terminator;   /* = .st */
+    } kitty_color_protocol;
+
     /* Kitty's drag and drop protocol (OSC 72), osc/parsers/kitty_dnd_protocol.zig
      * OSC. Only the raw metadata and payload are captured. */
     struct {
@@ -392,6 +406,7 @@ struct Command {
         clipboard_contents.terminator = Terminator::st;
         color_operation.op = color::Operation::osc_4;
         color_operation.terminator = Terminator::st;
+        kitty_color_protocol.terminator = Terminator::st;
         hyperlink_start.has_id = false;
         hyperlink_start.id = ZStr();
         hyperlink_start.uri = ZStr();
@@ -595,9 +610,10 @@ struct Parser {
         /* If we're capturing, then stop it. */
         if (has_capture) capture.deinit();
 
-        /* Handle any cleanup that individual OSCs require.
-         * Wisp: kitty_color_protocol also owns an allocation upstream; it is
-         * not transliterated yet. */
+        /* Handle any cleanup that individual OSCs require. */
+        if (command.key == Command::Key::kitty_color_protocol && alloc) {
+            command.kitty_color_protocol.list.deinit();
+        }
         if (command.key == Command::Key::color_operation && alloc) {
             command.color_operation.requests.deinit();
         }
@@ -1124,6 +1140,89 @@ inline Command *parse(Parser *parser, bool has_ch, uint8_t terminator_ch) {
 }
 } /* namespace clipboard_operation */
 
+namespace kitty_color {
+/* Parse OSC 21, the Kitty Color Protocol. */
+inline Command *parse(Parser *parser, bool has_ch, uint8_t terminator_ch) {
+    namespace kc = ::wisp::terminal::kitty::color;
+    /* assert(parser.state == .@"21") */
+
+    if (!parser->alloc) {
+        parser->state = Parser::State::invalid;
+        return nullptr;
+    }
+    if (!parser->has_capture) {
+        parser->state = Parser::State::invalid;
+        return nullptr;
+    }
+    Parser::Capture *cap = &parser->capture;
+    parser->command = Command();
+    parser->command.key = Command::Key::kitty_color_protocol;
+    parser->command.kitty_color_protocol.terminator = terminator_init(has_ch, terminator_ch);
+    kc::RequestList *list = &parser->command.kitty_color_protocol.list;
+    const char *data = cap->trailing();
+    const size_t data_len = cap->trailing_len();
+
+    /* std.mem.splitScalar(u8, data, ';') */
+    size_t kv_start = 0;
+    bool more = true;
+    while (more) {
+        const char *semi = (const char *)memchr(data + kv_start, ';', data_len - kv_start);
+        const size_t kv_end = semi ? (size_t)(semi - data) : data_len;
+        const char *kv = data + kv_start;
+        const size_t kv_len = kv_end - kv_start;
+        if (semi) kv_start = kv_end + 1; else more = false;
+
+        if (list->len >= kc::Kind::max * 2) {
+            /* log.warn("exceeded limit for number of keys in kitty color
+             * protocol, ignoring") */
+            parser->state = Parser::State::invalid;
+            return nullptr;
+        }
+        /* std.mem.splitScalar(u8, kv, '=') */
+        const char *eq = (const char *)memchr(kv, '=', kv_len);
+        const size_t k_len = eq ? (size_t)(eq - kv) : kv_len;
+        if (k_len == 0) {
+            /* log.warn("zero length key in kitty color protocol") */
+            continue;
+        }
+        kc::Kind key;
+        if (!kc::Kind::parse(kv, k_len, &key)) {
+            /* log.warn("unknown key in kitty color protocol: {s}") */
+            continue;
+        }
+        /* std.mem.trim(u8, it.rest(), " ") */
+        const char *value = eq ? eq + 1 : kv + kv_len;
+        size_t value_len = eq ? kv_len - k_len - 1 : 0;
+        while (value_len > 0 && value[0] == ' ') { value++; value_len--; }
+        while (value_len > 0 && value[value_len - 1] == ' ') value_len--;
+
+        kc::Request req;
+        if (value_len == 0) {
+            req.tag = kc::Request::Tag::reset;
+            req.reset = key;
+        } else if (value_len == 1 && value[0] == '?') {
+            req.tag = kc::Request::Tag::query;
+            req.query = key;
+        } else {
+            ::wisp::terminal::RGB rgb;
+            if (::wisp::terminal::RGB::parse(value, value_len, &rgb) !=
+                ::wisp::terminal::ColorError::none) {
+                /* log.warn("invalid color format in kitty color protocol") */
+                continue;
+            }
+            req.tag = kc::Request::Tag::set;
+            req.set.key = key;
+            req.set.color = rgb;
+        }
+        if (!list->append(req)) {
+            /* log.warn("unable to append kitty color protocol option") */
+            continue;
+        }
+    }
+    return &parser->command;
+}
+} /* namespace kitty_color */
+
 namespace kitty_dnd_protocol {
 inline Command *parse(Parser *parser, bool has_ch, uint8_t terminator_ch) {
     /* assert(parser.state == .@"72") */
@@ -1555,8 +1654,8 @@ inline Command *Parser::end(bool has_ch, uint8_t ch) {
         /* Wisp: parsers.osc9 — not yet transliterated. */
         case S::s9: return nullptr;
 
-        /* Wisp: parsers.kitty_color — not yet transliterated. */
-        case S::s21: return nullptr;
+        case S::s21:
+            return parsers::kitty_color::parse(this, has_ch, ch);
 
         case S::s22:
             return parsers::mouse_shape::parse(this, has_ch, ch);

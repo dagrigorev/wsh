@@ -492,3 +492,133 @@ TEST(kitty_dnd_protocol, OSC_72_BEL_terminator_recorded) {
     ASSERT_TRUE(cmd && cmd->key == Command::Key::kitty_dnd_protocol);
     ASSERT_TRUE(cmd->kitty_dnd_protocol.terminator == Terminator::bel);
 }
+
+/* kitty_color.zig */
+
+namespace kc = wisp::terminal::kitty::color;
+
+static const char *kitty_color_input =
+    "21;foreground=?;background=rgb:f0/f8/ff;cursor=aliceblue;cursor_text;"
+    "visual_bell=;selection_foreground=#xxxyyzz;selection_background=?;"
+    "selection_background=#aabbcc;2=?;3=rgbi:1.0/1.0/1.0";
+
+TEST(kitty_color, OSC_21_kitty_color_protocol) {
+    typedef kc::Kind Kind;
+    typedef kc::Request::Tag RT;
+
+    Parser p(true);
+    Command *cmd = feed_end(p, kitty_color_input, true, '\x1b');
+    ASSERT_TRUE(cmd && cmd->key == Command::Key::kitty_color_protocol);
+    const kc::RequestList &list = cmd->kitty_color_protocol.list;
+    ASSERT_TRUE(list.len == 9);
+    {
+        const kc::Request &item = list.items[0];
+        ASSERT_TRUE(item.tag == RT::query);
+        ASSERT_TRUE(item.query.eql(Kind::makeSpecial(kc::Special::foreground)));
+    }
+    {
+        const kc::Request &item = list.items[1];
+        ASSERT_TRUE(item.tag == RT::set);
+        ASSERT_TRUE(item.set.key.eql(Kind::makeSpecial(kc::Special::background)));
+        ASSERT_TRUE(item.set.color.r == 0xf0);
+        ASSERT_TRUE(item.set.color.g == 0xf8);
+        ASSERT_TRUE(item.set.color.b == 0xff);
+    }
+    {
+        const kc::Request &item = list.items[2];
+        ASSERT_TRUE(item.tag == RT::set);
+        ASSERT_TRUE(item.set.key.eql(Kind::makeSpecial(kc::Special::cursor)));
+        ASSERT_TRUE(item.set.color.r == 0xf0);
+        ASSERT_TRUE(item.set.color.g == 0xf8);
+        ASSERT_TRUE(item.set.color.b == 0xff);
+    }
+    {
+        const kc::Request &item = list.items[3];
+        ASSERT_TRUE(item.tag == RT::reset);
+        ASSERT_TRUE(item.reset.eql(Kind::makeSpecial(kc::Special::cursor_text)));
+    }
+    {
+        const kc::Request &item = list.items[4];
+        ASSERT_TRUE(item.tag == RT::reset);
+        ASSERT_TRUE(item.reset.eql(Kind::makeSpecial(kc::Special::visual_bell)));
+    }
+    {
+        const kc::Request &item = list.items[5];
+        ASSERT_TRUE(item.tag == RT::query);
+        ASSERT_TRUE(item.query.eql(Kind::makeSpecial(kc::Special::selection_background)));
+    }
+    {
+        const kc::Request &item = list.items[6];
+        ASSERT_TRUE(item.tag == RT::set);
+        ASSERT_TRUE(item.set.key.eql(Kind::makeSpecial(kc::Special::selection_background)));
+        ASSERT_TRUE(item.set.color.r == 0xaa);
+        ASSERT_TRUE(item.set.color.g == 0xbb);
+        ASSERT_TRUE(item.set.color.b == 0xcc);
+    }
+    {
+        const kc::Request &item = list.items[7];
+        ASSERT_TRUE(item.tag == RT::query);
+        ASSERT_TRUE(item.query.eql(Kind::makePalette(2)));
+    }
+    {
+        const kc::Request &item = list.items[8];
+        ASSERT_TRUE(item.tag == RT::set);
+        ASSERT_TRUE(item.set.key.eql(Kind::makePalette(3)));
+        ASSERT_TRUE(item.set.color.r == 0xff);
+        ASSERT_TRUE(item.set.color.g == 0xff);
+        ASSERT_TRUE(item.set.color.b == 0xff);
+    }
+}
+
+TEST(kitty_color, OSC_21_kitty_color_protocol_without_allocator) {
+    Parser p; /* .init(null) */
+    ASSERT_TRUE(feed_end(p, "21;foreground=?", true, '\x1b') == nullptr);
+}
+
+TEST(kitty_color, OSC_21_kitty_color_protocol_double_reset) {
+    Parser p(true);
+    Command *cmd = feed_end(p, kitty_color_input, true, '\x1b');
+    ASSERT_TRUE(cmd && cmd->key == Command::Key::kitty_color_protocol);
+
+    p.reset();
+    p.reset();
+}
+
+TEST(kitty_color, OSC_21_kitty_color_protocol_reset_after_invalid) {
+    Parser p(true);
+    Command *cmd = feed_end(p, kitty_color_input, true, '\x1b');
+    ASSERT_TRUE(cmd && cmd->key == Command::Key::kitty_color_protocol);
+
+    p.reset();
+
+    ASSERT_TRUE(p.state == Parser::State::start);
+    p.next('X');
+    ASSERT_TRUE(p.state == Parser::State::invalid);
+
+    p.reset();
+}
+
+TEST(kitty_color, OSC_21_kitty_color_protocol_no_key) {
+    Parser p(true);
+    Command *cmd = feed_end(p, "21;", true, '\x1b');
+    ASSERT_TRUE(cmd && cmd->key == Command::Key::kitty_color_protocol);
+    ASSERT_TRUE(cmd->kitty_color_protocol.list.len == 0);
+}
+
+/* kitty/color.zig */
+
+TEST(kitty_color, OSC_kitty_color_protocol_kind_string) {
+    char buf[256];
+    {
+        const size_t n = kc::Kind::makeSpecial(kc::Special::foreground).format(buf, sizeof(buf));
+        ASSERT_TRUE(n == 10 && strcmp(buf, "foreground") == 0);
+    }
+    {
+        const size_t n = kc::Kind::makePalette(42).format(buf, sizeof(buf));
+        ASSERT_TRUE(n == 2 && strcmp(buf, "42") == 0);
+    }
+
+    ASSERT_TRUE(kc::Kind::makePalette(42).hasTerminalQueryColor());
+    ASSERT_TRUE(kc::Kind::makeSpecial(kc::Special::foreground).hasTerminalQueryColor());
+    ASSERT_FALSE(kc::Kind::makeSpecial(kc::Special::selection_background).hasTerminalQueryColor());
+}
