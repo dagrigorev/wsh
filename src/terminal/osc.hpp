@@ -2,7 +2,8 @@
  * encoding.zig and these files under src/terminal/osc/parsers/:
  * change_window_title.zig, change_window_icon.zig, hyperlink.zig,
  * report_pwd.zig, mouse_shape.zig, clipboard_operation.zig, color.zig,
- * kitty_color.zig, kitty_dnd_protocol.zig, rxvt_extension.zig
+ * kitty_color.zig, kitty_dnd_protocol.zig, rxvt_extension.zig,
+ * kitty_text_sizing.zig
  * Copyright (c) 2024 Mitchell Hashimoto, Ghostty contributors
  * MIT License — see THIRD_PARTY_NOTICES.md
  *
@@ -25,7 +26,7 @@
  *
  * Wisp: PARSERS NOT YET TRANSLITERATED. osc/parsers/ holds one file per
  * command family. Only the ones named above are here; the rest — osc9,
- * kitty_text_sizing, kitty_clipboard_protocol, kitty_desktop_notification,
+ * kitty_clipboard_protocol, kitty_desktop_notification,
  * context_signal, semantic_prompt and iterm2 — arrive in
  * later slices. Until then end() returns null for their states, exactly as
  * it would for an invalid sequence, and Command keeps a tag for each so the
@@ -259,6 +260,83 @@ typedef ::wisp::datastruct::SegmentedList<Request, 2> List;
 
 } /* namespace color */
 
+/* ─── osc/parsers/kitty_text_sizing.zig: types ─────────────────────────── */
+
+/* Kitty's text sizing protocol (OSC 66)
+ * Specification: https://sw.kovidgoyal.net/kitty/text-sizing-protocol/ */
+namespace kitty_text_sizing {
+
+static const size_t max_payload_length = 4096;
+
+enum class VAlign : uint8_t {
+    top,
+    bottom,
+    center,
+};
+
+enum class HAlign : uint8_t {
+    left,
+    right,
+    center,
+};
+
+struct OSC {
+    uint8_t scale;         /* u3 = 1, 1 - 7 */
+    uint8_t width;         /* u3 = 0, 0 - 7 (0 means default) */
+    uint8_t numerator;     /* u4 = 0 */
+    uint8_t denominator;   /* u4 = 0 */
+    VAlign valign;         /* = .top */
+    HAlign halign;         /* = .left */
+    ZStr text;
+
+    OSC()
+        : scale(1), width(0), numerator(0), denominator(0),
+          valign(VAlign::top), halign(HAlign::left), text() {}
+
+    enum class UpdateError : uint8_t { none, UnknownKey, InvalidValue };
+
+    UpdateError update(uint8_t key, const char *value, size_t value_len) {
+        /* All values are numeric, so we can do a small hack here.
+         * Wisp: std.fmt.parseInt(u4, value, 10); '+' accepted, '_'
+         * separators not reproduced (see parsers::color::parse_u9). */
+        size_t i = 0;
+        if (i < value_len && value[i] == '+') i++;
+        if (i >= value_len) return UpdateError::InvalidValue;
+        unsigned v = 0;
+        for (; i < value_len; i++) {
+            if (value[i] < '0' || value[i] > '9') return UpdateError::InvalidValue;
+            v = v * 10 + (unsigned)(value[i] - '0');
+            if (v > 15) return UpdateError::InvalidValue;
+        }
+
+        switch (key) {
+            case 's':
+                if (v == 0) return UpdateError::InvalidValue;
+                if (v > 7) return UpdateError::InvalidValue;
+                scale = (uint8_t)v;
+                break;
+            case 'w':
+                if (v > 7) return UpdateError::InvalidValue;
+                width = (uint8_t)v;
+                break;
+            case 'n': numerator = (uint8_t)v; break;
+            case 'd': denominator = (uint8_t)v; break;
+            case 'v':
+                if (v > 2) return UpdateError::InvalidValue;
+                valign = (VAlign)v;
+                break;
+            case 'h':
+                if (v > 2) return UpdateError::InvalidValue;
+                halign = (HAlign)v;
+                break;
+            default: return UpdateError::UnknownKey;
+        }
+        return UpdateError::none;
+    }
+};
+
+} /* namespace kitty_text_sizing */
+
 struct Command {
     /* NOTE: Order matters, see LibEnum documentation. */
     enum class Key : uint8_t {
@@ -370,6 +448,9 @@ struct Command {
          * request. */
         Terminator terminator;   /* = .st */
     } kitty_color_protocol;
+
+    /* Kitty text sizing protocol (OSC 66) */
+    kitty_text_sizing::OSC kitty_text_sizing;
 
     /* Kitty's drag and drop protocol (OSC 72), osc/parsers/kitty_dnd_protocol.zig
      * OSC. Only the raw metadata and payload are captured. */
@@ -1223,6 +1304,92 @@ inline Command *parse(Parser *parser, bool has_ch, uint8_t terminator_ch) {
 }
 } /* namespace kitty_color */
 
+namespace kitty_text_sizing {
+inline Command *parse(Parser *parser, bool, uint8_t) {
+    /* assert(parser.state == .@"66") */
+
+    if (!parser->has_capture) {
+        parser->state = Parser::State::invalid;
+        return nullptr;
+    }
+    Parser::Capture *cap = &parser->capture;
+
+    /* Write a NUL byte to ensure that `text` is NUL-terminated */
+    if (!cap->writeByte(0)) {
+        parser->state = Parser::State::invalid;
+        return nullptr;
+    }
+    const char *data = cap->trailing();
+    const size_t data_len = cap->trailing_len();
+
+    const char *semi = (const char *)memchr(data, ';', data_len);
+    if (!semi) {
+        /* log.warn("missing semicolon before payload") */
+        parser->state = Parser::State::invalid;
+        return nullptr;
+    }
+    const size_t payload_start = (size_t)(semi - data);
+    const ZStr payload(data + payload_start + 1, data_len - 1 - (payload_start + 1));
+
+    /* Payload has to be a URL-safe UTF-8 string,
+     * and be under the size limit. */
+    if (payload.len > ::wisp::terminal::osc::kitty_text_sizing::max_payload_length) {
+        /* log.warn("payload is too long") */
+        parser->state = Parser::State::invalid;
+        return nullptr;
+    }
+    if (!isSafeUtf8(payload.ptr, payload.len)) {
+        /* log.warn("payload is not escape code safe UTF-8") */
+        parser->state = Parser::State::invalid;
+        return nullptr;
+    }
+
+    parser->command = Command();
+    parser->command.key = Command::Key::kitty_text_sizing;
+    parser->command.kitty_text_sizing.text = payload;
+    ::wisp::terminal::osc::kitty_text_sizing::OSC *cmd = &parser->command.kitty_text_sizing;
+
+    /* Parse any arguments if given */
+    if (payload_start > 0) {
+        /* std.mem.splitScalar(u8, data[0..payload_start], ':') */
+        size_t kv_start = 0;
+        bool more = true;
+        while (more) {
+            const char *colon = (const char *)memchr(data + kv_start, ':', payload_start - kv_start);
+            const size_t kv_end = colon ? (size_t)(colon - data) : payload_start;
+            const char *kv = data + kv_start;
+            const size_t kv_len = kv_end - kv_start;
+            if (colon) kv_start = kv_end + 1; else more = false;
+
+            const char *eq = (const char *)memchr(kv, '=', kv_len);
+            const size_t k_len = eq ? (size_t)(eq - kv) : kv_len;
+            if (k_len != 1) {
+                /* log.warn("key must be a single character") */
+                continue;
+            }
+
+            if (!eq) {
+                /* log.warn("missing value") */
+                continue;
+            }
+            /* it.next(): up to the next '=' */
+            const char *value = eq + 1;
+            const size_t rest = kv_len - k_len - 1;
+            const char *eq2 = (const char *)memchr(value, '=', rest);
+            const size_t value_len = eq2 ? (size_t)(eq2 - value) : rest;
+
+            if (cmd->update((uint8_t)kv[0], value, value_len) !=
+                ::wisp::terminal::osc::kitty_text_sizing::OSC::UpdateError::none) {
+                /* log.warn("unknown key" / "invalid value for key") */
+                continue;
+            }
+        }
+    }
+
+    return &parser->command;
+}
+} /* namespace kitty_text_sizing */
+
 namespace kitty_dnd_protocol {
 inline Command *parse(Parser *parser, bool has_ch, uint8_t terminator_ch) {
     /* assert(parser.state == .@"72") */
@@ -1675,8 +1842,8 @@ inline Command *Parser::end(bool has_ch, uint8_t ch) {
 
         case S::s6: return nullptr;
 
-        /* Wisp: parsers.kitty_text_sizing — not yet transliterated. */
-        case S::s66: return nullptr;
+        case S::s66:
+            return parsers::kitty_text_sizing::parse(this, has_ch, ch);
 
         case S::s72:
             return parsers::kitty_dnd_protocol::parse(this, has_ch, ch);

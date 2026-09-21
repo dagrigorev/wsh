@@ -622,3 +622,73 @@ TEST(kitty_color, OSC_kitty_color_protocol_kind_string) {
     ASSERT_TRUE(kc::Kind::makeSpecial(kc::Special::foreground).hasTerminalQueryColor());
     ASSERT_FALSE(kc::Kind::makeSpecial(kc::Special::selection_background).hasTerminalQueryColor());
 }
+
+/* kitty_text_sizing.zig */
+
+namespace kts = wisp::terminal::osc::kitty_text_sizing;
+
+TEST(kitty_text_sizing, OSC_66_empty_parameters) {
+    Parser p; /* .init(null) */
+    Command *cmd = feed_end(p, "66;;bobr", true, '\x1b');
+    ASSERT_TRUE(cmd && cmd->key == Command::Key::kitty_text_sizing);
+    ASSERT_TRUE(cmd->kitty_text_sizing.scale == 1);
+    ASSERT_TRUE(cmd->kitty_text_sizing.text.eql("bobr"));
+}
+
+TEST(kitty_text_sizing, OSC_66_single_parameter) {
+    Parser p;
+    Command *cmd = feed_end(p, "66;s=2;kurwa", true, '\x1b');
+    ASSERT_TRUE(cmd && cmd->key == Command::Key::kitty_text_sizing);
+    ASSERT_TRUE(cmd->kitty_text_sizing.scale == 2);
+    ASSERT_TRUE(cmd->kitty_text_sizing.text.eql("kurwa"));
+}
+
+TEST(kitty_text_sizing, OSC_66_multiple_parameters) {
+    Parser p;
+    Command *cmd = feed_end(p, "66;s=2:w=7:n=13:d=15:v=1:h=2;long", true, '\x1b');
+    ASSERT_TRUE(cmd && cmd->key == Command::Key::kitty_text_sizing);
+    ASSERT_TRUE(cmd->kitty_text_sizing.scale == 2);
+    ASSERT_TRUE(cmd->kitty_text_sizing.width == 7);
+    ASSERT_TRUE(cmd->kitty_text_sizing.numerator == 13);
+    ASSERT_TRUE(cmd->kitty_text_sizing.denominator == 15);
+    ASSERT_TRUE(cmd->kitty_text_sizing.valign == kts::VAlign::bottom);
+    ASSERT_TRUE(cmd->kitty_text_sizing.halign == kts::HAlign::center);
+    ASSERT_TRUE(cmd->kitty_text_sizing.text.eql("long"));
+}
+
+TEST(kitty_text_sizing, OSC_66_scale_is_zero) {
+    Parser p;
+    Command *cmd = feed_end(p, "66;s=0;nope", true, '\x1b');
+    ASSERT_TRUE(cmd && cmd->key == Command::Key::kitty_text_sizing);
+    ASSERT_TRUE(cmd->kitty_text_sizing.scale == 1);
+}
+
+TEST(kitty_text_sizing, OSC_66_invalid_parameters) {
+    Parser p;
+    Command *cmd = feed_end(p, "66;w=8:v=3:n=16;", true, '\x1b');
+    ASSERT_TRUE(cmd && cmd->key == Command::Key::kitty_text_sizing);
+    ASSERT_TRUE(cmd->kitty_text_sizing.width == 0);
+    ASSERT_TRUE(cmd->kitty_text_sizing.valign == kts::VAlign::top);
+    ASSERT_TRUE(cmd->kitty_text_sizing.numerator == 0);
+}
+
+TEST(kitty_text_sizing, OSC_66_UTF_8) {
+    Parser p;
+    Command *cmd = feed_end(p, "66;;\360\237\221\273\351\255\221\351\255\205\351\255\215\351\255\211\343\202\264\343\203\274\343\202\271\343\203\203\343\203\206\343\202\243", true, '\x1b');
+    ASSERT_TRUE(cmd && cmd->key == Command::Key::kitty_text_sizing);
+    ASSERT_TRUE(cmd->kitty_text_sizing.text.eql("\360\237\221\273\351\255\221\351\255\205\351\255\215\351\255\211\343\202\264\343\203\274\343\202\271\343\203\203\343\203\206\343\202\243"));
+}
+
+TEST(kitty_text_sizing, OSC_66_unsafe_UTF_8) {
+    Parser p;
+    ASSERT_TRUE(feed_end(p, "66;;\n", true, '\x1b') == nullptr);
+}
+
+TEST(kitty_text_sizing, OSC_66_overlong_UTF_8) {
+    Parser p;
+    for (const char *c = "66;;"; *c; c++) p.next((uint8_t)*c);
+    for (int i = 0; i < 1025; i++) {
+        for (const char *c = "bobr"; *c; c++) p.next((uint8_t)*c);
+    }
+    ASSERT_TRUE(p.end('\x1b') == nullptr);
+}
