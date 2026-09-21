@@ -215,8 +215,15 @@ inline void stream_reply_str(Stream *s, const char *text) {
 }
 
 inline void stream_init(Stream *s, Terminal *t) {
-    *s = Stream();
+    /* Wisp: the parser owns an OSC parser that cannot be copied, so the
+     * stream is reset field by field rather than assigned a fresh one. */
     s->terminal = t;
+    s->parser.state = parser::State::ground;
+    s->parser.clear();
+    s->parser.osc_parser.reset();
+    s->utf8 = Utf8();
+    s->respond = nullptr;
+    s->respond_ctx = nullptr;
 }
 
 /* ─── SGR ────────────────────────────────────────────────────────────────── */
@@ -525,76 +532,37 @@ inline void stream_esc(Terminal *t, const parser::Action::ESC &a) {
 
 /* ─── OSC ────────────────────────────────────────────────────────────────── */
 
-/* The number before the first semicolon, and where the rest begins. */
-inline bool stream_osc_command(const char *str, size_t len, int *cmd,
-                               size_t *rest) {
-    size_t i = 0;
-    int n = 0;
-    bool any = false;
-    while (i < len && str[i] >= '0' && str[i] <= '9') {
-        n = n * 10 + (str[i] - '0');
-        any = true;
-        i++;
-    }
-    if (!any) return false;
-
-    *cmd = n;
-    *rest = (i < len && str[i] == ';') ? i + 1 : i;
-    return true;
-}
+/* OSC commands arrive decoded, from osc.hpp. What is left here is applying
+ * them. */
 
 /* OSC 8 — open or close a hyperlink.
  *
- * The format is 8;params;uri. An empty URI closes the link; anything else
- * opens one, and every character printed after it belongs to it until it is
- * closed. The params are key=value pairs separated by colons, and the only
- * key anyone uses is id — which is how two separated runs of text can be told
- * they are the same link, so that hovering one highlights both. */
-inline void stream_osc_hyperlink(Terminal *t, const char *str, size_t len) {
+ * Everything printed while a link is open belongs to it. The id is how two
+ * separated runs of text can be told they are the same link, so that
+ * hovering one highlights both. */
+inline void stream_osc_hyperlink_start(Terminal *t, const osc::Command &cmd) {
     Cursor &c = t->active->cursor;
-
-    size_t semi = 0;
-    while (semi < len && str[semi] != ';') semi++;
-    if (semi >= len) return;   /* no URI part at all: malformed, ignored */
-
-    const char *params = str;
-    const size_t params_len = semi;
-    const char *uri = str + semi + 1;
-    const size_t uri_len = len - semi - 1;
-
-    if (uri_len == 0) {
-        c.hyperlink_active = false;
-        return;
-    }
+    const osc::ZStr &uri = cmd.hyperlink_start.uri;
 
     /* A URI too long to hold is dropped rather than truncated. A truncated
      * one would still look like a link and go somewhere nobody meant. */
-    if (uri_len >= sizeof(c.hyperlink_uri)) {
+    if (uri.len >= sizeof(c.hyperlink_uri)) {
         c.hyperlink_active = false;
         return;
     }
 
-    memcpy(c.hyperlink_uri, uri, uri_len);
-    c.hyperlink_uri[uri_len] = '\0';
-    c.hyperlink_uri_len = uri_len;
+    memcpy(c.hyperlink_uri, uri.ptr, uri.len);
+    c.hyperlink_uri[uri.len] = '\0';
+    c.hyperlink_uri_len = uri.len;
 
     c.hyperlink_id_len = 0;
     c.hyperlink_id[0] = '\0';
-
-    size_t i = 0;
-    while (i < params_len) {
-        size_t end = i;
-        while (end < params_len && params[end] != ':') end++;
-
-        if (end - i > 3 && memcmp(params + i, "id=", 3) == 0) {
-            const size_t id_len = end - i - 3;
-            if (id_len < sizeof(c.hyperlink_id)) {
-                memcpy(c.hyperlink_id, params + i + 3, id_len);
-                c.hyperlink_id[id_len] = '\0';
-                c.hyperlink_id_len = id_len;
-            }
-        }
-        i = end + 1;
+    if (cmd.hyperlink_start.has_id &&
+        cmd.hyperlink_start.id.len < sizeof(c.hyperlink_id)) {
+        memcpy(c.hyperlink_id, cmd.hyperlink_start.id.ptr,
+               cmd.hyperlink_start.id.len);
+        c.hyperlink_id[cmd.hyperlink_start.id.len] = '\0';
+        c.hyperlink_id_len = cmd.hyperlink_start.id.len;
     }
 
     /* A link without an id gets a fresh implicit one, so that this run is
@@ -603,36 +571,32 @@ inline void stream_osc_hyperlink(Terminal *t, const char *str, size_t len) {
     c.hyperlink_active = true;
 }
 
-inline void stream_osc(Terminal *t, const parser::osc::Command &a) {
-    int cmd = 0;
-    size_t rest = 0;
-    if (!stream_osc_command(a.data, a.len, &cmd, &rest)) return;
+inline void stream_osc(Terminal *t, const osc::Command &cmd) {
+    typedef osc::Command::Key K;
 
-    const char *body = a.data + rest;
-    const size_t body_len = a.len - rest;
-
-    switch (cmd) {
-        case 0:
-        case 2: {
-            /* 0 sets the icon name and the title, 2 only the title. Nothing
-             * here has an icon, so they are the same. */
-            const size_t n = body_len < sizeof(t->title) - 1
-                                 ? body_len
+    switch (cmd.key) {
+        case K::change_window_title: {
+            const size_t n = cmd.change_window_title.len < sizeof(t->title) - 1
+                                 ? cmd.change_window_title.len
                                  : sizeof(t->title) - 1;
-            memcpy(t->title, body, n);
+            memcpy(t->title, cmd.change_window_title.ptr, n);
             t->title[n] = '\0';
             t->title_len = n;
             break;
         }
 
-        case 8:
-            stream_osc_hyperlink(t, body, body_len);
+        case K::hyperlink_start:
+            stream_osc_hyperlink_start(t, cmd);
+            break;
+
+        case K::hyperlink_end:
+            t->active->cursor.hyperlink_active = false;
             break;
 
         default:
-            /* Colours, the clipboard, notifications and the rest. Nothing
-             * implements them yet, and silently doing nothing is the correct
-             * answer to a request a terminal does not support. */
+            /* Everything else is decoded but not yet acted on. Silently
+             * doing nothing is the correct answer to a request a terminal
+             * does not support. */
             break;
     }
 }

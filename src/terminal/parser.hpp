@@ -22,12 +22,8 @@
  *
  * Comments are upstream's unless marked "Wisp:".
  *
- * Wisp: OSC. Upstream hands OSC bytes to osc.zig, a separate parser that
- * decodes each command into a typed value. That file has not been
- * transliterated yet, so osc_parser here is a stand-in with the same
- * interface — reset, next, end — that collects the raw bytes. The four
- * upstream tests that inspect decoded OSC commands are ported with osc.zig,
- * not here.
+ * OSC bytes go to osc.hpp, the transliteration of osc.zig, which decodes
+ * each command into a typed value.
  */
 
 #pragma once
@@ -38,57 +34,11 @@
 #include <stdint.h>
 #include <string.h>
 
+#include "osc.hpp"
+
 namespace wisp {
 namespace terminal {
 namespace parser {
-
-/* ─── osc stand-in ───────────────────────────────────────────────────────── */
-
-namespace osc {
-
-/* Wisp: stand-in for osc.Command until osc.zig is transliterated. It carries
- * the raw bytes of the OSC and the byte that terminated it. */
-struct Command {
-    const char *data;
-    size_t      len;
-    uint8_t     terminator;
-};
-
-/* Wisp: stand-in for osc.Parser. Same three calls upstream's Parser makes. */
-struct Parser {
-    static const size_t MAX_LEN = 2048;
-
-    char    buf[MAX_LEN];
-    size_t  len;
-    bool    overflowed;
-    Command command;
-
-    Parser() : len(0), overflowed(false), command() { buf[0] = '\0'; }
-
-    void reset() {
-        len = 0;
-        overflowed = false;
-    }
-
-    void next(uint8_t c) {
-        if (len + 1 >= MAX_LEN) {
-            overflowed = true;
-            return;
-        }
-        buf[len++] = (char)c;
-    }
-
-    /* Upstream returns ?*Command. */
-    const Command *end(uint8_t c) {
-        buf[len] = '\0';
-        command.data = buf;
-        command.len = len;
-        command.terminator = c;
-        return &command;
-    }
-};
-
-} /* namespace osc */
 
 /* ─── Parser.zig ─────────────────────────────────────────────────────────── */
 
@@ -229,12 +179,18 @@ struct Action {
     ESC esc_dispatch;
 
     /* Execute the OSC command. */
-    osc::Command osc_dispatch;
+    ::wisp::terminal::osc::Command osc_dispatch;
 
     /* DCS-related events. */
     DCS dcs_hook;
 
-    Action() { memset(this, 0, sizeof(*this)); }
+    Action()
+        : tag(Tag::print), print(0), byte(0), csi_dispatch(), esc_dispatch(),
+          osc_dispatch(), dcs_hook() {
+        memset(&csi_dispatch, 0, sizeof(csi_dispatch));
+        memset(&esc_dispatch, 0, sizeof(esc_dispatch));
+        memset(&dcs_hook, 0, sizeof(dcs_hook));
+    }
 };
 
 /* Wisp: [3]?Action. */
@@ -663,7 +619,7 @@ struct Parser {
     uint8_t  param_acc_idx;
 
     /* Parser for OSC sequences */
-    osc::Parser osc_parser;
+    ::wisp::terminal::osc::Parser osc_parser;
 
     Parser()
         : state(State::ground), intermediates_idx(0), params_sep(),
@@ -834,7 +790,8 @@ inline Next Parser::next(uint8_t c) {
     if (state != next_state) {
         switch (state) {
             case State::osc_string:
-                if (const osc::Command *cmd = osc_parser.end(c)) {
+                if (const ::wisp::terminal::osc::Command *cmd =
+                        osc_parser.end(c)) {
                     result.action[0].tag = Action::Tag::osc_dispatch;
                     result.action[0].osc_dispatch = *cmd;
                     result.present[0] = true;

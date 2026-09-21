@@ -12,9 +12,8 @@
  *   d.params.len           d.params_len
  *   d.final                d.final_
  *
- * Not ported here: "osc: change window title", "osc: change window title
- * (end in esc)", "osc: 112 incomplete sequence" and "osc: 104 empty". They
- * inspect the typed command osc.zig produces, and they arrive with osc.zig.
+ * Not ported yet: "osc: 112 incomplete sequence" and "osc: 104 empty". They
+ * inspect a color_operation command, which needs osc/parsers/color.zig.
  */
 
 #include "test_helpers.h"
@@ -23,8 +22,6 @@
 using namespace wisp::terminal::parser;
 
 typedef Action::Tag Tag;
-
-static Parser init() { return Parser(); }
 
 static void feed_silent(Parser &p, const char *s) {
     for (const char *c = s; *c; c++) {
@@ -38,7 +35,7 @@ static void feed_silent(Parser &p, const char *s) {
 /* ─── Parser.zig ─────────────────────────────────────────────────────────── */
 
 TEST(parser, unnamed) {
-    Parser p = init();
+    Parser p; /* init() */
     (void)p.next(0x9E);
     ASSERT_TRUE(p.state == State::sos_pm_apc_string);
     (void)p.next(0x9C);
@@ -62,7 +59,7 @@ TEST(parser, unnamed) {
 }
 
 TEST(parser, esc_ESC_paren_B) {
-    Parser p = init();
+    Parser p; /* init() */
     (void)p.next(0x1B);
     (void)p.next('(');
 
@@ -81,7 +78,7 @@ TEST(parser, esc_ESC_paren_B) {
 }
 
 TEST(parser, csi_ESC_bracket_H) {
-    Parser p = init();
+    Parser p; /* init() */
     (void)p.next(0x1B);
     (void)p.next(0x5B);
 
@@ -99,7 +96,7 @@ TEST(parser, csi_ESC_bracket_H) {
 }
 
 TEST(parser, csi_ESC_bracket_1_semicolon_4_H) {
-    Parser p = init();
+    Parser p; /* init() */
     (void)p.next(0x1B);
     (void)p.next(0x5B);
     (void)p.next(0x31); /* 1 */
@@ -122,7 +119,7 @@ TEST(parser, csi_ESC_bracket_1_semicolon_4_H) {
 }
 
 TEST(parser, csi_SGR_ESC_bracket_38_colon_2_m) {
-    Parser p = init();
+    Parser p; /* init() */
     (void)p.next(0x1B);
     (void)p.next('[');
     (void)p.next('3');
@@ -148,7 +145,7 @@ TEST(parser, csi_SGR_ESC_bracket_38_colon_2_m) {
 }
 
 TEST(parser, csi_SGR_colon_followed_by_semicolon) {
-    Parser p = init();
+    Parser p; /* init() */
     (void)p.next(0x1B);
     feed_silent(p, "[48:2");
 
@@ -172,7 +169,7 @@ TEST(parser, csi_SGR_colon_followed_by_semicolon) {
 }
 
 TEST(parser, csi_SGR_mixed_colon_and_semicolon) {
-    Parser p = init();
+    Parser p; /* init() */
     (void)p.next(0x1B);
     feed_silent(p, "[38:5:1;48:5:0");
 
@@ -186,7 +183,7 @@ TEST(parser, csi_SGR_mixed_colon_and_semicolon) {
 }
 
 TEST(parser, csi_SGR_ESC_bracket_48_colon_2_m) {
-    Parser p = init();
+    Parser p; /* init() */
     (void)p.next(0x1B);
     feed_silent(p, "[48:2:240:143:104");
 
@@ -214,7 +211,7 @@ TEST(parser, csi_SGR_ESC_bracket_48_colon_2_m) {
 }
 
 TEST(parser, csi_SGR_ESC_bracket_4_colon_3_m_colon) {
-    Parser p = init();
+    Parser p; /* init() */
     (void)p.next(0x1B);
     (void)p.next('[');
     (void)p.next('4');
@@ -239,7 +236,7 @@ TEST(parser, csi_SGR_ESC_bracket_4_colon_3_m_colon) {
 }
 
 TEST(parser, csi_SGR_with_many_blank_and_colon) {
-    Parser p = init();
+    Parser p; /* init() */
     (void)p.next(0x1B);
     feed_silent(p, "[58:2::240:143:104");
 
@@ -270,7 +267,7 @@ TEST(parser, csi_SGR_with_many_blank_and_colon) {
 
 /* This is from a Kakoune actual SGR sequence. */
 TEST(parser, csi_SGR_mixed_colon_and_semicolon_with_blank) {
-    Parser p = init();
+    Parser p; /* init() */
     (void)p.next(0x1B);
     feed_silent(p, "[;4:3;38;2;175;175;215;58:2::190:80:70");
 
@@ -317,7 +314,7 @@ TEST(parser, csi_SGR_mixed_colon_and_semicolon_with_blank) {
 
 /* This is from a Kakoune actual SGR sequence also. */
 TEST(parser, csi_SGR_mixed_colon_and_semicolon_setting_underline_bg_fg) {
-    Parser p = init();
+    Parser p; /* init() */
     (void)p.next(0x1B);
     feed_silent(p, "[4:3;38;2;51;51;51;48;2;170;170;170;58;2;255;97;136");
 
@@ -369,7 +366,7 @@ TEST(parser, csi_SGR_mixed_colon_and_semicolon_setting_underline_bg_fg) {
 }
 
 TEST(parser, csi_colon_for_non_m_final) {
-    Parser p = init();
+    Parser p; /* init() */
     (void)p.next(0x1B);
     feed_silent(p, "[38:2h");
 
@@ -377,7 +374,7 @@ TEST(parser, csi_colon_for_non_m_final) {
 }
 
 TEST(parser, csi_request_mode_decrqm) {
-    Parser p = init();
+    Parser p; /* init() */
     (void)p.next(0x1B);
     feed_silent(p, "[?2026$");
 
@@ -399,7 +396,7 @@ TEST(parser, csi_request_mode_decrqm) {
 }
 
 TEST(parser, csi_change_cursor) {
-    Parser p = init();
+    Parser p; /* init() */
     (void)p.next(0x1B);
     feed_silent(p, "[3 ");
 
@@ -420,7 +417,7 @@ TEST(parser, csi_change_cursor) {
 }
 
 TEST(parser, csi_too_many_params) {
-    Parser p = init();
+    Parser p; /* init() */
     (void)p.next(0x1B);
     (void)p.next('[');
     for (int i = 0; i < 100; i++) {
@@ -440,7 +437,7 @@ TEST(parser, csi_too_many_params) {
 
 TEST(parser, csi_sgr_with_up_to_our_max_parameters) {
     for (size_t max = 1; max < MAX_PARAMS + 1; max++) {
-        Parser p = init();
+        Parser p; /* init() */
         (void)p.next(0x1B);
         (void)p.next('[');
 
@@ -468,7 +465,7 @@ TEST(parser, csi_sgr_beyond_our_max_drops_it) {
     /* Has to be +2 for the loops below */
     const size_t max = MAX_PARAMS + 2;
 
-    Parser p = init();
+    Parser p; /* init() */
     (void)p.next(0x1B);
     (void)p.next('[');
 
@@ -488,7 +485,7 @@ TEST(parser, csi_sgr_beyond_our_max_drops_it) {
 }
 
 TEST(parser, dcs_XTGETTCAP) {
-    Parser p = init();
+    Parser p; /* init() */
     (void)p.next(0x1B);
     feed_silent(p, "P+");
 
@@ -508,7 +505,7 @@ TEST(parser, dcs_XTGETTCAP) {
 }
 
 TEST(parser, dcs_params) {
-    Parser p = init();
+    Parser p; /* init() */
     (void)p.next(0x1B);
     feed_silent(p, "P1000");
 
@@ -531,7 +528,7 @@ TEST(parser, dcs_too_many_params) {
      * sequence has more than MAX_PARAMS parameters and param_acc_idx > 0,
      * entering dcs_passthrough wrote to params[params_idx] without a
      * bounds check, causing an out-of-bounds access. */
-    Parser p = init();
+    Parser p; /* init() */
     (void)p.next(0x1B); /* ESC */
     (void)p.next('P');  /* DCS entry */
 
@@ -593,4 +590,53 @@ TEST(parse_table, dcs_passthrough_ESC_CAN_and_SUB_still_exit) {
 
     const Transition sub = table().t[0x1A][(size_t)State::dcs_passthrough];
     ASSERT_TRUE(sub.state == State::ground);
+}
+
+/* ─── Parser.zig: the OSC tests, now that osc.hpp exists ─────────────────── */
+
+TEST(parser, osc_change_window_title) {
+    Parser p; /* init() */
+    (void)p.next(0x1B);
+    (void)p.next(']');
+    (void)p.next('0');
+    (void)p.next(';');
+    (void)p.next('a');
+    (void)p.next('b');
+    (void)p.next('c');
+
+    {
+        const Next a = p.next(0x07); /* BEL */
+        ASSERT_TRUE(p.state == State::ground);
+        ASSERT_TRUE(a.has(0) && a[0].tag == Tag::osc_dispatch);
+        ASSERT_FALSE(a.has(1));
+        ASSERT_FALSE(a.has(2));
+
+        const wisp::terminal::osc::Command &cmd = a[0].osc_dispatch;
+        ASSERT_TRUE(cmd.key == wisp::terminal::osc::Command::Key::change_window_title);
+        ASSERT_TRUE(cmd.change_window_title.eql("abc"));
+    }
+}
+
+TEST(parser, osc_change_window_title_end_in_esc) {
+    Parser p; /* init() */
+    (void)p.next(0x1B);
+    (void)p.next(']');
+    (void)p.next('0');
+    (void)p.next(';');
+    (void)p.next('a');
+    (void)p.next('b');
+    (void)p.next('c');
+
+    {
+        const Next a = p.next(0x1B);
+        (void)p.next('\\');
+        ASSERT_TRUE(p.state == State::ground);
+        ASSERT_TRUE(a.has(0) && a[0].tag == Tag::osc_dispatch);
+        ASSERT_FALSE(a.has(1));
+        ASSERT_FALSE(a.has(2));
+
+        const wisp::terminal::osc::Command &cmd = a[0].osc_dispatch;
+        ASSERT_TRUE(cmd.key == wisp::terminal::osc::Command::Key::change_window_title);
+        ASSERT_TRUE(cmd.change_window_title.eql("abc"));
+    }
 }
