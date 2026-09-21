@@ -21,6 +21,8 @@
 #include "test_helpers.h"
 #include "osc.hpp"
 
+#include <string>
+
 using namespace wisp::terminal::osc;
 
 typedef Command::Key Key;
@@ -691,4 +693,221 @@ TEST(kitty_text_sizing, OSC_66_overlong_UTF_8) {
         for (const char *c = "bobr"; *c; c++) p.next((uint8_t)*c);
     }
     ASSERT_TRUE(p.end('\x1b') == nullptr);
+}
+
+/* context_signal.zig */
+
+namespace cs = wisp::terminal::osc::context_signal;
+
+static std::string repeat_a(size_t n) { return std::string(n, 'a'); }
+
+TEST(context_signal, OSC_3008_basic_start_command) {
+    Parser p; /* .init(null) */
+    Command *cmd = feed_end(p, "3008;start=abc123", false, 0);
+    ASSERT_TRUE(cmd && cmd->key == Command::Key::context_signal);
+    ASSERT_TRUE(cmd->context_signal.action == cs::Command::Action::start);
+    ASSERT_TRUE(cmd->context_signal.id.eql("abc123"));
+    ASSERT_TRUE(cmd->context_signal.metadata.eql(""));
+}
+
+TEST(context_signal, OSC_3008_basic_end_command) {
+    Parser p;
+    Command *cmd = feed_end(p, "3008;end=abc123", false, 0);
+    ASSERT_TRUE(cmd && cmd->key == Command::Key::context_signal);
+    ASSERT_TRUE(cmd->context_signal.action == cs::Command::Action::end);
+    ASSERT_TRUE(cmd->context_signal.id.eql("abc123"));
+    ASSERT_TRUE(cmd->context_signal.metadata.eql(""));
+}
+
+TEST(context_signal, OSC_3008_start_with_metadata_fields) {
+    Parser p;
+    Command *cmd = feed_end(p, "3008;start=bed86fab93af4328bbed0a1224af6d40;type=container;user=lennart;hostname=zeta", false, 0);
+    ASSERT_TRUE(cmd && cmd->key == Command::Key::context_signal);
+    ASSERT_TRUE(cmd->context_signal.action == cs::Command::Action::start);
+    ASSERT_TRUE(cmd->context_signal.id.eql("bed86fab93af4328bbed0a1224af6d40"));
+
+    /* Read individual fields */
+    cs::ContextType t;
+    ZStr v;
+    ASSERT_TRUE(cmd->context_signal.readType(&t) && t == cs::ContextType::container);
+    ASSERT_TRUE(cmd->context_signal.readString(cs::Field::user, &v) && v.eql("lennart"));
+    ASSERT_TRUE(cmd->context_signal.readString(cs::Field::hostname, &v) && v.eql("zeta"));
+}
+
+TEST(context_signal, OSC_3008_start_with_all_common_fields) {
+    Parser p;
+    Command *cmd = feed_end(p, "3008;start=myctx;type=shell;user=root;hostname=myhost;machineid=3deb5353d3ba43d08201c136a47ead7b;bootid=d4a3d0fdf2e24fdea6d971ce73f4fbf2;pid=1062862;pidfdid=1063162;comm=bash", false, 0);
+    ASSERT_TRUE(cmd && cmd->key == Command::Key::context_signal);
+    const cs::Command &c = cmd->context_signal;
+    cs::ContextType t;
+    ZStr v;
+    uint64_t n;
+    ASSERT_TRUE(c.readType(&t) && t == cs::ContextType::shell);
+    ASSERT_TRUE(c.readString(cs::Field::user, &v) && v.eql("root"));
+    ASSERT_TRUE(c.readString(cs::Field::hostname, &v) && v.eql("myhost"));
+    ASSERT_TRUE(c.readString(cs::Field::machineid, &v) && v.eql("3deb5353d3ba43d08201c136a47ead7b"));
+    ASSERT_TRUE(c.readString(cs::Field::bootid, &v) && v.eql("d4a3d0fdf2e24fdea6d971ce73f4fbf2"));
+    ASSERT_TRUE(c.readU64(cs::Field::pid, &n) && n == 1062862);
+    ASSERT_TRUE(c.readU64(cs::Field::pidfdid, &n) && n == 1063162);
+    ASSERT_TRUE(c.readString(cs::Field::comm, &v) && v.eql("bash"));
+}
+
+TEST(context_signal, OSC_3008_end_with_exit_metadata) {
+    Parser p;
+    Command *cmd = feed_end(p, "3008;end=myctx;exit=success;status=0", false, 0);
+    ASSERT_TRUE(cmd && cmd->key == Command::Key::context_signal);
+    ASSERT_TRUE(cmd->context_signal.action == cs::Command::Action::end);
+    ASSERT_TRUE(cmd->context_signal.id.eql("myctx"));
+    cs::ExitStatus e;
+    uint64_t n;
+    ASSERT_TRUE(cmd->context_signal.readExit(&e) && e == cs::ExitStatus::success);
+    ASSERT_TRUE(cmd->context_signal.readU64(cs::Field::status, &n) && n == 0);
+}
+
+TEST(context_signal, OSC_3008_end_with_failure_exit) {
+    Parser p;
+    Command *cmd = feed_end(p, "3008;end=myctx;exit=failure;status=1;signal=SIGKILL", false, 0);
+    ASSERT_TRUE(cmd && cmd->key == Command::Key::context_signal);
+    cs::ExitStatus e;
+    uint64_t n;
+    ZStr v;
+    ASSERT_TRUE(cmd->context_signal.readExit(&e) && e == cs::ExitStatus::failure);
+    ASSERT_TRUE(cmd->context_signal.readU64(cs::Field::status, &n) && n == 1);
+    ASSERT_TRUE(cmd->context_signal.readString(cs::Field::signal, &v) && v.eql("SIGKILL"));
+}
+
+TEST(context_signal, OSC_3008_unknown_fields_are_ignored) {
+    Parser p;
+    Command *cmd = feed_end(p, "3008;start=myctx;type=shell;unknownfield=value;user=root", false, 0);
+    ASSERT_TRUE(cmd && cmd->key == Command::Key::context_signal);
+    cs::ContextType t;
+    ZStr v;
+    ASSERT_TRUE(cmd->context_signal.readType(&t) && t == cs::ContextType::shell);
+    ASSERT_TRUE(cmd->context_signal.readString(cs::Field::user, &v) && v.eql("root"));
+}
+
+TEST(context_signal, OSC_3008_missing_field_returns_null) {
+    Parser p;
+    Command *cmd = feed_end(p, "3008;start=myctx;user=lennart", false, 0);
+    ASSERT_TRUE(cmd && cmd->key == Command::Key::context_signal);
+    cs::ContextType t;
+    ZStr v;
+    uint64_t n;
+    ASSERT_FALSE(cmd->context_signal.readType(&t));
+    ASSERT_FALSE(cmd->context_signal.readString(cs::Field::hostname, &v));
+    ASSERT_FALSE(cmd->context_signal.readU64(cs::Field::pid, &n));
+}
+
+TEST(context_signal, OSC_3008_invalid_prefix) {
+    Parser p;
+    ASSERT_TRUE(feed_end(p, "3008;bogus=abc123", false, 0) == nullptr);
+}
+
+TEST(context_signal, OSC_3008_empty_data) {
+    /* Can't really produce empty data after "3008;" because the state machine
+     * won't write a writer for that case, but we test the edge case where
+     * only "start=" is present with no ID. */
+    Parser p;
+    ASSERT_TRUE(feed_end(p, "3008;start=", false, 0) == nullptr);
+}
+
+TEST(context_signal, OSC_3008_max_length_context_ID) {
+    Parser p;
+    const std::string id = repeat_a(64);
+    const std::string input = "3008;start=" + id;
+    Command *cmd = feed_end(p, input.c_str(), false, 0);
+    ASSERT_TRUE(cmd && cmd->key == Command::Key::context_signal);
+    ASSERT_TRUE(cmd->context_signal.id.eql(id.c_str()));
+}
+
+TEST(context_signal, OSC_3008_over_length_context_ID) {
+    Parser p;
+    const std::string input = "3008;start=" + repeat_a(65);
+    ASSERT_TRUE(feed_end(p, input.c_str(), false, 0) == nullptr);
+}
+
+TEST(context_signal, OSC_3008_context_type_enum_coverage) {
+    struct T { const char *str; cs::ContextType expected; };
+    const T types[] = {
+        { "boot", cs::ContextType::boot },
+        { "container", cs::ContextType::container },
+        { "vm", cs::ContextType::vm },
+        { "elevate", cs::ContextType::elevate },
+        { "chpriv", cs::ContextType::chpriv },
+        { "subcontext", cs::ContextType::subcontext },
+        { "remote", cs::ContextType::remote },
+        { "shell", cs::ContextType::shell },
+        { "command", cs::ContextType::command },
+        { "app", cs::ContextType::app },
+        { "service", cs::ContextType::service },
+        { "session", cs::ContextType::session },
+    };
+
+    for (size_t i = 0; i < sizeof(types) / sizeof(types[0]); i++) {
+        cs::ContextType t;
+        ASSERT_TRUE(cs::ContextType_parse(types[i].str, &t) && t == types[i].expected);
+    }
+
+    cs::ContextType t;
+    ASSERT_FALSE(cs::ContextType_parse("invalid", &t));
+}
+
+TEST(context_signal, OSC_3008_exit_status_enum_coverage) {
+    cs::ExitStatus e;
+    ASSERT_TRUE(cs::ExitStatus_parse("success", &e) && e == cs::ExitStatus::success);
+    ASSERT_TRUE(cs::ExitStatus_parse("failure", &e) && e == cs::ExitStatus::failure);
+    ASSERT_TRUE(cs::ExitStatus_parse("crash", &e) && e == cs::ExitStatus::crash);
+    ASSERT_TRUE(cs::ExitStatus_parse("interrupt", &e) && e == cs::ExitStatus::interrupt);
+    ASSERT_FALSE(cs::ExitStatus_parse("invalid", &e));
+}
+
+TEST(context_signal, OSC_3008_spec_example_container_start) {
+    /* From the spec: a new container "foobar" invoked by user "lennart" on host "zeta" */
+    Parser p;
+    Command *cmd = feed_end(p, "3008;start=bed86fab93af4328bbed0a1224af6d40;type=container;user=lennart;hostname=zeta;machineid=3deb5353d3ba43d08201c136a47ead7b;bootid=d4a3d0fdf2e24fdea6d971ce73f4fbf2;pid=1062862;pidfdid=1063162;comm=systemd-nspawn;container=foobar", false, 0);
+    ASSERT_TRUE(cmd && cmd->key == Command::Key::context_signal);
+    const cs::Command &c = cmd->context_signal;
+    cs::ContextType t;
+    ZStr v;
+    uint64_t n;
+    ASSERT_TRUE(c.action == cs::Command::Action::start);
+    ASSERT_TRUE(c.id.eql("bed86fab93af4328bbed0a1224af6d40"));
+    ASSERT_TRUE(c.readType(&t) && t == cs::ContextType::container);
+    ASSERT_TRUE(c.readString(cs::Field::user, &v) && v.eql("lennart"));
+    ASSERT_TRUE(c.readString(cs::Field::hostname, &v) && v.eql("zeta"));
+    ASSERT_TRUE(c.readString(cs::Field::comm, &v) && v.eql("systemd-nspawn"));
+    ASSERT_TRUE(c.readString(cs::Field::container, &v) && v.eql("foobar"));
+    ASSERT_TRUE(c.readU64(cs::Field::pid, &n) && n == 1062862);
+}
+
+TEST(context_signal, OSC_3008_spec_example_context_end) {
+    /* From the spec: context end */
+    Parser p;
+    Command *cmd = feed_end(p, "3008;end=bed86fab93af4328bbed0a1224af6d40", false, 0);
+    ASSERT_TRUE(cmd && cmd->key == Command::Key::context_signal);
+    ASSERT_TRUE(cmd->context_signal.action == cs::Command::Action::end);
+    ASSERT_TRUE(cmd->context_signal.id.eql("bed86fab93af4328bbed0a1224af6d40"));
+}
+
+TEST(context_signal, OSC_3008_cwd_and_cmdline_fields) {
+    Parser p;
+    Command *cmd = feed_end(p, "3008;start=myctx;type=command;cwd=/home/user;cmdline=ls -la", false, 0);
+    ASSERT_TRUE(cmd && cmd->key == Command::Key::context_signal);
+    ZStr v;
+    ASSERT_TRUE(cmd->context_signal.readString(cs::Field::cwd, &v) && v.eql("/home/user"));
+    ASSERT_TRUE(cmd->context_signal.readString(cs::Field::cmdline, &v) && v.eql("ls -la"));
+}
+
+TEST(context_signal, OSC_3008_start_command_with_no_fields) {
+    Parser p;
+    Command *cmd = feed_end(p, "3008;start=simpleid", false, 0);
+    ASSERT_TRUE(cmd && cmd->key == Command::Key::context_signal);
+    ASSERT_TRUE(cmd->context_signal.action == cs::Command::Action::start);
+    ASSERT_TRUE(cmd->context_signal.id.eql("simpleid"));
+    cs::ContextType t;
+    ZStr v;
+    cs::ExitStatus e;
+    ASSERT_FALSE(cmd->context_signal.readType(&t));
+    ASSERT_FALSE(cmd->context_signal.readString(cs::Field::user, &v));
+    ASSERT_FALSE(cmd->context_signal.readExit(&e));
 }

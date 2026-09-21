@@ -3,7 +3,7 @@
  * change_window_title.zig, change_window_icon.zig, hyperlink.zig,
  * report_pwd.zig, mouse_shape.zig, clipboard_operation.zig, color.zig,
  * kitty_color.zig, kitty_dnd_protocol.zig, rxvt_extension.zig,
- * kitty_text_sizing.zig
+ * kitty_text_sizing.zig, context_signal.zig
  * Copyright (c) 2024 Mitchell Hashimoto, Ghostty contributors
  * MIT License — see THIRD_PARTY_NOTICES.md
  *
@@ -27,7 +27,7 @@
  * Wisp: PARSERS NOT YET TRANSLITERATED. osc/parsers/ holds one file per
  * command family. Only the ones named above are here; the rest — osc9,
  * kitty_clipboard_protocol, kitty_desktop_notification,
- * context_signal, semantic_prompt and iterm2 — arrive in
+ * semantic_prompt and iterm2 — arrive in
  * later slices. Until then end() returns null for their states, exactly as
  * it would for an invalid sequence, and Command keeps a tag for each so the
  * dispatch in end() already has upstream's shape.
@@ -337,6 +337,211 @@ struct OSC {
 
 } /* namespace kitty_text_sizing */
 
+/* ─── osc/parsers/context_signal.zig: types ────────────────────────────── */
+
+/* OSC 3008: Hierarchical Context Signalling (UAPI spec)
+ * Specification: https://uapi-group.org/specifications/specs/osc_context/
+ *
+ * OSC 3008 allows programs to signal context changes to the terminal emulator.
+ * Each context has an identifier and metadata fields. Contexts are hierarchical
+ * and form a stack. */
+namespace context_signal {
+
+/* Maximum length of a context identifier (per spec). */
+static const size_t max_context_id_len = 64;
+
+/* Wisp: std.meta.stringToEnum over a name table. */
+inline bool string_to_enum(const char *const *names, size_t count,
+                           const char *s, size_t len, size_t *out) {
+    for (size_t i = 0; i < count; i++) {
+        if (strlen(names[i]) == len && memcmp(names[i], s, len) == 0) {
+            *out = i;
+            return true;
+        }
+    }
+    return false;
+}
+
+/* Context types defined by the specification. */
+enum class ContextType : uint8_t {
+    boot,
+    container,
+    vm,
+    elevate,
+    chpriv,
+    subcontext,
+    remote,
+    shell,
+    command,
+    app,
+    service,
+    session,
+};
+
+/* Wisp: ?ContextType is the bool return plus *out. */
+inline bool ContextType_parse(const char *value, size_t len, ContextType *out) {
+    static const char *const names[] = {
+        "boot", "container", "vm", "elevate", "chpriv", "subcontext",
+        "remote", "shell", "command", "app", "service", "session",
+    };
+    size_t i;
+    if (!string_to_enum(names, 12, value, len, &i)) return false;
+    *out = (ContextType)i;
+    return true;
+}
+inline bool ContextType_parse(const char *value, ContextType *out) {
+    return ContextType_parse(value, strlen(value), out);
+}
+
+/* Exit status for the `exit` end-sequence field. */
+enum class ExitStatus : uint8_t {
+    success,
+    failure,
+    crash,
+    interrupt,
+};
+
+inline bool ExitStatus_parse(const char *value, size_t len, ExitStatus *out) {
+    static const char *const names[] = { "success", "failure", "crash", "interrupt" };
+    size_t i;
+    if (!string_to_enum(names, 4, value, len, &i)) return false;
+    *out = (ExitStatus)i;
+    return true;
+}
+inline bool ExitStatus_parse(const char *value, ExitStatus *out) {
+    return ExitStatus_parse(value, strlen(value), out);
+}
+
+/* Metadata fields that can appear in OSC 3008 sequences.
+ * Fields are read lazily from the raw string using the `read` method. */
+enum class Field : uint8_t {
+    /* Start sequence fields */
+    type,
+    user,
+    hostname,
+    machineid,
+    bootid,
+    pid,
+    pidfdid,
+    comm,
+    cwd,
+    cmdline,
+    vm,
+    container,
+    targetuser,
+    targethost,
+    sessionid,
+
+    /* End sequence fields */
+    exit,
+    status,
+    signal,
+};
+
+inline const char *Field_key(Field f) {
+    static const char *const names[] = {
+        "type", "user", "hostname", "machineid", "bootid", "pid", "pidfdid",
+        "comm", "cwd", "cmdline", "vm", "container", "targetuser",
+        "targethost", "sessionid", "exit", "status", "signal",
+    };
+    return names[(size_t)f];
+}
+
+/* Wisp: the shared part of Field.read — the value of the first
+ * semicolon-separated key=value pair whose key matches. Upstream converts
+ * that first match and returns, whether or not it converts. */
+inline bool Field_find(Field self, const char *raw, size_t raw_len,
+                       const char **value, size_t *value_len) {
+    const char *key = Field_key(self);
+    const size_t key_len = strlen(key);
+    size_t start = 0;
+    bool more = true;
+    while (more) {
+        const char *semi = (const char *)memchr(raw + start, ';', raw_len - start);
+        const size_t end = semi ? (size_t)(semi - raw) : raw_len;
+        const char *full = raw + start;
+        const size_t full_len = end - start;
+        if (semi) start = end + 1; else more = false;
+
+        /* Parse key=value */
+        const char *eq = (const char *)memchr(full, '=', full_len);
+        if (!eq) continue;
+        const size_t eql_idx = (size_t)(eq - full);
+        if (eql_idx == key_len && memcmp(full, key, key_len) == 0) {
+            *value = full + eql_idx + 1;
+            *value_len = full_len - eql_idx - 1;
+            return true;
+        }
+    }
+    /* Not found */
+    return false;
+}
+
+/* A single OSC 3008 context signal command. */
+struct Command {
+    enum class Action : uint8_t {
+        /* OSC 3008;start=<id> — initiates, updates, or returns to a context. */
+        start,
+        /* OSC 3008;end=<id> — terminates a context. */
+        end,
+    };
+
+    Action action;
+    /* The context identifier. Must be 1-64 characters in the 32..126 byte range. */
+    ZStr id;
+    /* Raw unparsed metadata fields after the context ID.
+     * Fields are semicolon-separated key=value pairs.
+     * Parsed lazily via `readOption`. */
+    ZStr metadata;
+
+    Command() : action(Action::start), id(), metadata() {}
+
+    /* Read a metadata field value from the raw fields string.
+     * Returns null if the field is not present or malformed.
+     *
+     * Wisp: option.Type() depends on the field, so there is one reader per
+     * type: .type, .exit, the u64 fields (.pid, .pidfdid, .status) and the
+     * string fields. Each returns false for null. */
+    bool readType(ContextType *out) const {
+        const char *v; size_t n;
+        if (!Field_find(Field::type, metadata.ptr, metadata.len, &v, &n)) return false;
+        return ContextType_parse(v, n, out);
+    }
+    bool readExit(ExitStatus *out) const {
+        const char *v; size_t n;
+        if (!Field_find(Field::exit, metadata.ptr, metadata.len, &v, &n)) return false;
+        return ExitStatus_parse(v, n, out);
+    }
+    bool readU64(Field option, uint64_t *out) const {
+        /* assert(option is .pid, .pidfdid or .status) */
+        const char *v; size_t n;
+        if (!Field_find(option, metadata.ptr, metadata.len, &v, &n)) return false;
+        for (size_t i = 0; i < n; i++) {
+            if (v[i] < '0' || v[i] > '9') return false;
+        }
+        /* std.fmt.parseInt(u64, value, 10) catch null */
+        if (n == 0) return false;
+        uint64_t r = 0;
+        for (size_t i = 0; i < n; i++) {
+            const uint64_t d = (uint64_t)(v[i] - '0');
+            if (r > (UINT64_MAX - d) / 10) return false;
+            r = r * 10 + d;
+        }
+        *out = r;
+        return true;
+    }
+    bool readString(Field option, ZStr *out) const {
+        /* assert(option is a string field) */
+        const char *v; size_t n;
+        if (!Field_find(option, metadata.ptr, metadata.len, &v, &n)) return false;
+        if (n == 0) return false;
+        *out = ZStr(v, n);
+        return true;
+    }
+};
+
+} /* namespace context_signal */
+
 struct Command {
     /* NOTE: Order matters, see LibEnum documentation. */
     enum class Key : uint8_t {
@@ -448,6 +653,9 @@ struct Command {
          * request. */
         Terminator terminator;   /* = .st */
     } kitty_color_protocol;
+
+    /* OSC 3008: hierarchical context signalling */
+    context_signal::Command context_signal;
 
     /* Kitty text sizing protocol (OSC 66) */
     kitty_text_sizing::OSC kitty_text_sizing;
@@ -1390,6 +1598,84 @@ inline Command *parse(Parser *parser, bool, uint8_t) {
 }
 } /* namespace kitty_text_sizing */
 
+namespace context_signal {
+/* Parse OSC 3008: hierarchical context signalling.
+ *
+ * Expected data format (after "3008;" prefix has been consumed by the state machine):
+ *   start=<id>[;<field>=<value>]*
+ *   end=<id>[;<field>=<value>]* */
+inline Command *parse(Parser *parser, bool, uint8_t) {
+    typedef ::wisp::terminal::osc::context_signal::Command CS;
+    if (!parser->has_capture) {
+        parser->state = Parser::State::invalid;
+        return nullptr;
+    }
+    const char *data = parser->capture.trailing();
+    const size_t data_len = parser->capture.trailing_len();
+    if (data_len == 0) {
+        parser->state = Parser::State::invalid;
+        return nullptr;
+    }
+
+    /* Determine the action (start= or end=) */
+    CS::Action action;
+    if (data_len >= 6 && memcmp(data, "start=", 6) == 0) {
+        action = CS::Action::start;
+    } else if (data_len >= 4 && memcmp(data, "end=", 4) == 0) {
+        action = CS::Action::end;
+    } else {
+        /* log.warn("OSC 3008: expected 'start=' or 'end=' prefix ...") */
+        parser->state = Parser::State::invalid;
+        return nullptr;
+    }
+
+    /* Skip past the "start=" or "end=" prefix */
+    const size_t prefix_len = action == CS::Action::start ? 6 : 4;
+    const char *rest = data + prefix_len;
+    const size_t rest_len = data_len - prefix_len;
+
+    if (rest_len == 0) {
+        /* log.warn("OSC 3008: missing context ID") */
+        parser->state = Parser::State::invalid;
+        return nullptr;
+    }
+
+    /* Extract the context ID (up to the first semicolon or end of data) */
+    const char *semi = (const char *)memchr(rest, ';', rest_len);
+    const size_t id_end = semi ? (size_t)(semi - rest) : rest_len;
+
+    /* Validate context ID length (1-64 chars per spec) */
+    if (id_end == 0 || id_end > ::wisp::terminal::osc::context_signal::max_context_id_len) {
+        /* log.warn("OSC 3008: context ID length {d} out of range") */
+        parser->state = Parser::State::invalid;
+        return nullptr;
+    }
+
+    /* Validate context ID characters (32..126 byte range per spec) */
+    for (size_t i = 0; i < id_end; i++) {
+        const uint8_t c = (uint8_t)rest[i];
+        if (c < 0x20 || c > 0x7e) {
+            /* log.warn("OSC 3008: invalid character in context ID") */
+            parser->state = Parser::State::invalid;
+            return nullptr;
+        }
+    }
+
+    /* Extract raw metadata fields (everything after the ID) */
+    const ZStr metadata = id_end < rest_len
+        ? ZStr(rest + id_end + 1, rest_len - id_end - 1)
+        : ZStr();
+
+    parser->command = Command();
+    parser->command.key = Command::Key::context_signal;
+    parser->command.context_signal.action = action;
+    parser->command.context_signal.id = ZStr(rest, id_end);
+    parser->command.context_signal.metadata = metadata;
+
+    return &parser->command;
+}
+} /* namespace context_signal */
+
 namespace kitty_dnd_protocol {
 inline Command *parse(Parser *parser, bool has_ch, uint8_t terminator_ch) {
     /* assert(parser.state == .@"72") */
@@ -1837,8 +2123,8 @@ inline Command *Parser::end(bool has_ch, uint8_t ch) {
         case S::s300:
             return nullptr;
 
-        /* Wisp: parsers.context_signal — not yet transliterated. */
-        case S::s3008: return nullptr;
+        case S::s3008:
+            return parsers::context_signal::parse(this, has_ch, ch);
 
         case S::s6: return nullptr;
 
