@@ -1,6 +1,13 @@
-/* Ported from Ghostty src/terminal/stream.zig
+/* Reimplemented after Ghostty src/terminal/stream.zig
  * Copyright (c) 2024 Mitchell Hashimoto, Ghostty contributors
  * MIT License — see THIRD_PARTY_NOTICES.md
+ *
+ * REIMPLEMENTED, NOT TRANSLITERATED. This file was written from Ghostty's
+ * design and verified against Wisp's own tests, without the upstream source
+ * to hand. It follows upstream's structure but has not been checked against
+ * it line by line, and its behaviour will differ in places. It is due to be
+ * replaced by a transliteration checked against upstream's own tests, as
+ * parser.hpp has been.
  *
  * Bytes from a program, turned into things happening to a terminal.
  *
@@ -308,6 +315,50 @@ inline void stream_apply_sgr(Terminal *t, const Attribute &a) {
     }
 }
 
+/* ─── views onto the parser's actions ───────────────────────────────────── */
+
+/* Wisp: parser.hpp is now a transliteration of upstream, whose CSI action
+ * carries a private marker such as '?' as the first intermediate and marks a
+ * colon as the separator after a parameter. The dispatch below was written
+ * against the reimplemented parser that came before, so these views present
+ * the exact actions in the terms it reads. They go when stream.zig is
+ * transliterated and the dispatch is replaced with upstream's. */
+struct CsiView {
+    uint8_t         final_byte;
+    uint8_t         private_marker;
+    const uint8_t  *intermediates;       /* after the private marker */
+    size_t          intermediate_count;
+    const uint16_t *params;
+    size_t          param_count;
+    parser::SepList params_sep;
+
+    explicit CsiView(const parser::Action::CSI &c)
+        : final_byte(c.final_), private_marker(0),
+          intermediates(c.intermediates),
+          intermediate_count(c.intermediates_len), params(c.params),
+          param_count(c.params_len), params_sep(c.params_sep) {
+        if (intermediate_count > 0 && intermediates[0] >= 0x3C &&
+            intermediates[0] <= 0x3F) {
+            private_marker = intermediates[0];
+            intermediates++;
+            intermediate_count--;
+        }
+    }
+};
+
+/* The value of a parameter, or a default when it was omitted or zero. */
+inline uint16_t csi_param(const CsiView &a, size_t index, uint16_t fallback) {
+    if (index >= a.param_count) return fallback;
+    const uint16_t v = a.params[index];
+    return v == 0 ? fallback : v;
+}
+
+/* The raw value, for the parameters where zero means zero. */
+inline uint16_t csi_param_raw(const CsiView &a, size_t index, uint16_t fallback) {
+    if (index >= a.param_count) return fallback;
+    return a.params[index];
+}
+
 /* ─── dispatch ───────────────────────────────────────────────────────────── */
 
 inline void stream_execute(Terminal *t, uint8_t b) {
@@ -327,9 +378,7 @@ inline void stream_execute(Terminal *t, uint8_t b) {
     }
 }
 
-inline void stream_csi(Terminal *t, const parser::Action &a) {
-    using parser::action_param;
-    using parser::action_param_raw;
+inline void stream_csi(Terminal *t, const CsiView &a) {
 
     Screen *s = t->active;
 
@@ -369,39 +418,39 @@ inline void stream_csi(Terminal *t, const parser::Action &a) {
     if (a.private_marker != 0) return;
 
     switch (a.final_byte) {
-        case '@': terminal_insert_chars(t, action_param(a, 0, 1)); break;
-        case 'A': screen_cursor_up(s, action_param(a, 0, 1)); break;
-        case 'B': screen_cursor_down(s, action_param(a, 0, 1)); break;
-        case 'C': screen_cursor_right(s, action_param(a, 0, 1)); break;
-        case 'D': screen_cursor_left(s, action_param(a, 0, 1)); break;
+        case '@': terminal_insert_chars(t, csi_param(a, 0, 1)); break;
+        case 'A': screen_cursor_up(s, csi_param(a, 0, 1)); break;
+        case 'B': screen_cursor_down(s, csi_param(a, 0, 1)); break;
+        case 'C': screen_cursor_right(s, csi_param(a, 0, 1)); break;
+        case 'D': screen_cursor_left(s, csi_param(a, 0, 1)); break;
 
         case 'G':
             /* CHA: a column, counted from one. */
-            terminal_cursor_position(t, (CellCountInt)(action_param(a, 0, 1) - 1),
+            terminal_cursor_position(t, (CellCountInt)(csi_param(a, 0, 1) - 1),
                                      s->cursor.y);
             break;
 
         case 'H':
         case 'f':
-            terminal_cursor_position(t, (CellCountInt)(action_param(a, 1, 1) - 1),
-                                     (CellCountInt)(action_param(a, 0, 1) - 1));
+            terminal_cursor_position(t, (CellCountInt)(csi_param(a, 1, 1) - 1),
+                                     (CellCountInt)(csi_param(a, 0, 1) - 1));
             break;
 
-        case 'J': screen_erase_display(s, action_param_raw(a, 0, 0), false); break;
-        case 'K': screen_erase_line(s, action_param_raw(a, 0, 0), false); break;
-        case 'L': terminal_insert_lines(t, action_param(a, 0, 1)); break;
-        case 'M': terminal_delete_lines(t, action_param(a, 0, 1)); break;
-        case 'P': terminal_delete_chars(t, action_param(a, 0, 1)); break;
-        case 'X': screen_erase_chars(s, action_param(a, 0, 1), false); break;
-        case 'Z': terminal_reverse_tab(t, action_param(a, 0, 1)); break;
+        case 'J': screen_erase_display(s, csi_param_raw(a, 0, 0), false); break;
+        case 'K': screen_erase_line(s, csi_param_raw(a, 0, 0), false); break;
+        case 'L': terminal_insert_lines(t, csi_param(a, 0, 1)); break;
+        case 'M': terminal_delete_lines(t, csi_param(a, 0, 1)); break;
+        case 'P': terminal_delete_chars(t, csi_param(a, 0, 1)); break;
+        case 'X': screen_erase_chars(s, csi_param(a, 0, 1), false); break;
+        case 'Z': terminal_reverse_tab(t, csi_param(a, 0, 1)); break;
 
         case 'd':
             /* VPA: a row, counted from one. */
             terminal_cursor_position(t, s->cursor.x,
-                                     (CellCountInt)(action_param(a, 0, 1) - 1));
+                                     (CellCountInt)(csi_param(a, 0, 1) - 1));
             break;
 
-        case 'g': terminal_tab_clear(t, action_param_raw(a, 0, 0)); break;
+        case 'g': terminal_tab_clear(t, csi_param_raw(a, 0, 0)); break;
 
         case 'h':
         case 'l': {
@@ -418,7 +467,9 @@ inline void stream_csi(Terminal *t, const parser::Action &a) {
              * and takes what was convenient to give it then. */
             uint8_t colons[parser::MAX_PARAMS];
             for (size_t i = 0; i < parser::MAX_PARAMS; i++) {
-                colons[i] = parser::action_param_is_sub(a, i) ? 1 : 0;
+                /* Upstream marks the separator after a parameter; sgr.hpp
+                 * asks whether a parameter was joined to the one before. */
+                colons[i] = (i > 0 && a.params_sep.isSet(i - 1)) ? 1 : 0;
             }
 
             SgrParser p(a.params, a.param_count, colons);
@@ -429,34 +480,34 @@ inline void stream_csi(Terminal *t, const parser::Action &a) {
 
         case 'r':
             terminal_set_scroll_region(
-                t, (CellCountInt)(action_param(a, 0, 1) - 1),
-                (CellCountInt)(action_param(a, 1, (uint16_t)t->rows) - 1));
+                t, (CellCountInt)(csi_param(a, 0, 1) - 1),
+                (CellCountInt)(csi_param(a, 1, (uint16_t)t->rows) - 1));
             break;
 
         default: break;
     }
 }
 
-inline void stream_esc(Terminal *t, const parser::Action &a) {
-    if (a.intermediate_count == 1) {
+inline void stream_esc(Terminal *t, const parser::Action::ESC &a) {
+    if (a.intermediates_len == 1) {
         /* ESC ( ) * + load a set into G0 to G3. */
         switch (a.intermediates[0]) {
-            case '(': terminal_designate_charset(t, 0, a.final_byte); return;
-            case ')': terminal_designate_charset(t, 1, a.final_byte); return;
-            case '*': terminal_designate_charset(t, 2, a.final_byte); return;
-            case '+': terminal_designate_charset(t, 3, a.final_byte); return;
+            case '(': terminal_designate_charset(t, 0, a.final_); return;
+            case ')': terminal_designate_charset(t, 1, a.final_); return;
+            case '*': terminal_designate_charset(t, 2, a.final_); return;
+            case '+': terminal_designate_charset(t, 3, a.final_); return;
             default: return;
         }
     }
 
-    if (a.intermediate_count > 0) {
+    if (a.intermediates_len > 0) {
         /* Anything else with intermediates is not implemented, and doing
          * nothing is right until something is — guessing would corrupt
          * output rather than merely not improving it. */
         return;
     }
 
-    switch (a.final_byte) {
+    switch (a.final_) {
         case '7': terminal_save_cursor(t); break;
         case '8': terminal_restore_cursor(t); break;
         case 'N': terminal_single_shift(t, 2); break;
@@ -552,13 +603,13 @@ inline void stream_osc_hyperlink(Terminal *t, const char *str, size_t len) {
     c.hyperlink_active = true;
 }
 
-inline void stream_osc(Terminal *t, const parser::Action &a) {
+inline void stream_osc(Terminal *t, const parser::osc::Command &a) {
     int cmd = 0;
     size_t rest = 0;
-    if (!stream_osc_command(a.string, a.string_len, &cmd, &rest)) return;
+    if (!stream_osc_command(a.data, a.len, &cmd, &rest)) return;
 
-    const char *body = a.string + rest;
-    const size_t body_len = a.string_len - rest;
+    const char *body = a.data + rest;
+    const size_t body_len = a.len - rest;
 
     switch (cmd) {
         case 0:
@@ -595,12 +646,12 @@ inline void stream_osc(Terminal *t, const parser::Action &a) {
  * plain text while claiming too much means they send things this cannot draw.
  * VT220 with ANSI colour is what the terminals programs are tested against
  * report, so it is the answer that produces the output people expect. */
-inline void stream_report(Stream *st, const parser::Action &a) {
+inline void stream_report(Stream *st, const CsiView &a) {
     Terminal *t = st->terminal;
     char buf[64];
 
     if (a.final_byte == 'n' && a.private_marker == 0) {
-        const uint16_t what = parser::action_param_raw(a, 0, 0);
+        const uint16_t what = csi_param_raw(a, 0, 0);
 
         if (what == 5) {
             /* "Are you all right?" — always yes. */
@@ -622,7 +673,7 @@ inline void stream_report(Stream *st, const parser::Action &a) {
     }
 
     if (a.final_byte == 'c') {
-        if (a.private_marker == 0 && parser::action_param_raw(a, 0, 0) == 0) {
+        if (a.private_marker == 0 && csi_param_raw(a, 0, 0) == 0) {
             /* DA1: a VT220 (62) with ANSI colour (22). */
             stream_reply_str(st, "\x1b[?62;22c");
             return;
@@ -655,54 +706,82 @@ inline void stream_print(Stream *s, uint32_t cp) {
 
 /* Feed bytes. Everything that can go wrong in here has already been decided
  * somewhere lower down, so this reports nothing: a terminal's whole job is to
- * keep going. */
+ * keep going.
+ *
+ * Wisp: UTF-8 is decoded here, before the parser, and only in the ground
+ * state. That is upstream's arrangement — its transition table prints only
+ * 0x20-0x7F and says "Ghostty doesn't honor 8-bit C1 controls in the ground
+ * state either (they go through UTF-8 decoding)" — but the loop itself is
+ * not yet a transliteration of stream.zig. */
+inline void stream_dispatch(Stream *s, const parser::Action &a) {
+    typedef parser::Action::Tag Tag;
+
+    switch (a.tag) {
+        case Tag::print:
+            stream_print(s, a.print);
+            break;
+
+        case Tag::execute:
+            stream_execute(s->terminal, a.byte);
+            break;
+
+        case Tag::csi_dispatch: {
+            const CsiView v(a.csi_dispatch);
+            if (v.final_byte == 'n' || v.final_byte == 'c') {
+                stream_report(s, v);
+            } else {
+                stream_csi(s->terminal, v);
+            }
+            break;
+        }
+
+        case Tag::esc_dispatch:
+            stream_esc(s->terminal, a.esc_dispatch);
+            break;
+
+        case Tag::osc_dispatch:
+            stream_osc(s->terminal, a.osc_dispatch);
+            break;
+
+        case Tag::dcs_hook:
+        case Tag::dcs_put:
+        case Tag::dcs_unhook:
+        case Tag::apc_start:
+        case Tag::apc_put:
+        case Tag::apc_end:
+            break;
+    }
+}
+
 inline void stream_feed(Stream *s, const uint8_t *data, size_t len) {
     for (size_t i = 0; i < len; i++) {
-        parser::Actions acts = parser::parser_next(&s->parser, data[i]);
+        const uint8_t b = data[i];
 
-        for (uint8_t j = 0; j < acts.count; j++) {
-            const parser::Action &a = acts.list[j];
-
-            switch (a.tag) {
-                case parser::ActionTag::print: {
-                    uint32_t cps[2] = {0, 0};
-                    const int n = utf8_next(&s->utf8, a.byte, cps);
-                    for (int k = 0; k < n; k++) stream_print(s, cps[k]);
-                    break;
-                }
-
-                case parser::ActionTag::execute:
-                    /* A control byte in the middle of a character means the
-                     * character was never finished. The control still
-                     * happens — it is what it is regardless — but the partial
-                     * codepoint is abandoned rather than completed with
-                     * whatever comes next. */
-                    s->utf8 = Utf8();
-                    stream_execute(s->terminal, a.byte);
-                    break;
-
-                case parser::ActionTag::csi_dispatch:
-                    if (a.final_byte == 'n' || a.final_byte == 'c') {
-                        stream_report(s, a);
-                    } else {
-                        stream_csi(s->terminal, a);
+        /* In the ground state a high byte, or any byte while a character is
+         * half decoded, belongs to UTF-8 rather than to the parser. */
+        if (s->parser.state == parser::State::ground &&
+            (b >= 0x80 || s->utf8.remaining > 0)) {
+            uint32_t cps[2] = {0, 0};
+            const int n = utf8_next(&s->utf8, b, cps);
+            for (int k = 0; k < n; k++) {
+                /* A control byte that interrupted a character is decoded
+                 * back out as itself; it goes to the parser, not the
+                 * screen. */
+                if (cps[k] < 0x20 || cps[k] == 0x7F || cps[k] == 0x1B) {
+                    const parser::Next nx = s->parser.next((uint8_t)cps[k]);
+                    for (int j = 0; j < 3; j++) {
+                        if (nx.has(j)) stream_dispatch(s, nx[j]);
                     }
-                    break;
-
-                case parser::ActionTag::esc_dispatch:
-                    stream_esc(s->terminal, a);
-                    break;
-
-                case parser::ActionTag::osc_dispatch:
-                    stream_osc(s->terminal, a);
-                    break;
-
-                case parser::ActionTag::dcs_hook:
-                case parser::ActionTag::dcs_put:
-                case parser::ActionTag::dcs_unhook:
-                case parser::ActionTag::none:
-                    break;
+                } else {
+                    stream_print(s, cps[k]);
+                }
             }
+            continue;
+        }
+
+        const parser::Next nx = s->parser.next(b);
+        for (int j = 0; j < 3; j++) {
+            if (nx.has(j)) stream_dispatch(s, nx[j]);
         }
     }
 }

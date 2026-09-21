@@ -1,16 +1,20 @@
-/* Tests for src/terminal/parser.hpp.
- *
- * Related to Ghostty src/terminal/Parser.zig
+/* Transliterated from the test blocks in Ghostty src/terminal/Parser.zig and
+ * src/terminal/parse_table.zig
  * Copyright (c) 2024 Mitchell Hashimoto, Ghostty contributors
  * MIT License — see THIRD_PARTY_NOTICES.md
  *
- * Two things are being checked throughout. That a correct sequence produces
- * the right action, which is the easy half. And that a sequence split at an
- * arbitrary byte, or malformed in one of the ways real programs manage, does
- * something sensible — because a terminal cannot stop and complain.
+ * These are upstream's tests, not Wisp's: same inputs, same assertions, same
+ * names. Passing them is what "exact" means for parser.hpp.
  *
- * Named test_parser_port to keep it apart from test_vt_parser.c, which covers
- * the live parser this does not yet replace.
+ * Mapping from Zig:
+ *   a[0] == null           !a.has(0)
+ *   a[1].? == .print       a.has(1) && a[1].tag == Tag::print
+ *   d.params.len           d.params_len
+ *   d.final                d.final_
+ *
+ * Not ported here: "osc: change window title", "osc: change window title
+ * (end in esc)", "osc: 112 incomplete sequence" and "osc: 104 empty". They
+ * inspect the typed command osc.zig produces, and they arrive with osc.zig.
  */
 
 #include "test_helpers.h"
@@ -18,464 +22,575 @@
 
 using namespace wisp::terminal::parser;
 
-/* Feed a string, collecting every action it produced. */
-struct Collected {
-    Action list[64];
-    size_t count;
+typedef Action::Tag Tag;
 
-    Collected() : count(0) {}
+static Parser init() { return Parser(); }
 
-    void feed(Parser *p, const char *text) {
-        for (const char *c = text; *c; c++) {
-            Actions a = parser_next(p, (uint8_t)*c);
-            for (uint8_t i = 0; i < a.count && count < 64; i++) {
-                list[count++] = a.list[i];
-            }
+static void feed_silent(Parser &p, const char *s) {
+    for (const char *c = s; *c; c++) {
+        const Next a = p.next((uint8_t)*c);
+        ASSERT_FALSE(a.has(0));
+        ASSERT_FALSE(a.has(1));
+        ASSERT_FALSE(a.has(2));
+    }
+}
+
+/* ─── Parser.zig ─────────────────────────────────────────────────────────── */
+
+TEST(parser, unnamed) {
+    Parser p = init();
+    (void)p.next(0x9E);
+    ASSERT_TRUE(p.state == State::sos_pm_apc_string);
+    (void)p.next(0x9C);
+    ASSERT_TRUE(p.state == State::ground);
+
+    {
+        const Next a = p.next('a');
+        ASSERT_TRUE(p.state == State::ground);
+        ASSERT_FALSE(a.has(0));
+        ASSERT_TRUE(a.has(1) && a[1].tag == Tag::print);
+        ASSERT_FALSE(a.has(2));
+    }
+
+    {
+        const Next a = p.next(0x19);
+        ASSERT_TRUE(p.state == State::ground);
+        ASSERT_FALSE(a.has(0));
+        ASSERT_TRUE(a.has(1) && a[1].tag == Tag::execute);
+        ASSERT_FALSE(a.has(2));
+    }
+}
+
+TEST(parser, esc_ESC_paren_B) {
+    Parser p = init();
+    (void)p.next(0x1B);
+    (void)p.next('(');
+
+    {
+        const Next a = p.next('B');
+        ASSERT_TRUE(p.state == State::ground);
+        ASSERT_FALSE(a.has(0));
+        ASSERT_TRUE(a.has(1) && a[1].tag == Tag::esc_dispatch);
+        ASSERT_FALSE(a.has(2));
+
+        const Action::ESC &d = a[1].esc_dispatch;
+        ASSERT_TRUE(d.final_ == 'B');
+        ASSERT_TRUE(d.intermediates_len == 1);
+        ASSERT_TRUE(d.intermediates[0] == '(');
+    }
+}
+
+TEST(parser, csi_ESC_bracket_H) {
+    Parser p = init();
+    (void)p.next(0x1B);
+    (void)p.next(0x5B);
+
+    {
+        const Next a = p.next(0x48);
+        ASSERT_TRUE(p.state == State::ground);
+        ASSERT_FALSE(a.has(0));
+        ASSERT_TRUE(a.has(1) && a[1].tag == Tag::csi_dispatch);
+        ASSERT_FALSE(a.has(2));
+
+        const Action::CSI &d = a[1].csi_dispatch;
+        ASSERT_TRUE(d.final_ == 0x48);
+        ASSERT_TRUE(d.params_len == 0);
+    }
+}
+
+TEST(parser, csi_ESC_bracket_1_semicolon_4_H) {
+    Parser p = init();
+    (void)p.next(0x1B);
+    (void)p.next(0x5B);
+    (void)p.next(0x31); /* 1 */
+    (void)p.next(0x3B); /* ; */
+    (void)p.next(0x34); /* 4 */
+
+    {
+        const Next a = p.next(0x48); /* H */
+        ASSERT_TRUE(p.state == State::ground);
+        ASSERT_FALSE(a.has(0));
+        ASSERT_TRUE(a.has(1) && a[1].tag == Tag::csi_dispatch);
+        ASSERT_FALSE(a.has(2));
+
+        const Action::CSI &d = a[1].csi_dispatch;
+        ASSERT_TRUE(d.final_ == 'H');
+        ASSERT_TRUE(d.params_len == 2);
+        ASSERT_EQ(d.params[0], 1);
+        ASSERT_EQ(d.params[1], 4);
+    }
+}
+
+TEST(parser, csi_SGR_ESC_bracket_38_colon_2_m) {
+    Parser p = init();
+    (void)p.next(0x1B);
+    (void)p.next('[');
+    (void)p.next('3');
+    (void)p.next('8');
+    (void)p.next(':');
+    (void)p.next('2');
+
+    {
+        const Next a = p.next('m');
+        ASSERT_TRUE(p.state == State::ground);
+        ASSERT_FALSE(a.has(0));
+        ASSERT_TRUE(a.has(1) && a[1].tag == Tag::csi_dispatch);
+        ASSERT_FALSE(a.has(2));
+
+        const Action::CSI &d = a[1].csi_dispatch;
+        ASSERT_TRUE(d.final_ == 'm');
+        ASSERT_TRUE(d.params_len == 2);
+        ASSERT_EQ(d.params[0], 38);
+        ASSERT_TRUE(d.params_sep.isSet(0));
+        ASSERT_EQ(d.params[1], 2);
+        ASSERT_FALSE(d.params_sep.isSet(1));
+    }
+}
+
+TEST(parser, csi_SGR_colon_followed_by_semicolon) {
+    Parser p = init();
+    (void)p.next(0x1B);
+    feed_silent(p, "[48:2");
+
+    {
+        const Next a = p.next('m');
+        ASSERT_TRUE(p.state == State::ground);
+        ASSERT_FALSE(a.has(0));
+        ASSERT_TRUE(a.has(1) && a[1].tag == Tag::csi_dispatch);
+        ASSERT_FALSE(a.has(2));
+    }
+
+    (void)p.next(0x1B);
+    (void)p.next('[');
+    {
+        const Next a = p.next('H');
+        ASSERT_TRUE(p.state == State::ground);
+        ASSERT_FALSE(a.has(0));
+        ASSERT_TRUE(a.has(1) && a[1].tag == Tag::csi_dispatch);
+        ASSERT_FALSE(a.has(2));
+    }
+}
+
+TEST(parser, csi_SGR_mixed_colon_and_semicolon) {
+    Parser p = init();
+    (void)p.next(0x1B);
+    feed_silent(p, "[38:5:1;48:5:0");
+
+    {
+        const Next a = p.next('m');
+        ASSERT_TRUE(p.state == State::ground);
+        ASSERT_FALSE(a.has(0));
+        ASSERT_TRUE(a.has(1) && a[1].tag == Tag::csi_dispatch);
+        ASSERT_FALSE(a.has(2));
+    }
+}
+
+TEST(parser, csi_SGR_ESC_bracket_48_colon_2_m) {
+    Parser p = init();
+    (void)p.next(0x1B);
+    feed_silent(p, "[48:2:240:143:104");
+
+    {
+        const Next a = p.next('m');
+        ASSERT_TRUE(p.state == State::ground);
+        ASSERT_FALSE(a.has(0));
+        ASSERT_TRUE(a.has(1) && a[1].tag == Tag::csi_dispatch);
+        ASSERT_FALSE(a.has(2));
+
+        const Action::CSI &d = a[1].csi_dispatch;
+        ASSERT_TRUE(d.final_ == 'm');
+        ASSERT_TRUE(d.params_len == 5);
+        ASSERT_EQ(d.params[0], 48);
+        ASSERT_TRUE(d.params_sep.isSet(0));
+        ASSERT_EQ(d.params[1], 2);
+        ASSERT_TRUE(d.params_sep.isSet(1));
+        ASSERT_EQ(d.params[2], 240);
+        ASSERT_TRUE(d.params_sep.isSet(2));
+        ASSERT_EQ(d.params[3], 143);
+        ASSERT_TRUE(d.params_sep.isSet(3));
+        ASSERT_EQ(d.params[4], 104);
+        ASSERT_FALSE(d.params_sep.isSet(4));
+    }
+}
+
+TEST(parser, csi_SGR_ESC_bracket_4_colon_3_m_colon) {
+    Parser p = init();
+    (void)p.next(0x1B);
+    (void)p.next('[');
+    (void)p.next('4');
+    (void)p.next(':');
+    (void)p.next('3');
+
+    {
+        const Next a = p.next('m');
+        ASSERT_TRUE(p.state == State::ground);
+        ASSERT_FALSE(a.has(0));
+        ASSERT_TRUE(a.has(1) && a[1].tag == Tag::csi_dispatch);
+        ASSERT_FALSE(a.has(2));
+
+        const Action::CSI &d = a[1].csi_dispatch;
+        ASSERT_TRUE(d.final_ == 'm');
+        ASSERT_TRUE(d.params_len == 2);
+        ASSERT_EQ(d.params[0], 4);
+        ASSERT_TRUE(d.params_sep.isSet(0));
+        ASSERT_EQ(d.params[1], 3);
+        ASSERT_FALSE(d.params_sep.isSet(1));
+    }
+}
+
+TEST(parser, csi_SGR_with_many_blank_and_colon) {
+    Parser p = init();
+    (void)p.next(0x1B);
+    feed_silent(p, "[58:2::240:143:104");
+
+    {
+        const Next a = p.next('m');
+        ASSERT_TRUE(p.state == State::ground);
+        ASSERT_FALSE(a.has(0));
+        ASSERT_TRUE(a.has(1) && a[1].tag == Tag::csi_dispatch);
+        ASSERT_FALSE(a.has(2));
+
+        const Action::CSI &d = a[1].csi_dispatch;
+        ASSERT_TRUE(d.final_ == 'm');
+        ASSERT_TRUE(d.params_len == 6);
+        ASSERT_EQ(d.params[0], 58);
+        ASSERT_TRUE(d.params_sep.isSet(0));
+        ASSERT_EQ(d.params[1], 2);
+        ASSERT_TRUE(d.params_sep.isSet(1));
+        ASSERT_EQ(d.params[2], 0);
+        ASSERT_TRUE(d.params_sep.isSet(2));
+        ASSERT_EQ(d.params[3], 240);
+        ASSERT_TRUE(d.params_sep.isSet(3));
+        ASSERT_EQ(d.params[4], 143);
+        ASSERT_TRUE(d.params_sep.isSet(4));
+        ASSERT_EQ(d.params[5], 104);
+        ASSERT_FALSE(d.params_sep.isSet(5));
+    }
+}
+
+/* This is from a Kakoune actual SGR sequence. */
+TEST(parser, csi_SGR_mixed_colon_and_semicolon_with_blank) {
+    Parser p = init();
+    (void)p.next(0x1B);
+    feed_silent(p, "[;4:3;38;2;175;175;215;58:2::190:80:70");
+
+    {
+        const Next a = p.next('m');
+        ASSERT_TRUE(p.state == State::ground);
+        ASSERT_FALSE(a.has(0));
+        ASSERT_TRUE(a.has(1) && a[1].tag == Tag::csi_dispatch);
+        ASSERT_FALSE(a.has(2));
+
+        const Action::CSI &d = a[1].csi_dispatch;
+        ASSERT_TRUE(d.final_ == 'm');
+        ASSERT_EQ(d.params_len, 14u);
+        ASSERT_EQ(d.params[0], 0);
+        ASSERT_FALSE(d.params_sep.isSet(0));
+        ASSERT_EQ(d.params[1], 4);
+        ASSERT_TRUE(d.params_sep.isSet(1));
+        ASSERT_EQ(d.params[2], 3);
+        ASSERT_FALSE(d.params_sep.isSet(2));
+        ASSERT_EQ(d.params[3], 38);
+        ASSERT_FALSE(d.params_sep.isSet(3));
+        ASSERT_EQ(d.params[4], 2);
+        ASSERT_FALSE(d.params_sep.isSet(4));
+        ASSERT_EQ(d.params[5], 175);
+        ASSERT_FALSE(d.params_sep.isSet(5));
+        ASSERT_EQ(d.params[6], 175);
+        ASSERT_FALSE(d.params_sep.isSet(6));
+        ASSERT_EQ(d.params[7], 215);
+        ASSERT_FALSE(d.params_sep.isSet(7));
+        ASSERT_EQ(d.params[8], 58);
+        ASSERT_TRUE(d.params_sep.isSet(8));
+        ASSERT_EQ(d.params[9], 2);
+        ASSERT_TRUE(d.params_sep.isSet(9));
+        ASSERT_EQ(d.params[10], 0);
+        ASSERT_TRUE(d.params_sep.isSet(10));
+        ASSERT_EQ(d.params[11], 190);
+        ASSERT_TRUE(d.params_sep.isSet(11));
+        ASSERT_EQ(d.params[12], 80);
+        ASSERT_TRUE(d.params_sep.isSet(12));
+        ASSERT_EQ(d.params[13], 70);
+        ASSERT_FALSE(d.params_sep.isSet(13));
+    }
+}
+
+/* This is from a Kakoune actual SGR sequence also. */
+TEST(parser, csi_SGR_mixed_colon_and_semicolon_setting_underline_bg_fg) {
+    Parser p = init();
+    (void)p.next(0x1B);
+    feed_silent(p, "[4:3;38;2;51;51;51;48;2;170;170;170;58;2;255;97;136");
+
+    {
+        const Next a = p.next('m');
+        ASSERT_TRUE(p.state == State::ground);
+        ASSERT_FALSE(a.has(0));
+        ASSERT_TRUE(a.has(1) && a[1].tag == Tag::csi_dispatch);
+        ASSERT_FALSE(a.has(2));
+
+        const Action::CSI &d = a[1].csi_dispatch;
+        ASSERT_TRUE(d.final_ == 'm');
+        ASSERT_EQ(d.params_len, 17u);
+        ASSERT_EQ(d.params[0], 4);
+        ASSERT_TRUE(d.params_sep.isSet(0));
+        ASSERT_EQ(d.params[1], 3);
+        ASSERT_FALSE(d.params_sep.isSet(1));
+        ASSERT_EQ(d.params[2], 38);
+        ASSERT_FALSE(d.params_sep.isSet(2));
+        ASSERT_EQ(d.params[3], 2);
+        ASSERT_FALSE(d.params_sep.isSet(3));
+        ASSERT_EQ(d.params[4], 51);
+        ASSERT_FALSE(d.params_sep.isSet(4));
+        ASSERT_EQ(d.params[5], 51);
+        ASSERT_FALSE(d.params_sep.isSet(5));
+        ASSERT_EQ(d.params[6], 51);
+        ASSERT_FALSE(d.params_sep.isSet(6));
+        ASSERT_EQ(d.params[7], 48);
+        ASSERT_FALSE(d.params_sep.isSet(7));
+        ASSERT_EQ(d.params[8], 2);
+        ASSERT_FALSE(d.params_sep.isSet(8));
+        ASSERT_EQ(d.params[9], 170);
+        ASSERT_FALSE(d.params_sep.isSet(9));
+        ASSERT_EQ(d.params[10], 170);
+        ASSERT_FALSE(d.params_sep.isSet(10));
+        ASSERT_EQ(d.params[11], 170);
+        ASSERT_FALSE(d.params_sep.isSet(11));
+        ASSERT_EQ(d.params[12], 58);
+        ASSERT_FALSE(d.params_sep.isSet(12));
+        ASSERT_EQ(d.params[13], 2);
+        ASSERT_FALSE(d.params_sep.isSet(13));
+        ASSERT_EQ(d.params[14], 255);
+        ASSERT_FALSE(d.params_sep.isSet(14));
+        ASSERT_EQ(d.params[15], 97);
+        ASSERT_FALSE(d.params_sep.isSet(15));
+        ASSERT_EQ(d.params[16], 136);
+        ASSERT_FALSE(d.params_sep.isSet(16));
+    }
+}
+
+TEST(parser, csi_colon_for_non_m_final) {
+    Parser p = init();
+    (void)p.next(0x1B);
+    feed_silent(p, "[38:2h");
+
+    ASSERT_TRUE(p.state == State::ground);
+}
+
+TEST(parser, csi_request_mode_decrqm) {
+    Parser p = init();
+    (void)p.next(0x1B);
+    feed_silent(p, "[?2026$");
+
+    {
+        const Next a = p.next('p');
+        ASSERT_TRUE(p.state == State::ground);
+        ASSERT_FALSE(a.has(0));
+        ASSERT_TRUE(a.has(1) && a[1].tag == Tag::csi_dispatch);
+        ASSERT_FALSE(a.has(2));
+
+        const Action::CSI &d = a[1].csi_dispatch;
+        ASSERT_TRUE(d.final_ == 'p');
+        ASSERT_EQ(d.intermediates_len, 2u);
+        ASSERT_EQ(d.params_len, 1u);
+        ASSERT_EQ(d.intermediates[0], '?');
+        ASSERT_EQ(d.intermediates[1], '$');
+        ASSERT_EQ(d.params[0], 2026);
+    }
+}
+
+TEST(parser, csi_change_cursor) {
+    Parser p = init();
+    (void)p.next(0x1B);
+    feed_silent(p, "[3 ");
+
+    {
+        const Next a = p.next('q');
+        ASSERT_TRUE(p.state == State::ground);
+        ASSERT_FALSE(a.has(0));
+        ASSERT_TRUE(a.has(1) && a[1].tag == Tag::csi_dispatch);
+        ASSERT_FALSE(a.has(2));
+
+        const Action::CSI &d = a[1].csi_dispatch;
+        ASSERT_TRUE(d.final_ == 'q');
+        ASSERT_EQ(d.intermediates_len, 1u);
+        ASSERT_EQ(d.params_len, 1u);
+        ASSERT_EQ(d.intermediates[0], ' ');
+        ASSERT_EQ(d.params[0], 3);
+    }
+}
+
+TEST(parser, csi_too_many_params) {
+    Parser p = init();
+    (void)p.next(0x1B);
+    (void)p.next('[');
+    for (int i = 0; i < 100; i++) {
+        (void)p.next('1');
+        (void)p.next(';');
+    }
+    (void)p.next('1');
+
+    {
+        const Next a = p.next('C');
+        ASSERT_TRUE(p.state == State::ground);
+        ASSERT_FALSE(a.has(0));
+        ASSERT_FALSE(a.has(1));
+        ASSERT_FALSE(a.has(2));
+    }
+}
+
+TEST(parser, csi_sgr_with_up_to_our_max_parameters) {
+    for (size_t max = 1; max < MAX_PARAMS + 1; max++) {
+        Parser p = init();
+        (void)p.next(0x1B);
+        (void)p.next('[');
+
+        for (size_t i = 0; i < max - 1; i++) {
+            (void)p.next('1');
+            (void)p.next(';');
+        }
+        (void)p.next('2');
+
+        {
+            const Next a = p.next('H');
+            ASSERT_TRUE(p.state == State::ground);
+            ASSERT_FALSE(a.has(0));
+            ASSERT_TRUE(a.has(1) && a[1].tag == Tag::csi_dispatch);
+            ASSERT_FALSE(a.has(2));
+
+            const Action::CSI &csi = a[1].csi_dispatch;
+            ASSERT_EQ(csi.params_len, max);
+            ASSERT_EQ(csi.params[max - 1], 2);
         }
     }
-};
-
-static Collected run(const char *text) {
-    Parser p;
-    Collected c;
-    c.feed(&p, text);
-    return c;
 }
 
-/* The text that was printed, ignoring everything else. */
-static void printed(const Collected &c, char *out, size_t cap) {
-    size_t n = 0;
-    for (size_t i = 0; i < c.count && n + 1 < cap; i++) {
-        if (c.list[i].tag == ActionTag::print) out[n++] = (char)c.list[i].byte;
+TEST(parser, csi_sgr_beyond_our_max_drops_it) {
+    /* Has to be +2 for the loops below */
+    const size_t max = MAX_PARAMS + 2;
+
+    Parser p = init();
+    (void)p.next(0x1B);
+    (void)p.next('[');
+
+    for (size_t i = 0; i < max - 1; i++) {
+        (void)p.next('1');
+        (void)p.next(';');
     }
-    out[n] = '\0';
-}
+    (void)p.next('2');
 
-static const Action *first(const Collected &c, ActionTag tag) {
-    for (size_t i = 0; i < c.count; i++) {
-        if (c.list[i].tag == tag) return &c.list[i];
-    }
-    return nullptr;
-}
-
-static size_t count_of(const Collected &c, ActionTag tag) {
-    size_t n = 0;
-    for (size_t i = 0; i < c.count; i++) {
-        if (c.list[i].tag == tag) n++;
-    }
-    return n;
-}
-
-/* ─── ordinary text ──────────────────────────────────────────────────────── */
-
-TEST(parser, prints_plain_text) {
-    Collected c = run("hello");
-
-    char got[32];
-    printed(c, got, sizeof(got));
-    ASSERT_TRUE(strcmp(got, "hello") == 0);
-    ASSERT_EQ(c.count, 5u);
-}
-
-TEST(parser, control_characters_execute) {
-    Collected c = run("a\r\nb");
-
-    ASSERT_EQ(count_of(c, ActionTag::execute), 2u);
-    ASSERT_EQ(c.list[1].byte, '\r');
-    ASSERT_EQ(c.list[2].byte, '\n');
-
-    char got[32];
-    printed(c, got, sizeof(got));
-    ASSERT_TRUE(strcmp(got, "ab") == 0);
-}
-
-TEST(parser, del_is_not_printable) {
-    Collected c = run("a\x7f" "b");
-
-    char got[32];
-    printed(c, got, sizeof(got));
-    ASSERT_TRUE(strcmp(got, "ab") == 0);
-    ASSERT_EQ(c.count, 2u);
-}
-
-TEST(parser, high_bytes_print) {
-    /* UTF-8 is decoded above this, so a continuation byte is just a byte
-     * here. The state machine only cares about the ASCII range. */
-    Collected c = run("\xc3\xa9");
-    ASSERT_EQ(count_of(c, ActionTag::print), 2u);
-}
-
-/* ─── escape sequences ───────────────────────────────────────────────────── */
-
-TEST(parser, a_two_byte_escape) {
-    Collected c = run("\x1b" "M");
-
-    const Action *a = first(c, ActionTag::esc_dispatch);
-    ASSERT_TRUE(a != nullptr);
-    ASSERT_EQ(a->final_byte, 'M');
-    ASSERT_EQ(a->intermediate_count, 0);
-}
-
-TEST(parser, an_escape_with_an_intermediate) {
-    Collected c = run("\x1b" "(B");
-
-    const Action *a = first(c, ActionTag::esc_dispatch);
-    ASSERT_TRUE(a != nullptr);
-    ASSERT_EQ(a->final_byte, 'B');
-    ASSERT_EQ(a->intermediate_count, 1);
-    ASSERT_EQ(a->intermediates[0], '(');
-}
-
-TEST(parser, an_escape_returns_to_ground) {
-    Collected c = run("\x1b" "Mtext");
-
-    char got[32];
-    printed(c, got, sizeof(got));
-    ASSERT_TRUE(strcmp(got, "text") == 0);
-}
-
-/* ─── CSI ────────────────────────────────────────────────────────────────── */
-
-TEST(csi, with_no_parameters) {
-    Collected c = run("\x1b[H");
-
-    const Action *a = first(c, ActionTag::csi_dispatch);
-    ASSERT_TRUE(a != nullptr);
-    ASSERT_EQ(a->final_byte, 'H');
-    ASSERT_EQ(a->param_count, 0);
-
-    /* An omitted parameter is not zero: CSI H and CSI 1;1H are the same
-     * thing, and asking through here is what keeps that in one place. */
-    ASSERT_EQ(action_param(*a, 0, 1), 1);
-}
-
-TEST(csi, with_one_parameter) {
-    Collected c = run("\x1b[5A");
-
-    const Action *a = first(c, ActionTag::csi_dispatch);
-    ASSERT_TRUE(a != nullptr);
-    ASSERT_EQ(a->final_byte, 'A');
-    ASSERT_EQ(a->param_count, 1);
-    ASSERT_EQ(a->params[0], 5);
-}
-
-TEST(csi, with_several_parameters) {
-    Collected c = run("\x1b[10;20;30H");
-
-    const Action *a = first(c, ActionTag::csi_dispatch);
-    ASSERT_TRUE(a != nullptr);
-    ASSERT_EQ(a->param_count, 3);
-    ASSERT_EQ(a->params[0], 10);
-    ASSERT_EQ(a->params[1], 20);
-    ASSERT_EQ(a->params[2], 30);
-}
-
-TEST(csi, an_omitted_parameter_is_still_a_parameter) {
-    Collected c = run("\x1b[1;;3H");
-
-    const Action *a = first(c, ActionTag::csi_dispatch);
-    ASSERT_TRUE(a != nullptr);
-    ASSERT_EQ(a->param_count, 3);
-    ASSERT_EQ(a->params[0], 1);
-    ASSERT_EQ(a->params[1], 0);
-    ASSERT_EQ(a->params[2], 3);
-    ASSERT_EQ(action_param(*a, 1, 7), 7);
-}
-
-TEST(csi, a_private_marker) {
-    Collected c = run("\x1b[?25h");
-
-    const Action *a = first(c, ActionTag::csi_dispatch);
-    ASSERT_TRUE(a != nullptr);
-    ASSERT_EQ(a->private_marker, '?');
-    ASSERT_EQ(a->params[0], 25);
-    ASSERT_EQ(a->final_byte, 'h');
-}
-
-TEST(csi, an_intermediate) {
-    Collected c = run("\x1b[0 q");
-
-    const Action *a = first(c, ActionTag::csi_dispatch);
-    ASSERT_TRUE(a != nullptr);
-    ASSERT_EQ(a->final_byte, 'q');
-    ASSERT_EQ(a->intermediate_count, 1);
-    ASSERT_EQ(a->intermediates[0], ' ');
-    ASSERT_EQ(a->params[0], 0);
-}
-
-TEST(csi, colons_are_not_semicolons) {
-    Collected c = run("\x1b[4:3m");
-
-    /* 4:3 is a curly underline; 4;3 is underline then italic. Losing the
-     * separator would make the two indistinguishable. */
-    const Action *a = first(c, ActionTag::csi_dispatch);
-    ASSERT_TRUE(a != nullptr);
-    ASSERT_EQ(a->param_count, 2);
-    ASSERT_EQ(a->params[0], 4);
-    ASSERT_EQ(a->params[1], 3);
-    ASSERT_FALSE(action_param_is_sub(*a, 0));
-    ASSERT_TRUE(action_param_is_sub(*a, 1));
-}
-
-TEST(csi, a_mix_of_separators) {
-    Collected c = run("\x1b[38:2::10:20:30m");
-
-    const Action *a = first(c, ActionTag::csi_dispatch);
-    ASSERT_TRUE(a != nullptr);
-    ASSERT_EQ(a->param_count, 6);
-    ASSERT_EQ(a->params[0], 38);
-    ASSERT_EQ(a->params[1], 2);
-    ASSERT_EQ(a->params[2], 0);
-    ASSERT_EQ(a->params[3], 10);
-    ASSERT_EQ(a->params[5], 30);
-    ASSERT_TRUE(action_param_is_sub(*a, 1));
-    ASSERT_TRUE(action_param_is_sub(*a, 5));
-}
-
-TEST(csi, a_huge_parameter_saturates) {
-    Collected c = run("\x1b[99999999999m");
-
-    /* Wrapping would turn a meaningless number into a small one that looks
-     * deliberate. */
-    const Action *a = first(c, ActionTag::csi_dispatch);
-    ASSERT_TRUE(a != nullptr);
-    ASSERT_EQ(a->params[0], 65535);
-}
-
-TEST(csi, too_many_parameters_are_dropped_not_the_sequence) {
-    Collected c = run("\x1b[1;2;3;4;5;6;7;8;9;10;11;12;13;14;15;16;17;18m");
-
-    const Action *a = first(c, ActionTag::csi_dispatch);
-    ASSERT_TRUE(a != nullptr);
-    ASSERT_EQ(a->param_count, 16);
-    ASSERT_EQ(a->params[0], 1);
-    ASSERT_EQ(a->params[15], 16);
-}
-
-/* ─── malformed input ────────────────────────────────────────────────────── */
-
-TEST(csi, an_out_of_order_parameter_voids_the_sequence) {
-    Collected c = run("\x1b[1 !2m" "ok");
-
-    /* A parameter after an intermediate is out of order, so the sequence is
-     * abandoned rather than guessed at — and what follows is ordinary text. */
-    ASSERT_EQ(count_of(c, ActionTag::csi_dispatch), 0u);
-
-    char got[32];
-    printed(c, got, sizeof(got));
-    ASSERT_TRUE(strcmp(got, "ok") == 0);
-}
-
-TEST(csi, a_stray_escape_abandons_what_was_in_progress) {
-    Collected c = run("\x1b[12;\x1b[H");
-
-    /* Half a sequence, then a new one. The second is dispatched and nothing
-     * of the first leaks into it — which is what makes a parser recover from
-     * output that was cut off. */
-    ASSERT_EQ(count_of(c, ActionTag::csi_dispatch), 1u);
-    const Action *a = first(c, ActionTag::csi_dispatch);
-    ASSERT_EQ(a->final_byte, 'H');
-    ASSERT_EQ(a->param_count, 0);
-}
-
-TEST(csi, cancel_abandons_a_sequence) {
-    Collected c = run("\x1b[12\x18" "done");
-
-    ASSERT_EQ(count_of(c, ActionTag::csi_dispatch), 0u);
-    char got[32];
-    printed(c, got, sizeof(got));
-    ASSERT_TRUE(strcmp(got, "done") == 0);
-}
-
-TEST(csi, a_control_inside_a_sequence_still_executes) {
-    Collected c = run("\x1b[1\r2m");
-
-    /* The carriage return happens where it appears, and the sequence carries
-     * on around it. This is what real terminals do and programs occasionally
-     * rely on. */
-    ASSERT_EQ(count_of(c, ActionTag::execute), 1u);
-    const Action *a = first(c, ActionTag::csi_dispatch);
-    ASSERT_TRUE(a != nullptr);
-    ASSERT_EQ(a->params[0], 12);
-}
-
-TEST(csi, an_ignored_sequence_ends_at_its_final_byte) {
-    Collected c = run("\x1b[1 !2m" "\x1b[5A");
-
-    ASSERT_EQ(count_of(c, ActionTag::csi_dispatch), 1u);
-    const Action *a = first(c, ActionTag::csi_dispatch);
-    ASSERT_EQ(a->final_byte, 'A');
-    ASSERT_EQ(a->params[0], 5);
-}
-
-/* ─── split input ────────────────────────────────────────────────────────── */
-
-TEST(parser, a_sequence_split_anywhere_still_works) {
-    /* Output arrives cut wherever the kernel felt like cutting it, so every
-     * split has to give the same answer. */
-    const char *seq = "\x1b[38;5;196m";
-
-    for (size_t at = 1; at < strlen(seq); at++) {
-        Parser p;
-        Collected c;
-
-        char head[32];
-        memcpy(head, seq, at);
-        head[at] = '\0';
-        c.feed(&p, head);
-        c.feed(&p, seq + at);
-
-        const Action *a = first(c, ActionTag::csi_dispatch);
-        ASSERT_TRUE(a != nullptr);
-        ASSERT_EQ(a->final_byte, 'm');
-        ASSERT_EQ(a->param_count, 3);
-        ASSERT_EQ(a->params[2], 196);
+    {
+        const Next a = p.next('H');
+        ASSERT_TRUE(p.state == State::ground);
+        ASSERT_FALSE(a.has(0));
+        ASSERT_FALSE(a.has(1));
+        ASSERT_FALSE(a.has(2));
     }
 }
 
-TEST(parser, state_survives_between_feeds) {
-    Parser p;
-    Collected c;
+TEST(parser, dcs_XTGETTCAP) {
+    Parser p = init();
+    (void)p.next(0x1B);
+    feed_silent(p, "P+");
 
-    c.feed(&p, "\x1b[");
-    ASSERT_EQ(c.count, 0u);
-    c.feed(&p, "7");
-    ASSERT_EQ(c.count, 0u);
-    c.feed(&p, "m");
+    {
+        const Next a = p.next('q');
+        ASSERT_TRUE(p.state == State::dcs_passthrough);
+        ASSERT_FALSE(a.has(0));
+        ASSERT_FALSE(a.has(1));
+        ASSERT_TRUE(a.has(2) && a[2].tag == Tag::dcs_hook);
 
-    const Action *a = first(c, ActionTag::csi_dispatch);
-    ASSERT_TRUE(a != nullptr);
-    ASSERT_EQ(a->params[0], 7);
-}
-
-/* ─── OSC ────────────────────────────────────────────────────────────────── */
-
-TEST(osc, ended_by_bel) {
-    Collected c = run("\x1b]0;a title\x07");
-
-    /* BEL is not in the original diagram. xterm allowed it and every program
-     * uses it, so a parser that insisted on ST would fail on most of the
-     * titles it is ever sent. */
-    const Action *a = first(c, ActionTag::osc_dispatch);
-    ASSERT_TRUE(a != nullptr);
-    ASSERT_EQ(a->string_len, 9u);
-    ASSERT_TRUE(strcmp(a->string, "0;a title") == 0);
-}
-
-TEST(osc, ended_by_a_string_terminator) {
-    Collected c = run("\x1b]2;name\x1b\\");
-
-    const Action *a = first(c, ActionTag::osc_dispatch);
-    ASSERT_TRUE(a != nullptr);
-    ASSERT_TRUE(strcmp(a->string, "2;name") == 0);
-
-    /* The ST arrives as what it is: an escape sequence ending in backslash. */
-    ASSERT_EQ(count_of(c, ActionTag::esc_dispatch), 1u);
-    ASSERT_TRUE(action_is_string_terminator(c.list[c.count - 1]));
-}
-
-TEST(osc, an_empty_one) {
-    Collected c = run("\x1b]\x07");
-
-    const Action *a = first(c, ActionTag::osc_dispatch);
-    ASSERT_TRUE(a != nullptr);
-    ASSERT_EQ(a->string_len, 0u);
-}
-
-TEST(osc, a_very_long_one_is_truncated_not_dropped) {
-    Parser p;
-    Collected c;
-
-    c.feed(&p, "\x1b]0;");
-    for (int i = 0; i < 2000; i++) c.feed(&p, "x");
-    c.feed(&p, "\x07");
-
-    /* The useful part of an over-long string is usually at the front. */
-    const Action *a = first(c, ActionTag::osc_dispatch);
-    ASSERT_TRUE(a != nullptr);
-    ASSERT_TRUE(a->string_truncated);
-    ASSERT_TRUE(a->string_len > 0u);
-}
-
-TEST(osc, returns_to_ground_afterwards) {
-    Collected c = run("\x1b]0;t\x07" "after");
-
-    char got[32];
-    printed(c, got, sizeof(got));
-    ASSERT_TRUE(strcmp(got, "after") == 0);
-}
-
-/* ─── DCS and the strings nobody reads ───────────────────────────────────── */
-
-TEST(dcs, hooks_puts_and_unhooks) {
-    Collected c = run("\x1bP1;2q" "data" "\x1b\\");
-
-    const Action *hook = first(c, ActionTag::dcs_hook);
-    ASSERT_TRUE(hook != nullptr);
-    ASSERT_EQ(hook->final_byte, 'q');
-    ASSERT_EQ(hook->param_count, 2);
-    ASSERT_EQ(hook->params[1], 2);
-
-    ASSERT_EQ(count_of(c, ActionTag::dcs_put), 4u);
-    ASSERT_EQ(count_of(c, ActionTag::dcs_unhook), 1u);
-}
-
-TEST(dcs, its_payload_is_not_printed) {
-    Collected c = run("\x1bPq" "hidden" "\x1b\\" "shown");
-
-    char got[32];
-    printed(c, got, sizeof(got));
-    ASSERT_TRUE(strcmp(got, "shown") == 0);
-}
-
-TEST(apc, is_consumed_whole) {
-    Collected c = run("\x1b_Gf=100,a=T;payload\x1b\\" "visible");
-
-    /* The alternative to swallowing somebody else's protocol is printing it
-     * onto the screen. */
-    char got[32];
-    printed(c, got, sizeof(got));
-    ASSERT_TRUE(strcmp(got, "visible") == 0);
-}
-
-TEST(apc, does_not_swallow_what_follows) {
-    Collected c = run("\x1b^private\x1b\\" "\x1b[2J");
-
-    const Action *a = first(c, ActionTag::csi_dispatch);
-    ASSERT_TRUE(a != nullptr);
-    ASSERT_EQ(a->final_byte, 'J');
-    ASSERT_EQ(a->params[0], 2);
-}
-
-/* ─── nothing leaks between sequences ────────────────────────────────────── */
-
-TEST(parser, one_sequence_does_not_affect_the_next) {
-    Collected c = run("\x1b[?1;2;3h" "\x1b[m");
-
-    ASSERT_EQ(count_of(c, ActionTag::csi_dispatch), 2u);
-
-    const Action *second = nullptr;
-    size_t seen = 0;
-    for (size_t i = 0; i < c.count; i++) {
-        if (c.list[i].tag == ActionTag::csi_dispatch && ++seen == 2) {
-            second = &c.list[i];
-        }
+        const Action::DCS &hook = a[2].dcs_hook;
+        ASSERT_EQ(hook.intermediates_len, 1u);
+        ASSERT_EQ(hook.intermediates[0], '+');
+        ASSERT_EQ(hook.params_len, 0u);
+        ASSERT_EQ(hook.final_, 'q');
     }
-
-    ASSERT_TRUE(second != nullptr);
-    ASSERT_EQ(second->param_count, 0);
-    ASSERT_EQ(second->private_marker, 0);
-    ASSERT_EQ(second->intermediate_count, 0);
-    ASSERT_EQ(second->param_is_sub, 0);
 }
 
-TEST(parser, a_realistic_run) {
-    Collected c = run("\x1b[H\x1b[2J" "\x1b[1;31m" "error" "\x1b[0m" "\r\n");
+TEST(parser, dcs_params) {
+    Parser p = init();
+    (void)p.next(0x1B);
+    feed_silent(p, "P1000");
 
-    ASSERT_EQ(count_of(c, ActionTag::csi_dispatch), 4u);
-    ASSERT_EQ(count_of(c, ActionTag::execute), 2u);
+    {
+        const Next a = p.next('p');
+        ASSERT_TRUE(p.state == State::dcs_passthrough);
+        ASSERT_FALSE(a.has(0));
+        ASSERT_FALSE(a.has(1));
+        ASSERT_TRUE(a.has(2) && a[2].tag == Tag::dcs_hook);
 
-    char got[32];
-    printed(c, got, sizeof(got));
-    ASSERT_TRUE(strcmp(got, "error") == 0);
+        const Action::DCS &hook = a[2].dcs_hook;
+        ASSERT_EQ(hook.params_len, 1u);
+        ASSERT_EQ(hook.params[0], 1000);
+        ASSERT_EQ(hook.final_, 'p');
+    }
+}
+
+TEST(parser, dcs_too_many_params) {
+    /* Regression test for a crash found by fuzzing (afl). When a DCS
+     * sequence has more than MAX_PARAMS parameters and param_acc_idx > 0,
+     * entering dcs_passthrough wrote to params[params_idx] without a
+     * bounds check, causing an out-of-bounds access. */
+    Parser p = init();
+    (void)p.next(0x1B); /* ESC */
+    (void)p.next('P');  /* DCS entry */
+
+    /* Feed a digit then MAX_PARAMS semicolons to fill all param slots. */
+    (void)p.next('6');
+    for (size_t i = 0; i < MAX_PARAMS; i++) (void)p.next(';');
+    /* Feed another digit so param_acc_idx > 0 while params_idx == MAX_PARAMS. */
+    (void)p.next('7');
+
+    /* A final byte triggers entry to dcs_passthrough. The DCS should
+     * be dropped entirely, consistent with how CSI handles overflow. */
+    const Next a = p.next('p');
+    ASSERT_FALSE(a.has(0));
+    ASSERT_FALSE(a.has(1));
+    ASSERT_FALSE(a.has(2));
+}
+
+/* ─── parse_table.zig ────────────────────────────────────────────────────── */
+
+TEST(parse_table, unnamed) {
+    /* This forces evaluation of table, so we're just testing that it
+     * succeeds in creation. */
+    (void)table();
+}
+
+TEST(parse_table, dcs_passthrough_high_bytes_are_payload_data) {
+    /* Bytes 0x80-0xFF within a DCS string are payload data, not C1
+     * controls. This includes 0x9C (8-bit ST): a raw 0x9C is
+     * indistinguishable from a UTF-8 continuation byte (e.g. "Ü" is
+     * 0xC3 0x9C) and Ghostty doesn't support 8-bit C1 controls
+     * anywhere else. */
+    for (size_t c = 0x80; c < 0x100; c++) {
+        const Transition entry = table().t[c][(size_t)State::dcs_passthrough];
+        ASSERT_TRUE(entry.state == State::dcs_passthrough);
+        ASSERT_TRUE(entry.action == TransitionAction::put);
+    }
+}
+
+TEST(parse_table, dcs_ignore_high_bytes_are_ignored_payload_data) {
+    /* Same as dcs_passthrough: a UTF-8 payload inside an ignored DCS
+     * must not trigger "anywhere" C1 transitions (e.g. 0x9B beginning
+     * a CSI mid-string). */
+    for (size_t c = 0x80; c < 0x100; c++) {
+        const Transition entry = table().t[c][(size_t)State::dcs_ignore];
+        ASSERT_TRUE(entry.state == State::dcs_ignore);
+        ASSERT_TRUE(entry.action == TransitionAction::ignore);
+    }
+}
+
+TEST(parse_table, dcs_passthrough_ESC_CAN_and_SUB_still_exit) {
+    /* 7-bit ST (ESC \) is the DCS terminator and CAN/SUB abort, so
+     * these must continue to leave dcs_passthrough. dcs_unhook is
+     * emitted by the parser on any transition out of dcs_passthrough. */
+    const Transition esc = table().t[0x1B][(size_t)State::dcs_passthrough];
+    ASSERT_TRUE(esc.state == State::escape);
+
+    const Transition can = table().t[0x18][(size_t)State::dcs_passthrough];
+    ASSERT_TRUE(can.state == State::ground);
+
+    const Transition sub = table().t[0x1A][(size_t)State::dcs_passthrough];
+    ASSERT_TRUE(sub.state == State::ground);
 }

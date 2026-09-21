@@ -1,29 +1,33 @@
-/* Ported from Ghostty src/terminal/Parser.zig
+/* Transliterated from Ghostty src/terminal/Parser.zig and
+ * src/terminal/parse_table.zig
  * Copyright (c) 2024 Mitchell Hashimoto, Ghostty contributors
  * MIT License — see THIRD_PARTY_NOTICES.md
  *
- * The VT state machine: bytes in, actions out.
+ * VT-series parser for escape and control sequences.
  *
- * This is Paul Williams' DEC parser, the same state diagram every terminal
- * has been built from since it was published. It is worth saying why a state
- * machine rather than the obvious reading loop: escape sequences can be cut
- * anywhere. A program writing to a pipe gets its output split wherever the
- * kernel felt like splitting it, and half of a CSI can arrive now and the
- * rest after the next read. A parser that keeps all its state in explicit
- * fields can be fed one byte at a time and does not care.
+ * This is implemented directly as the state machine described on
+ * vt100.net: https://vt100.net/emu/dec_ansi_parser
  *
- * It also has to cope with sequences that are simply wrong, since a terminal
- * cannot stop and complain. The rule throughout is that a malformed sequence
- * is abandoned rather than guessed at, and the bytes that follow are treated
- * as ordinary text — which is what the diagram's "ignore" states are for.
+ * TRANSLITERATION. This is upstream's code rewritten line for line: the same
+ * states in the same order, the same transition table built the same way,
+ * the same field names and the same control flow. Where Zig has no direct
+ * C++ equivalent the mapping is:
  *
- * BYTES, NOT CHARACTERS. This parser works in bytes. UTF-8 decoding happens
- * above it, because the state machine only cares about the ASCII range and
- * feeding it decoded codepoints would mean the escape sequence grammar had to
- * know about Unicode. Upstream splits them the same way.
+ *   [3]?Action           Next — three Actions, each with a present flag
+ *   union(enum) Action   a tag plus one field per payload
+ *   []u8 / []u16 slices  a pointer and a length
+ *   StaticBitSet         SepList, a bitmask with the same set/isSet/count
+ *   *|= and +|=          explicit saturating arithmetic
+ *   comptime table       built once on first use by the same genTable logic
  *
- * NOT THE LIVE PARSER. Wisp's working parser is the C code under
- * src/terminal. This is the ported one, and nothing runs on it yet.
+ * Comments are upstream's unless marked "Wisp:".
+ *
+ * Wisp: OSC. Upstream hands OSC bytes to osc.zig, a separate parser that
+ * decodes each command into a typed value. That file has not been
+ * transliterated yet, so osc_parser here is a stand-in with the same
+ * interface — reset, next, end — that collects the raw bytes. The four
+ * upstream tests that inspect decoded OSC commands are ported with osc.zig,
+ * not here.
  */
 
 #pragma once
@@ -38,119 +42,64 @@ namespace wisp {
 namespace terminal {
 namespace parser {
 
-/* ─── limits ─────────────────────────────────────────────────────────────── */
+/* ─── osc stand-in ───────────────────────────────────────────────────────── */
 
-/* A sequence with more parameters than this is malformed by any reading, and
- * the diagram says to keep parsing but stop recording. Sixteen is what xterm
- * allows and therefore what programs assume. */
-static const size_t MAX_PARAMS = 16;
+namespace osc {
 
-/* CSI intermediates are at most two in practice; the grammar allows more but
- * nothing uses them. */
-static const size_t MAX_INTERMEDIATES = 2;
-
-/* OSC strings carry things like window titles and hyperlink URIs. A longer
- * one is truncated rather than dropped, since the useful part is usually at
- * the front. */
-static const size_t MAX_STRING = 1024;
-
-/* ─── actions ────────────────────────────────────────────────────────────── */
-
-enum class ActionTag : uint8_t {
-    none = 0,
-
-    /* An ordinary byte to put on the screen. */
-    print,
-
-    /* A C0 control: line feed, carriage return, tab and the rest. */
-    execute,
-
-    /* A complete CSI, the sequences that start ESC [. */
-    csi_dispatch,
-
-    /* A complete two-byte escape sequence, like ESC M. */
-    esc_dispatch,
-
-    /* A complete OSC — the string is in the parser's buffer. */
-    osc_dispatch,
-
-    /* A device control string: hook opens it, put feeds it, unhook ends it.
-     * Nothing here interprets them; they are reported so that a caller which
-     * cares can, and so that one which does not can still skip them
-     * correctly. */
-    dcs_hook,
-    dcs_put,
-    dcs_unhook,
+/* Wisp: stand-in for osc.Command until osc.zig is transliterated. It carries
+ * the raw bytes of the OSC and the byte that terminated it. */
+struct Command {
+    const char *data;
+    size_t      len;
+    uint8_t     terminator;
 };
 
-/* One thing that happened. */
-struct Action {
-    ActionTag tag;
+/* Wisp: stand-in for osc.Parser. Same three calls upstream's Parser makes. */
+struct Parser {
+    static const size_t MAX_LEN = 2048;
 
-    /* print and execute and dcs_put: the byte. */
-    uint8_t byte;
+    char    buf[MAX_LEN];
+    size_t  len;
+    bool    overflowed;
+    Command command;
 
-    /* csi_dispatch and esc_dispatch: the byte that ended the sequence. */
-    uint8_t final_byte;
+    Parser() : len(0), overflowed(false), command() { buf[0] = '\0'; }
 
-    /* csi_dispatch: the private marker, if the sequence had one — the '?' of
-     * ESC [ ? 25 h. Zero when there was none. */
-    uint8_t private_marker;
+    void reset() {
+        len = 0;
+        overflowed = false;
+    }
 
-    /* The intermediates collected before the final byte. */
-    uint8_t intermediates[MAX_INTERMEDIATES];
-    uint8_t intermediate_count;
+    void next(uint8_t c) {
+        if (len + 1 >= MAX_LEN) {
+            overflowed = true;
+            return;
+        }
+        buf[len++] = (char)c;
+    }
 
-    /* The numeric parameters. */
-    uint16_t params[MAX_PARAMS];
-    uint8_t  param_count;
-
-    /* Which parameters were joined to the one before them with a colon
-     * rather than a semicolon.
-     *
-     * SGR's extended colours use both: 38;2;R;G;B and 38:2::R:G:B mean the
-     * same thing, and 4:3 means a curly underline where 4;3 means underline
-     * then italic. Losing the difference would make those two
-     * indistinguishable, so the separator is recorded per parameter. */
-    uint16_t param_is_sub;
-
-    /* osc_dispatch: the string, and whether it was cut short. */
-    const char *string;
-    size_t      string_len;
-    bool        string_truncated;
-
-    Action()
-        : tag(ActionTag::none), byte(0), final_byte(0), private_marker(0),
-          intermediate_count(0), param_count(0), param_is_sub(0),
-          string(nullptr), string_len(0), string_truncated(false) {
-        memset(intermediates, 0, sizeof(intermediates));
-        memset(params, 0, sizeof(params));
+    /* Upstream returns ?*Command. */
+    const Command *end(uint8_t c) {
+        buf[len] = '\0';
+        command.data = buf;
+        command.len = len;
+        command.terminator = c;
+        return &command;
     }
 };
 
-/* A byte can produce more than one action — a C0 control inside a CSI both
- * executes and leaves the sequence unfinished, and the byte that ends one
- * sequence can begin the next. Three is the most the diagram can produce. */
-struct Actions {
-    Action list[3];
-    uint8_t count;
+} /* namespace osc */
 
-    Actions() : count(0) {}
+/* ─── Parser.zig ─────────────────────────────────────────────────────────── */
 
-    void push(const Action &a) {
-        if (count < 3) list[count++] = a;
-    }
-};
-
-/* ─── the states ─────────────────────────────────────────────────────────── */
-
+/* States for the state machine */
 enum class State : uint8_t {
-    ground = 0,
+    ground,
     escape,
     escape_intermediate,
     csi_entry,
-    csi_param,
     csi_intermediate,
+    csi_param,
     csi_ignore,
     dcs_entry,
     dcs_param,
@@ -158,522 +107,798 @@ enum class State : uint8_t {
     dcs_passthrough,
     dcs_ignore,
     osc_string,
-
-    /* SOS, PM and APC all mean "a string nothing here understands". They are
-     * consumed to their terminator and discarded, which is the correct
-     * handling: the alternative is printing somebody else's protocol onto the
-     * screen. */
     sos_pm_apc_string,
 };
 
-struct Parser {
-    State state;
+static const size_t STATE_COUNT = 14;
 
-    uint8_t intermediates[MAX_INTERMEDIATES];
-    uint8_t intermediate_count;
-    bool    intermediates_overflowed;
-
-    uint16_t params[MAX_PARAMS];
-    uint8_t  param_count;
-    uint16_t param_is_sub;
-    bool     param_pending;   /* digits have been seen since the last separator */
-
-    /* More parameters arrived than can be recorded. The sequence is still
-     * dispatched with the ones that fit — a program sending eighteen
-     * parameters meant the first sixteen as much as it meant the rest — but
-     * the extra digits must not run into the last one it kept. */
-    bool param_overflowed;
-
-    uint8_t private_marker;
-
-    char   string[MAX_STRING];
-    size_t string_len;
-    bool   string_truncated;
-
-    Parser() { memset(this, 0, sizeof(*this)); }
+/* Transition action is an action that can be taken during a state
+ * transition. This is more of an internal action, not one used by
+ * end users, typically. */
+enum class TransitionAction : uint8_t {
+    none,
+    ignore,
+    print,
+    execute,
+    collect,
+    param,
+    esc_dispatch,
+    csi_dispatch,
+    put,
+    osc_put,
+    apc_put,
 };
 
-/* ─── byte classes ───────────────────────────────────────────────────────── */
+/* Maximum number of intermediate characters during parsing. This is
+ * 4 because we also use the intermediates array for UTF8 decoding which
+ * can be at most 4 bytes. */
+static const size_t MAX_INTERMEDIATE = 4;
 
-inline bool is_c0(uint8_t b) {
-    return b <= 0x17 || b == 0x19 || (b >= 0x1C && b <= 0x1F);
-}
-inline bool is_intermediate(uint8_t b) { return b >= 0x20 && b <= 0x2F; }
-inline bool is_param_byte(uint8_t b) { return b >= 0x30 && b <= 0x3F; }
-inline bool is_final(uint8_t b) { return b >= 0x40 && b <= 0x7E; }
-inline bool is_digit(uint8_t b) { return b >= 0x30 && b <= 0x39; }
-
-/* ─── the machine ────────────────────────────────────────────────────────── */
-
-/* Forget everything collected for a sequence. The diagram calls this "clear"
- * and runs it when a sequence begins, which is what makes a parser recover
- * from a malformed one: nothing from the last sequence can leak into the
- * next. */
-inline void parser_clear(Parser *p) {
-    p->intermediate_count = 0;
-    p->intermediates_overflowed = false;
-    memset(p->intermediates, 0, sizeof(p->intermediates));
-
-    p->param_count = 0;
-    p->param_is_sub = 0;
-    p->param_pending = false;
-    p->param_overflowed = false;
-    memset(p->params, 0, sizeof(p->params));
-
-    p->private_marker = 0;
-
-    p->string_len = 0;
-    p->string_truncated = false;
-}
-
-inline void parser_collect(Parser *p, uint8_t b) {
-    if (p->intermediate_count < MAX_INTERMEDIATES) {
-        p->intermediates[p->intermediate_count++] = b;
-    } else {
-        /* Too many. The sequence is kept but will be ignored at the end,
-         * which is the diagram's rule — a sequence nobody can have meant
-         * should not be acted on halfway. */
-        p->intermediates_overflowed = true;
-    }
-}
-
-/* Start a new parameter, remembering whether a colon joined it to the last. */
-inline void parser_param_next(Parser *p, bool sub) {
-    if (p->param_count < MAX_PARAMS) {
-        if (sub && p->param_count > 0) {
-            p->param_is_sub |= (uint16_t)(1u << p->param_count);
-        }
-        p->param_count++;
-    } else {
-        p->param_overflowed = true;
-    }
-    p->param_pending = false;
-}
-
-inline void parser_param_digit(Parser *p, uint8_t b) {
-    if (p->param_overflowed) return;
-
-    if (p->param_count == 0) p->param_count = 1;
-    p->param_pending = true;
-
-    uint32_t v = p->params[p->param_count - 1];
-    v = v * 10 + (uint32_t)(b - '0');
-    /* Saturate rather than wrap. A parameter this large is meaningless
-     * anyway, and wrapping would turn it into a small number that looks
-     * deliberate. */
-    p->params[p->param_count - 1] = v > 65535 ? (uint16_t)65535 : (uint16_t)v;
-}
-
-/* Fill in the parts of an action that come from what has been collected. */
-inline void parser_fill(const Parser *p, Action *a) {
-    a->private_marker = p->private_marker;
-
-    a->intermediate_count = p->intermediate_count;
-    for (size_t i = 0; i < MAX_INTERMEDIATES; i++) {
-        a->intermediates[i] = p->intermediates[i];
-    }
-
-    a->param_count = p->param_count > MAX_PARAMS ? (uint8_t)MAX_PARAMS
-                                                 : p->param_count;
-    for (size_t i = 0; i < MAX_PARAMS; i++) a->params[i] = p->params[i];
-    a->param_is_sub = p->param_is_sub;
-}
-
-inline Action parser_action(ActionTag tag) {
-    Action a;
-    a.tag = tag;
-    return a;
-}
-
-/* Append to the string a control or OSC sequence is carrying. */
-inline void parser_string_put(Parser *p, uint8_t b) {
-    if (p->string_len + 1 < MAX_STRING) {
-        p->string[p->string_len++] = (char)b;
-    } else {
-        p->string_truncated = true;
-    }
-}
-
-/* End an OSC, if one is open. */
-inline void parser_osc_end(Parser *p, Actions *out) {
-    Action a = parser_action(ActionTag::osc_dispatch);
-    p->string[p->string_len] = '\0';
-    a.string = p->string;
-    a.string_len = p->string_len;
-    a.string_truncated = p->string_truncated;
-    out->push(a);
-}
-
-inline void parser_dcs_unhook(Parser *p, Actions *out) {
-    (void)p;
-    out->push(parser_action(ActionTag::dcs_unhook));
-}
-
-/* Feed one byte, and get back what it meant. */
-inline Actions parser_next(Parser *p, uint8_t b) {
-    Actions out;
-
-    /* Three bytes mean the same thing in nearly every state, so they are
-     * handled once here rather than in each. CAN and SUB abandon whatever is
-     * in progress; ESC begins a new sequence even in the middle of one, which
-     * is what lets a parser recover from a sequence that was never finished.
-     */
-    if (b == 0x18 || b == 0x1A) {
-        if (p->state == State::dcs_passthrough) parser_dcs_unhook(p, &out);
-
-        Action a = parser_action(ActionTag::execute);
-        a.byte = b;
-        out.push(a);
-
-        p->state = State::ground;
-        return out;
-    }
-
-    if (b == 0x1B) {
-        if (p->state == State::dcs_passthrough) parser_dcs_unhook(p, &out);
-
-        /* An OSC broken off by an ESC is still reported: the ESC may be the
-         * start of the ST that ends it, and if it is not, the string was
-         * complete as far as anyone can tell. */
-        if (p->state == State::osc_string) parser_osc_end(p, &out);
-
-        parser_clear(p);
-        p->state = State::escape;
-        return out;
-    }
-
-    switch (p->state) {
-        case State::ground: {
-            if (is_c0(b)) {
-                Action a = parser_action(ActionTag::execute);
-                a.byte = b;
-                out.push(a);
-                return out;
-            }
-            if (b == 0x7F) return out;   /* DEL is not printable */
-
-            Action a = parser_action(ActionTag::print);
-            a.byte = b;
-            out.push(a);
-            return out;
-        }
-
-        case State::escape: {
-            if (is_c0(b)) {
-                Action a = parser_action(ActionTag::execute);
-                a.byte = b;
-                out.push(a);
-                return out;
-            }
-            if (b == 0x7F) return out;
-
-            if (is_intermediate(b)) {
-                parser_collect(p, b);
-                p->state = State::escape_intermediate;
-                return out;
-            }
-
-            /* The three that open a string rather than ending a sequence. */
-            if (b == 'P') {
-                p->state = State::dcs_entry;
-                return out;
-            }
-            if (b == ']') {
-                p->state = State::osc_string;
-                return out;
-            }
-            if (b == 'X' || b == '^' || b == '_') {
-                p->state = State::sos_pm_apc_string;
-                return out;
-            }
-            if (b == '[') {
-                p->state = State::csi_entry;
-                return out;
-            }
-
-            Action a = parser_action(ActionTag::esc_dispatch);
-            a.final_byte = b;
-            parser_fill(p, &a);
-            out.push(a);
-            p->state = State::ground;
-            return out;
-        }
-
-        case State::escape_intermediate: {
-            if (is_c0(b)) {
-                Action a = parser_action(ActionTag::execute);
-                a.byte = b;
-                out.push(a);
-                return out;
-            }
-            if (b == 0x7F) return out;
-
-            if (is_intermediate(b)) {
-                parser_collect(p, b);
-                return out;
-            }
-
-            Action a = parser_action(ActionTag::esc_dispatch);
-            a.final_byte = b;
-            parser_fill(p, &a);
-            out.push(a);
-            p->state = State::ground;
-            return out;
-        }
-
-        case State::csi_entry:
-        case State::csi_param: {
-            if (is_c0(b)) {
-                Action a = parser_action(ActionTag::execute);
-                a.byte = b;
-                out.push(a);
-                return out;
-            }
-            if (b == 0x7F) return out;
-
-            if (is_digit(b)) {
-                parser_param_digit(p, b);
-                p->state = State::csi_param;
-                return out;
-            }
-            if (b == ';' || b == ':') {
-                parser_param_next(p, b == ':');
-                p->state = State::csi_param;
-                return out;
-            }
-            if (b >= 0x3C && b <= 0x3F) {
-                /* A private marker, and only valid before anything else. */
-                if (p->state == State::csi_entry && p->param_count == 0) {
-                    p->private_marker = b;
-                    return out;
-                }
-                p->state = State::csi_ignore;
-                return out;
-            }
-            if (is_param_byte(b)) {
-                p->state = State::csi_ignore;
-                return out;
-            }
-            if (is_intermediate(b)) {
-                parser_collect(p, b);
-                p->state = State::csi_intermediate;
-                return out;
-            }
-
-            if (is_final(b)) {
-                if (p->param_pending || p->param_count > 0) {
-                    /* A trailing separator leaves an empty parameter, which
-                     * is a real value — CSI 1;H means the same as CSI 1;1H.
-                     */
-                }
-                if (!p->intermediates_overflowed) {
-                    Action a = parser_action(ActionTag::csi_dispatch);
-                    a.final_byte = b;
-                    parser_fill(p, &a);
-                    out.push(a);
-                }
-                p->state = State::ground;
-                return out;
-            }
-
-            p->state = State::ground;
-            return out;
-        }
-
-        case State::csi_intermediate: {
-            if (is_c0(b)) {
-                Action a = parser_action(ActionTag::execute);
-                a.byte = b;
-                out.push(a);
-                return out;
-            }
-            if (b == 0x7F) return out;
-
-            if (is_intermediate(b)) {
-                parser_collect(p, b);
-                return out;
-            }
-            if (is_param_byte(b)) {
-                /* A parameter after an intermediate is out of order, and the
-                 * diagram says the whole sequence is void. */
-                p->state = State::csi_ignore;
-                return out;
-            }
-            if (is_final(b)) {
-                if (!p->intermediates_overflowed) {
-                    Action a = parser_action(ActionTag::csi_dispatch);
-                    a.final_byte = b;
-                    parser_fill(p, &a);
-                    out.push(a);
-                }
-                p->state = State::ground;
-                return out;
-            }
-
-            p->state = State::ground;
-            return out;
-        }
-
-        case State::csi_ignore: {
-            if (is_c0(b)) {
-                Action a = parser_action(ActionTag::execute);
-                a.byte = b;
-                out.push(a);
-                return out;
-            }
-            /* Everything up to the final byte is swallowed, and the final
-             * byte ends the sequence without dispatching it. */
-            if (is_final(b)) p->state = State::ground;
-            return out;
-        }
-
-        case State::dcs_entry:
-        case State::dcs_param: {
-            if (is_c0(b) || b == 0x7F) return out;
-
-            if (is_digit(b)) {
-                parser_param_digit(p, b);
-                p->state = State::dcs_param;
-                return out;
-            }
-            if (b == ';' || b == ':') {
-                parser_param_next(p, b == ':');
-                p->state = State::dcs_param;
-                return out;
-            }
-            if (b >= 0x3C && b <= 0x3F) {
-                if (p->state == State::dcs_entry && p->param_count == 0) {
-                    p->private_marker = b;
-                    return out;
-                }
-                p->state = State::dcs_ignore;
-                return out;
-            }
-            if (is_param_byte(b)) {
-                p->state = State::dcs_ignore;
-                return out;
-            }
-            if (is_intermediate(b)) {
-                parser_collect(p, b);
-                p->state = State::dcs_intermediate;
-                return out;
-            }
-            if (is_final(b)) {
-                Action a = parser_action(ActionTag::dcs_hook);
-                a.final_byte = b;
-                parser_fill(p, &a);
-                out.push(a);
-                p->state = State::dcs_passthrough;
-                return out;
-            }
-
-            p->state = State::dcs_ignore;
-            return out;
-        }
-
-        case State::dcs_intermediate: {
-            if (is_c0(b) || b == 0x7F) return out;
-
-            if (is_intermediate(b)) {
-                parser_collect(p, b);
-                return out;
-            }
-            if (is_param_byte(b)) {
-                p->state = State::dcs_ignore;
-                return out;
-            }
-            if (is_final(b)) {
-                Action a = parser_action(ActionTag::dcs_hook);
-                a.final_byte = b;
-                parser_fill(p, &a);
-                out.push(a);
-                p->state = State::dcs_passthrough;
-                return out;
-            }
-
-            p->state = State::dcs_ignore;
-            return out;
-        }
-
-        case State::dcs_passthrough: {
-            if (b == 0x9C) {
-                parser_dcs_unhook(p, &out);
-                p->state = State::ground;
-                return out;
-            }
-            if (b == 0x7F) return out;
-
-            Action a = parser_action(ActionTag::dcs_put);
-            a.byte = b;
-            out.push(a);
-            return out;
-        }
-
-        case State::dcs_ignore: {
-            if (b == 0x9C) p->state = State::ground;
-            return out;
-        }
-
-        case State::osc_string: {
-            /* BEL ends an OSC. It is not in the original diagram — xterm
-             * allowed it and every program uses it, so a parser that insisted
-             * on ST would fail on most of the titles it is ever sent. */
-            if (b == 0x07) {
-                parser_osc_end(p, &out);
-                p->state = State::ground;
-                return out;
-            }
-            if (b == 0x9C) {
-                parser_osc_end(p, &out);
-                p->state = State::ground;
-                return out;
-            }
-
-            parser_string_put(p, b);
-            return out;
-        }
-
-        case State::sos_pm_apc_string: {
-            if (b == 0x9C) p->state = State::ground;
-            return out;
-        }
-    }
-
-    return out;
-}
-
-/* ─── after an escape ────────────────────────────────────────────────────── */
-
-/* The second half of ST — ESC \ — arrives as an esc_dispatch with a final
- * byte of backslash, because that is what it is. A caller wanting to know
- * whether a string ended can ask this rather than testing the byte. */
-inline bool action_is_string_terminator(const Action &a) {
-    return a.tag == ActionTag::esc_dispatch && a.final_byte == '\\';
-}
-
-/* The value of a parameter, or a default when it was omitted.
+/* Maximum number of CSI parameters. This is arbitrary. Practically, the
+ * only CSI command that uses more than 3 parameters is the SGR command
+ * which can be infinitely long. 24 is a reasonable limit based on empirical
+ * data. This used to be 16 but Kakoune has a SGR command that uses 17
+ * parameters.
  *
- * Every CSI has defaults, and an omitted parameter is not zero — CSI H and
- * CSI 1;1H are the same thing, and CSI 0;0H is too, because zero means
- * "default" in most of them. Asking through here keeps that in one place
- * rather than at every use. */
-inline uint16_t action_param(const Action &a, size_t index, uint16_t fallback) {
-    if (index >= a.param_count) return fallback;
-    const uint16_t v = a.params[index];
-    return v == 0 ? fallback : v;
+ * We could in the future make this the static limit and then allocate after
+ * but that's a lot more work and practically its so rare to exceed this
+ * number. I implore TUI authors to not use more than this number of CSI
+ * params, but I suspect we'll introduce a slow path with heap allocation
+ * one day. */
+static const size_t MAX_PARAMS = 24;
+
+/* The list of separators used for CSI params. The value of the
+ * bit can be mapped to Sep. The index of this bit set specifies
+ * the separator AFTER that param. For example: 0;4:3 would have
+ * index 1 set.
+ *
+ * Wisp: std.StaticBitSet(MAX_PARAMS). */
+struct SepList {
+    uint32_t mask;
+
+    SepList() : mask(0) {}
+
+    static SepList initEmpty() { return SepList(); }
+    void set(size_t i) { mask |= (uint32_t)1u << i; }
+    bool isSet(size_t i) const { return (mask >> i) & 1u; }
+
+    size_t count() const {
+        size_t n = 0;
+        for (uint32_t m = mask; m; m &= m - 1) n++;
+        return n;
+    }
+};
+
+/* The separator used for CSI params. */
+enum class Sep : uint8_t { semicolon = 0, colon = 1 };
+
+/* Action is the action that a caller of the parser is expected to
+ * take as a result of some input character. */
+struct Action {
+    enum class Tag : uint8_t {
+        print,
+        execute,
+        csi_dispatch,
+        esc_dispatch,
+        osc_dispatch,
+        dcs_hook,
+        dcs_put,
+        dcs_unhook,
+        apc_start,
+        apc_put,
+        apc_end,
+    };
+
+    struct CSI {
+        const uint8_t  *intermediates;
+        size_t          intermediates_len;
+        const uint16_t *params;
+        size_t          params_len;
+        SepList         params_sep;
+        uint8_t         final_;
+    };
+
+    struct ESC {
+        const uint8_t *intermediates;
+        size_t         intermediates_len;
+        uint8_t        final_;
+    };
+
+    struct DCS {
+        const uint8_t  *intermediates;
+        size_t          intermediates_len;
+        const uint16_t *params;
+        size_t          params_len;
+        uint8_t         final_;
+    };
+
+    Tag tag;
+
+    /* Draw character to the screen. This is a unicode codepoint. */
+    uint32_t print;
+
+    /* Execute the C0 or C1 function. Also the byte of dcs_put and
+     * apc_put. */
+    uint8_t byte;
+
+    /* Execute the CSI command. Note that pointers within this
+     * structure are only valid until the next call to "next". */
+    CSI csi_dispatch;
+
+    /* Execute the ESC command. */
+    ESC esc_dispatch;
+
+    /* Execute the OSC command. */
+    osc::Command osc_dispatch;
+
+    /* DCS-related events. */
+    DCS dcs_hook;
+
+    Action() { memset(this, 0, sizeof(*this)); }
+};
+
+/* Wisp: [3]?Action. */
+struct Next {
+    Action action[3];
+    bool   present[3];
+
+    Next() { present[0] = present[1] = present[2] = false; }
+
+    bool has(int i) const { return present[i]; }
+    const Action &operator[](int i) const { return action[i]; }
+};
+
+/* ─── parse_table.zig ────────────────────────────────────────────────────── */
+
+/* The primary export of this section is "table", which contains a
+ * generated state transition table for VT emulation.
+ *
+ * This is based on the vt100.net state machine:
+ * https://vt100.net/emu/dec_ansi_parser
+ * But has some modifications:
+ *
+ *   * csi_param accepts the colon character (':') since the SGR command
+ *     accepts colon as a valid parameter value.
+ */
+
+/* Transition is the transition to take within the table */
+struct Transition {
+    State            state;
+    TransitionAction action;
+};
+
+/* Wisp: [u8][State]Transition. */
+struct Table {
+    Transition t[256][STATE_COUNT];
+};
+
+/* Wisp: the ?Transition accumulator upstream uses to build the table. */
+struct OptionalTable {
+    Transition t[256][STATE_COUNT];
+    bool       set[256][STATE_COUNT];
+};
+
+inline Transition transition(State state, TransitionAction action) {
+    Transition tr;
+    tr.state = state;
+    tr.action = action;
+    return tr;
 }
 
-/* The raw value, for the parameters where zero means zero. */
-inline uint16_t action_param_raw(const Action &a, size_t index,
-                                 uint16_t fallback) {
-    if (index >= a.param_count) return fallback;
-    return a.params[index];
+inline void single(OptionalTable *t, uint8_t c, State s0, State s1,
+                   TransitionAction a) {
+    const size_t s0_int = (size_t)s0;
+    t->t[c][s0_int] = transition(s1, a);
+    t->set[c][s0_int] = true;
 }
 
-/* Whether a parameter was joined to the one before it with a colon. */
-inline bool action_param_is_sub(const Action &a, size_t index) {
-    if (index >= a.param_count || index >= MAX_PARAMS) return false;
-    return (a.param_is_sub & (uint16_t)(1u << index)) != 0;
+inline void range(OptionalTable *t, uint8_t from, uint8_t to, State s0,
+                  State s1, TransitionAction a) {
+    uint8_t i = from;
+    while (i <= to) {
+        single(t, i, s0, s1, a);
+        /* If 'to' is 0xFF, our next pass will overflow. Return early to
+         * prevent the loop from executing it's continue expression */
+        if (i == to) break;
+        i++;
+    }
+}
+
+/* Function to generate the full state transition table for VT emulation. */
+inline void genTable(Table *final_) {
+    typedef TransitionAction A;
+
+    /* We accumulate using an "optional" table so we can detect duplicates. */
+    static OptionalTable result;
+    memset(&result, 0, sizeof(result));
+
+    /* anywhere transitions */
+    for (size_t field = 0; field < STATE_COUNT; field++) {
+        const State source = (State)field;
+
+        /* anywhere => ground */
+        single(&result, 0x18, source, State::ground, A::execute);
+        single(&result, 0x1A, source, State::ground, A::execute);
+        range(&result, 0x80, 0x8F, source, State::ground, A::execute);
+        range(&result, 0x91, 0x97, source, State::ground, A::execute);
+        single(&result, 0x99, source, State::ground, A::execute);
+        single(&result, 0x9A, source, State::ground, A::execute);
+        single(&result, 0x9C, source, State::ground, A::none);
+
+        /* anywhere => escape */
+        single(&result, 0x1B, source, State::escape, A::none);
+
+        /* anywhere => sos_pm_apc_string */
+        single(&result, 0x98, source, State::sos_pm_apc_string, A::none);
+        single(&result, 0x9E, source, State::sos_pm_apc_string, A::none);
+        single(&result, 0x9F, source, State::sos_pm_apc_string, A::none);
+
+        /* anywhere => csi_entry */
+        single(&result, 0x9B, source, State::csi_entry, A::none);
+
+        /* anywhere => dcs_entry */
+        single(&result, 0x90, source, State::dcs_entry, A::none);
+
+        /* anywhere => osc_string */
+        single(&result, 0x9D, source, State::osc_string, A::none);
+    }
+
+    /* ground */
+    {
+        /* events */
+        single(&result, 0x19, State::ground, State::ground, A::execute);
+        range(&result, 0, 0x17, State::ground, State::ground, A::execute);
+        range(&result, 0x1C, 0x1F, State::ground, State::ground, A::execute);
+        range(&result, 0x20, 0x7F, State::ground, State::ground, A::print);
+    }
+
+    /* escape_intermediate */
+    {
+        const State source = State::escape_intermediate;
+
+        single(&result, 0x19, source, source, A::execute);
+        range(&result, 0, 0x17, source, source, A::execute);
+        range(&result, 0x1C, 0x1F, source, source, A::execute);
+        range(&result, 0x20, 0x2F, source, source, A::collect);
+        single(&result, 0x7F, source, source, A::ignore);
+
+        /* => ground */
+        range(&result, 0x30, 0x7E, source, State::ground, A::esc_dispatch);
+    }
+
+    /* sos_pm_apc_string */
+    {
+        const State source = State::sos_pm_apc_string;
+
+        /* events */
+        single(&result, 0x19, source, source, A::apc_put);
+        range(&result, 0, 0x17, source, source, A::apc_put);
+        range(&result, 0x1C, 0x1F, source, source, A::apc_put);
+        range(&result, 0x20, 0x7F, source, source, A::apc_put);
+    }
+
+    /* escape */
+    {
+        const State source = State::escape;
+
+        /* events */
+        single(&result, 0x19, source, source, A::execute);
+        range(&result, 0, 0x17, source, source, A::execute);
+        range(&result, 0x1C, 0x1F, source, source, A::execute);
+        single(&result, 0x7F, source, source, A::ignore);
+
+        /* => ground */
+        range(&result, 0x30, 0x4F, source, State::ground, A::esc_dispatch);
+        range(&result, 0x51, 0x57, source, State::ground, A::esc_dispatch);
+        range(&result, 0x60, 0x7E, source, State::ground, A::esc_dispatch);
+        single(&result, 0x59, source, State::ground, A::esc_dispatch);
+        single(&result, 0x5A, source, State::ground, A::esc_dispatch);
+        single(&result, 0x5C, source, State::ground, A::esc_dispatch);
+
+        /* => escape_intermediate */
+        range(&result, 0x20, 0x2F, source, State::escape_intermediate, A::collect);
+
+        /* => sos_pm_apc_string */
+        single(&result, 0x58, source, State::sos_pm_apc_string, A::none);
+        single(&result, 0x5E, source, State::sos_pm_apc_string, A::none);
+        single(&result, 0x5F, source, State::sos_pm_apc_string, A::none);
+
+        /* => dcs_entry */
+        single(&result, 0x50, source, State::dcs_entry, A::none);
+
+        /* => csi_entry */
+        single(&result, 0x5B, source, State::csi_entry, A::none);
+
+        /* => osc_string */
+        single(&result, 0x5D, source, State::osc_string, A::none);
+    }
+
+    /* dcs_entry */
+    {
+        const State source = State::dcs_entry;
+
+        /* events */
+        single(&result, 0x19, source, source, A::ignore);
+        range(&result, 0, 0x17, source, source, A::ignore);
+        range(&result, 0x1C, 0x1F, source, source, A::ignore);
+        single(&result, 0x7F, source, source, A::ignore);
+
+        /* => dcs_intermediate */
+        range(&result, 0x20, 0x2F, source, State::dcs_intermediate, A::collect);
+
+        /* => dcs_ignore */
+        single(&result, 0x3A, source, State::dcs_ignore, A::none);
+
+        /* => dcs_param */
+        range(&result, 0x30, 0x39, source, State::dcs_param, A::param);
+        single(&result, 0x3B, source, State::dcs_param, A::param);
+        range(&result, 0x3C, 0x3F, source, State::dcs_param, A::collect);
+
+        /* => dcs_passthrough */
+        range(&result, 0x40, 0x7E, source, State::dcs_passthrough, A::none);
+    }
+
+    /* dcs_intermediate */
+    {
+        const State source = State::dcs_intermediate;
+
+        /* events */
+        single(&result, 0x19, source, source, A::ignore);
+        range(&result, 0, 0x17, source, source, A::ignore);
+        range(&result, 0x1C, 0x1F, source, source, A::ignore);
+        range(&result, 0x20, 0x2F, source, source, A::collect);
+        single(&result, 0x7F, source, source, A::ignore);
+
+        /* => dcs_ignore */
+        range(&result, 0x30, 0x3F, source, State::dcs_ignore, A::none);
+
+        /* => dcs_passthrough */
+        range(&result, 0x40, 0x7E, source, State::dcs_passthrough, A::none);
+    }
+
+    /* dcs_ignore */
+    {
+        const State source = State::dcs_ignore;
+
+        /* events */
+        single(&result, 0x19, source, source, A::ignore);
+        range(&result, 0, 0x17, source, source, A::ignore);
+        range(&result, 0x1C, 0x1F, source, source, A::ignore);
+
+        /* High bytes are ignored payload data, overriding the
+         * "anywhere" C1 transitions. See dcs_passthrough below for more.
+         * In dcs_ignore the additional concern is that a UTF-8 payload in
+         * an ignored DCS could otherwise begin a live sequence mid-string
+         * (e.g. 0x9B => csi_entry). */
+        range(&result, 0x80, 0xFF, source, source, A::ignore);
+    }
+
+    /* dcs_param */
+    {
+        const State source = State::dcs_param;
+
+        /* events */
+        single(&result, 0x19, source, source, A::ignore);
+        range(&result, 0, 0x17, source, source, A::ignore);
+        range(&result, 0x1C, 0x1F, source, source, A::ignore);
+        range(&result, 0x30, 0x39, source, source, A::param);
+        single(&result, 0x3B, source, source, A::param);
+        single(&result, 0x7F, source, source, A::ignore);
+
+        /* => dcs_ignore */
+        single(&result, 0x3A, source, State::dcs_ignore, A::none);
+        range(&result, 0x3C, 0x3F, source, State::dcs_ignore, A::none);
+
+        /* => dcs_intermediate */
+        range(&result, 0x20, 0x2F, source, State::dcs_intermediate, A::collect);
+
+        /* => dcs_passthrough */
+        range(&result, 0x40, 0x7E, source, State::dcs_passthrough, A::none);
+    }
+
+    /* dcs_passthrough */
+    {
+        const State source = State::dcs_passthrough;
+
+        /* events */
+        single(&result, 0x19, source, source, A::put);
+        range(&result, 0, 0x17, source, source, A::put);
+        range(&result, 0x1C, 0x1F, source, source, A::put);
+        range(&result, 0x20, 0x7E, source, source, A::put);
+        single(&result, 0x7F, source, source, A::ignore);
+
+        /* High bytes are payload data, overriding the "anywhere" C1
+         * transitions, matching how osc_string handles them below.
+         * Ghostty is UTF-8 only, and DCS payloads carry UTF-8 text
+         * (e.g. tmux control mode pane content): without this, a
+         * UTF-8 continuation byte in the C1 range terminates or
+         * corrupts the string and 0xA0-0xFF are silently dropped.
+         *
+         * This includes 0x9C (8-bit ST) on purpose: a raw 0x9C is
+         * indistinguishable from a UTF-8 continuation byte ("Ü" is
+         * 0xC3 0x9C), and Ghostty doesn't honor 8-bit C1 controls in
+         * the ground state either (they go through UTF-8 decoding).
+         * DCS strings terminate via 7-bit ST (ESC \) and abort via
+         * CAN/SUB, which are unaffected here. */
+        range(&result, 0x80, 0xFF, source, source, A::put);
+    }
+
+    /* csi_param */
+    {
+        const State source = State::csi_param;
+
+        /* events */
+        single(&result, 0x19, source, source, A::execute);
+        range(&result, 0, 0x17, source, source, A::execute);
+        range(&result, 0x1C, 0x1F, source, source, A::execute);
+        range(&result, 0x30, 0x39, source, source, A::param);
+        single(&result, 0x3A, source, source, A::param);
+        single(&result, 0x3B, source, source, A::param);
+        single(&result, 0x7F, source, source, A::ignore);
+
+        /* => ground */
+        range(&result, 0x40, 0x7E, source, State::ground, A::csi_dispatch);
+
+        /* => csi_ignore */
+        range(&result, 0x3C, 0x3F, source, State::csi_ignore, A::none);
+
+        /* => csi_intermediate */
+        range(&result, 0x20, 0x2F, source, State::csi_intermediate, A::collect);
+    }
+
+    /* csi_ignore */
+    {
+        const State source = State::csi_ignore;
+
+        /* events */
+        single(&result, 0x19, source, source, A::execute);
+        range(&result, 0, 0x17, source, source, A::execute);
+        range(&result, 0x1C, 0x1F, source, source, A::execute);
+        range(&result, 0x20, 0x3F, source, source, A::ignore);
+        single(&result, 0x7F, source, source, A::ignore);
+
+        /* => ground */
+        range(&result, 0x40, 0x7E, source, State::ground, A::none);
+    }
+
+    /* csi_intermediate */
+    {
+        const State source = State::csi_intermediate;
+
+        /* events */
+        single(&result, 0x19, source, source, A::execute);
+        range(&result, 0, 0x17, source, source, A::execute);
+        range(&result, 0x1C, 0x1F, source, source, A::execute);
+        range(&result, 0x20, 0x2F, source, source, A::collect);
+        single(&result, 0x7F, source, source, A::ignore);
+
+        /* => ground */
+        range(&result, 0x40, 0x7E, source, State::ground, A::csi_dispatch);
+
+        /* => csi_ignore */
+        range(&result, 0x30, 0x3F, source, State::csi_ignore, A::none);
+    }
+
+    /* csi_entry */
+    {
+        const State source = State::csi_entry;
+
+        /* events */
+        single(&result, 0x19, source, source, A::execute);
+        range(&result, 0, 0x17, source, source, A::execute);
+        range(&result, 0x1C, 0x1F, source, source, A::execute);
+        single(&result, 0x7F, source, source, A::ignore);
+
+        /* => ground */
+        range(&result, 0x40, 0x7E, source, State::ground, A::csi_dispatch);
+
+        /* => csi_ignore */
+        single(&result, 0x3A, source, State::csi_ignore, A::none);
+
+        /* => csi_intermediate */
+        range(&result, 0x20, 0x2F, source, State::csi_intermediate, A::collect);
+
+        /* => csi_param */
+        range(&result, 0x30, 0x39, source, State::csi_param, A::param);
+        single(&result, 0x3B, source, State::csi_param, A::param);
+        range(&result, 0x3C, 0x3F, source, State::csi_param, A::collect);
+    }
+
+    /* osc_string */
+    {
+        const State source = State::osc_string;
+
+        /* events */
+        single(&result, 0x19, source, source, A::ignore);
+        range(&result, 0, 0x06, source, source, A::ignore);
+        range(&result, 0x08, 0x17, source, source, A::ignore);
+        range(&result, 0x1C, 0x1F, source, source, A::ignore);
+        range(&result, 0x20, 0xFF, source, source, A::osc_put);
+
+        /* XTerm accepts either BEL  or ST  for terminating OSC
+         * sequences, and when returning information, uses the same
+         * terminator used in a query. */
+        single(&result, 0x07, source, State::ground, A::none);
+    }
+
+    /* Create our immutable version */
+    for (size_t i = 0; i < 256; i++) {
+        for (size_t j = 0; j < STATE_COUNT; j++) {
+            final_->t[i][j] = result.set[i][j]
+                                  ? result.t[i][j]
+                                  : transition((State)j, A::none);
+        }
+    }
+}
+
+/* The state transition table.
+ *
+ * Wisp: upstream generates this at compile time. Here the same genTable runs
+ * once, on first use. */
+inline const Table &table() {
+    static Table t;
+    static bool built = false;
+    if (!built) {
+        genTable(&t);
+        built = true;
+    }
+    return t;
+}
+
+/* ─── the parser ─────────────────────────────────────────────────────────── */
+
+struct Parser {
+    /* Current state of the state machine */
+    State state;
+
+    /* Intermediate tracking. */
+    uint8_t intermediates[MAX_INTERMEDIATE];
+    uint8_t intermediates_idx;
+
+    /* Param tracking, building */
+    uint16_t params[MAX_PARAMS];
+    SepList  params_sep;
+    uint8_t  params_idx;
+    uint16_t param_acc;
+    uint8_t  param_acc_idx;
+
+    /* Parser for OSC sequences */
+    osc::Parser osc_parser;
+
+    Parser()
+        : state(State::ground), intermediates_idx(0), params_sep(),
+          params_idx(0), param_acc(0), param_acc_idx(0), osc_parser() {
+        memset(intermediates, 0, sizeof(intermediates));
+        memset(params, 0, sizeof(params));
+    }
+
+    void clear() {
+        intermediates_idx = 0;
+        params_idx = 0;
+        params_sep = SepList::initEmpty();
+        param_acc = 0;
+        param_acc_idx = 0;
+    }
+
+    void collect(uint8_t c) {
+        if (intermediates_idx >= MAX_INTERMEDIATE) {
+            /* log.warn("invalid intermediates count") */
+            return;
+        }
+
+        intermediates[intermediates_idx] = c;
+        intermediates_idx += 1;
+    }
+
+    /* Next consumes the next character c and returns the actions to execute.
+     * Up to 3 actions may need to be executed -- in order -- representing
+     * the state exit, transition, and entry actions. */
+    Next next(uint8_t c);
+
+private:
+    bool doAction(TransitionAction action, uint8_t c, Action *out);
+};
+
+/* Wisp: *|= for u16. */
+inline uint16_t sat_mul_u16(uint16_t a, uint16_t b) {
+    const uint32_t r = (uint32_t)a * b;
+    return r > 0xFFFF ? (uint16_t)0xFFFF : (uint16_t)r;
+}
+
+/* Wisp: +|= for u16. */
+inline uint16_t sat_add_u16(uint16_t a, uint16_t b) {
+    const uint32_t r = (uint32_t)a + b;
+    return r > 0xFFFF ? (uint16_t)0xFFFF : (uint16_t)r;
+}
+
+inline bool Parser::doAction(TransitionAction action, uint8_t c, Action *out) {
+    switch (action) {
+        case TransitionAction::none:
+        case TransitionAction::ignore:
+            return false;
+
+        case TransitionAction::print:
+            out->tag = Action::Tag::print;
+            out->print = c;
+            return true;
+
+        case TransitionAction::execute:
+            out->tag = Action::Tag::execute;
+            out->byte = c;
+            return true;
+
+        case TransitionAction::collect:
+            collect(c);
+            return false;
+
+        case TransitionAction::param: {
+            /* Semicolon separates parameters. If we encounter a semicolon
+             * we need to store and move on to the next parameter. */
+            if (c == ';' || c == ':') {
+                /* Ignore too many parameters */
+                if (params_idx >= MAX_PARAMS) return false;
+
+                /* Set param final value */
+                params[params_idx] = param_acc;
+                if (c == ':') params_sep.set(params_idx);
+                params_idx += 1;
+
+                /* Reset current param value to 0 */
+                param_acc = 0;
+                param_acc_idx = 0;
+                return false;
+            }
+
+            /* A numeric value. Add it to our accumulator. */
+            param_acc = sat_mul_u16(param_acc, 10);
+            param_acc = sat_add_u16(param_acc, (uint16_t)(c - '0'));
+
+            /* Increment our accumulator index. If we overflow then
+             * we're out of bounds and we exit immediately. */
+            const uint8_t before = param_acc_idx;
+            param_acc_idx = (uint8_t)(param_acc_idx + 1);
+            const bool overflow = param_acc_idx < before;
+            if (overflow) return false;
+
+            /* The client is expected to perform no action. */
+            return false;
+        }
+
+        case TransitionAction::osc_put:
+            osc_parser.next(c);
+            return false;
+
+        case TransitionAction::csi_dispatch: {
+            /* Ignore too many parameters */
+            if (params_idx >= MAX_PARAMS) return false;
+
+            /* Finalize parameters if we have one */
+            if (param_acc_idx > 0) {
+                params[params_idx] = param_acc;
+                params_idx += 1;
+            }
+
+            out->tag = Action::Tag::csi_dispatch;
+            out->csi_dispatch.intermediates = intermediates;
+            out->csi_dispatch.intermediates_len = intermediates_idx;
+            out->csi_dispatch.params = params;
+            out->csi_dispatch.params_len = params_idx;
+            out->csi_dispatch.params_sep = params_sep;
+            out->csi_dispatch.final_ = c;
+
+            /* We only allow colon or mixed separators for the 'm' command. */
+            if (c != 'm' && params_sep.count() > 0) {
+                /* warnCsiSepMismatch(result.csi_dispatch) */
+                return false;
+            }
+
+            return true;
+        }
+
+        case TransitionAction::esc_dispatch:
+            out->tag = Action::Tag::esc_dispatch;
+            out->esc_dispatch.intermediates = intermediates;
+            out->esc_dispatch.intermediates_len = intermediates_idx;
+            out->esc_dispatch.final_ = c;
+            return true;
+
+        case TransitionAction::put:
+            out->tag = Action::Tag::dcs_put;
+            out->byte = c;
+            return true;
+
+        case TransitionAction::apc_put:
+            out->tag = Action::Tag::apc_put;
+            out->byte = c;
+            return true;
+    }
+    return false;
+}
+
+inline Next Parser::next(uint8_t c) {
+    const Transition effect = table().t[c][(size_t)state];
+
+    const State next_state = effect.state;
+    const TransitionAction action = effect.action;
+
+    Next result;
+
+    /* When going from one state to another, the actions take place in this
+     * order:
+     *
+     * 1. exit action from old state
+     * 2. transition action
+     * 3. entry action to new state */
+
+    /* Exit depends on current state */
+    if (state != next_state) {
+        switch (state) {
+            case State::osc_string:
+                if (const osc::Command *cmd = osc_parser.end(c)) {
+                    result.action[0].tag = Action::Tag::osc_dispatch;
+                    result.action[0].osc_dispatch = *cmd;
+                    result.present[0] = true;
+                }
+                break;
+            case State::dcs_passthrough:
+                result.action[0].tag = Action::Tag::dcs_unhook;
+                result.present[0] = true;
+                break;
+            case State::sos_pm_apc_string:
+                result.action[0].tag = Action::Tag::apc_end;
+                result.present[0] = true;
+                break;
+            default:
+                break;
+        }
+    }
+
+    result.present[1] = doAction(action, c, &result.action[1]);
+
+    /* Entry depends on new state */
+    if (state != next_state) {
+        switch (next_state) {
+            case State::escape:
+            case State::dcs_entry:
+            case State::csi_entry:
+                clear();
+                break;
+
+            case State::osc_string:
+                osc_parser.reset();
+                break;
+
+            case State::dcs_passthrough: {
+                /* Ignore too many parameters */
+                if (params_idx >= MAX_PARAMS) break;
+                /* Finalize parameters */
+                if (param_acc_idx > 0) {
+                    params[params_idx] = param_acc;
+                    params_idx += 1;
+                }
+                result.action[2].tag = Action::Tag::dcs_hook;
+                result.action[2].dcs_hook.intermediates = intermediates;
+                result.action[2].dcs_hook.intermediates_len = intermediates_idx;
+                result.action[2].dcs_hook.params = params;
+                result.action[2].dcs_hook.params_len = params_idx;
+                result.action[2].dcs_hook.final_ = c;
+                result.present[2] = true;
+                break;
+            }
+
+            case State::sos_pm_apc_string:
+                result.action[2].tag = Action::Tag::apc_start;
+                result.present[2] = true;
+                break;
+
+            default:
+                break;
+        }
+    }
+
+    /* After generating the actions, we set our next state. */
+    state = next_state;
+    return result;
 }
 
 } /* namespace parser */

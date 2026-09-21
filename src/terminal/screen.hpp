@@ -1,6 +1,13 @@
-/* Ported from Ghostty src/terminal/Screen.zig
+/* Reimplemented after Ghostty src/terminal/Screen.zig
  * Copyright (c) 2024 Mitchell Hashimoto, Ghostty contributors
  * MIT License — see THIRD_PARTY_NOTICES.md
+ *
+ * REIMPLEMENTED, NOT TRANSLITERATED. This file was written from Ghostty's
+ * design and verified against Wisp's own tests, without the upstream source
+ * to hand. It follows upstream's structure but has not been checked against
+ * it line by line, and its behaviour will differ in places. It is due to be
+ * replaced by a transliteration checked against upstream's own tests, as
+ * parser.hpp has been.
  *
  * A screen: the pages, and the cursor moving over them.
  *

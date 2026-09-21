@@ -2,6 +2,13 @@
  * Copyright (c) 2024 Mitchell Hashimoto, Ghostty contributors
  * MIT License — see THIRD_PARTY_NOTICES.md
  *
+ * PARTLY TRANSLITERATED. The Cell and Row bit layouts, Capacity and the page
+ * layout were checked against upstream. The operations further down — the
+ * grapheme and hyperlink operations, erase, clone, reflow and scrolling —
+ * were reimplemented from Ghostty's design and verified against Wisp's own
+ * tests, without the upstream source to hand. They are due to be replaced by
+ * a transliteration checked against upstream's own tests.
+ *
  * Cell and Row, the storage primitives a Page is built from.
  *
  * PARTIAL PORT. Cell, Row, Capacity, the layout and the Page struct's storage
