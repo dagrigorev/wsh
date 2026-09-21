@@ -1,7 +1,7 @@
 /* Transliterated from Ghostty src/terminal/osc.zig, src/terminal/osc/
  * encoding.zig and these files under src/terminal/osc/parsers/:
  * change_window_title.zig, change_window_icon.zig, hyperlink.zig,
- * report_pwd.zig, mouse_shape.zig
+ * report_pwd.zig, mouse_shape.zig, clipboard_operation.zig
  * Copyright (c) 2024 Mitchell Hashimoto, Ghostty contributors
  * MIT License — see THIRD_PARTY_NOTICES.md
  *
@@ -23,8 +23,8 @@
  * Comments are upstream's unless marked "Wisp:".
  *
  * Wisp: PARSERS NOT YET TRANSLITERATED. osc/parsers/ holds one file per
- * command family. Only the five named above are here; the rest — color,
- * clipboard_operation, osc9, kitty_color, kitty_text_sizing,
+ * command family. Only the ones named above are here; the rest — color,
+ * osc9, kitty_color, kitty_text_sizing,
  * kitty_clipboard_protocol, kitty_dnd_protocol, kitty_desktop_notification,
  * context_signal, semantic_prompt, rxvt_extension and iterm2 — arrive in
  * later slices. Until then end() returns null for their states, exactly as
@@ -210,6 +210,15 @@ struct Command {
         ZStr value;
     } mouse_shape;
 
+    /* Set or get clipboard contents. If data is "?", then the current
+     * clipboard contents are sent to the pty. Otherwise, the contents
+     * are set on the clipboard. */
+    struct {
+        uint8_t    kind;
+        ZStr       data;
+        Terminator terminator;   /* = .st */
+    } clipboard_contents;
+
     /* Start a hyperlink (OSC 8) */
     struct {
         bool has_id;   /* Wisp: id: ?[:0]const u8 = null */
@@ -220,6 +229,9 @@ struct Command {
     Command() : key(Key::invalid), change_window_title(), change_window_icon() {
         report_pwd.value = ZStr();
         mouse_shape.value = ZStr();
+        clipboard_contents.kind = 0;
+        clipboard_contents.data = ZStr();
+        clipboard_contents.terminator = Terminator::st;
         hyperlink_start.has_id = false;
         hyperlink_start.id = ZStr();
         hyperlink_start.uri = ZStr();
@@ -900,6 +912,56 @@ inline Command *parse(Parser *parser, bool, uint8_t) {
 }
 } /* namespace hyperlink */
 
+namespace clipboard_operation {
+/* Parse OSC 52 */
+inline Command *parse(Parser *parser, bool has_ch, uint8_t terminator_ch) {
+    /* assert(parser.state == .@"52") */
+    if (!parser->has_capture) {
+        parser->state = Parser::State::invalid;
+        return nullptr;
+    }
+    Parser::Capture *cap = &parser->capture;
+
+    /* Wisp: unlike the parsers above, this one writes its terminator
+     * through the bounded Capture.writeByte, so a capture already at its
+     * limit fails here. Upstream tests exactly that. */
+    if (!cap->writeByte(0)) {
+        parser->state = Parser::State::invalid;
+        return nullptr;
+    }
+    char *data = cap->trailing();
+    const size_t len = cap->trailing_len();
+    if (len == 1) {
+        parser->state = Parser::State::invalid;
+        return nullptr;
+    }
+    if (data[0] == ';') {
+        parser->command = Command();
+        parser->command.key = Command::Key::clipboard_contents;
+        parser->command.clipboard_contents.kind = 'c';
+        parser->command.clipboard_contents.data = ZStr(data + 1, len - 1 - 1);
+        parser->command.clipboard_contents.terminator =
+            terminator_init(has_ch, terminator_ch);
+    } else {
+        if (len < 2) {
+            parser->state = Parser::State::invalid;
+            return nullptr;
+        }
+        if (data[1] != ';') {
+            parser->state = Parser::State::invalid;
+            return nullptr;
+        }
+        parser->command = Command();
+        parser->command.key = Command::Key::clipboard_contents;
+        parser->command.clipboard_contents.kind = (uint8_t)data[0];
+        parser->command.clipboard_contents.data = ZStr(data + 2, len - 1 - 2);
+        parser->command.clipboard_contents.terminator =
+            terminator_init(has_ch, terminator_ch);
+    }
+    return &parser->command;
+}
+} /* namespace clipboard_operation */
+
 } /* namespace parsers */
 
 inline Command *Parser::end(bool has_ch, uint8_t ch) {
@@ -940,8 +1002,8 @@ inline Command *Parser::end(bool has_ch, uint8_t ch) {
         case S::s22:
             return parsers::mouse_shape::parse(this, has_ch, ch);
 
-        /* Wisp: parsers.clipboard_operation — not yet transliterated. */
-        case S::s52: return nullptr;
+        case S::s52:
+            return parsers::clipboard_operation::parse(this, has_ch, ch);
 
         case S::s55: return nullptr;
 

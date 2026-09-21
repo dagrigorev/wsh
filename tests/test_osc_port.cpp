@@ -1,7 +1,7 @@
 /* Transliterated from the test blocks in Ghostty src/terminal/osc.zig,
  * src/terminal/osc/encoding.zig and, under src/terminal/osc/parsers/:
  * change_window_title.zig, change_window_icon.zig, hyperlink.zig,
- * report_pwd.zig and mouse_shape.zig
+ * report_pwd.zig, mouse_shape.zig and clipboard_operation.zig
  * Copyright (c) 2024 Mitchell Hashimoto, Ghostty contributors
  * MIT License — see THIRD_PARTY_NOTICES.md
  *
@@ -16,10 +16,6 @@
  *   cap.writer.buffer.len         cap.writer.capacity
  *   cap.trailing().len            cap.trailing_len()
  *
- * Not ported yet, because the parser they exercise is not yet
- * transliterated: "Parser nextSlice matches per-byte parsing" and "Parser
- * allocating capture limit includes parser-added bytes" (both OSC 52,
- * clipboard_operation.zig).
  */
 
 #include "test_helpers.h"
@@ -340,4 +336,95 @@ TEST(mouse_shape, OSC_22_pointer_cursor) {
     ASSERT_TRUE(cmd != nullptr);
     ASSERT_TRUE(cmd->key == Key::mouse_shape);
     ASSERT_TRUE(cmd->mouse_shape.value.eql("pointer"));
+}
+
+/* ─── osc.zig: the two that needed the clipboard parser ──────────────────── */
+
+TEST(osc, Parser_nextSlice_matches_per_byte_parsing) {
+    const char *input = "52;c;aGVsbG8=";
+    const size_t len = strlen(input);
+
+    /* Every two-way split of the input must parse identically to
+     * the byte-at-a-time path. */
+    for (size_t split = 0; split < len + 1; split++) {
+        Parser p(true);
+        p.nextSlice((const uint8_t *)input, split);
+        p.nextSlice((const uint8_t *)input + split, len - split);
+
+        const Command *cmd = p.end();
+        ASSERT_TRUE(cmd != nullptr);
+        ASSERT_TRUE(cmd->key == Key::clipboard_contents);
+        ASSERT_EQ(cmd->clipboard_contents.kind, 'c');
+        ASSERT_TRUE(cmd->clipboard_contents.data.eql("aGVsbG8="));
+    }
+}
+
+TEST(osc, Parser_allocating_capture_limit_includes_parser_added_bytes) {
+    Parser p(true);
+    p.max_allocating_bytes = 4;
+
+    feed(p, "52;abcd");
+    ASSERT_TRUE(p.end() == nullptr);
+    ASSERT_TRUE(p.state == Parser::State::invalid);
+
+    Parser::Capture &cap = p.capture;
+    ASSERT_EQ(cap.trailing_len(), 4u);
+    ASSERT_EQ(cap.writer.capacity, 4u);
+}
+
+/* ─── parsers/clipboard_operation.zig ────────────────────────────────────── */
+
+TEST(clipboard_operation, OSC_52_get_set_clipboard) {
+    Parser p;
+    feed(p, "52;s;?");
+
+    const Command *cmd = p.end();
+    ASSERT_TRUE(cmd != nullptr);
+    ASSERT_TRUE(cmd->key == Key::clipboard_contents);
+    ASSERT_TRUE(cmd->clipboard_contents.kind == 's');
+    ASSERT_TRUE(cmd->clipboard_contents.data.eql("?"));
+    ASSERT_TRUE(cmd->clipboard_contents.terminator == Terminator::st);
+}
+
+TEST(clipboard_operation, OSC_52_get_clipboard_with_BEL_terminator) {
+    Parser p;
+    feed(p, "52;c;?");
+
+    const Command *cmd = p.end(0x07);
+    ASSERT_TRUE(cmd != nullptr);
+    ASSERT_TRUE(cmd->key == Key::clipboard_contents);
+    ASSERT_TRUE(cmd->clipboard_contents.terminator == Terminator::bel);
+}
+
+TEST(clipboard_operation, OSC_52_get_set_clipboard_optional_parameter) {
+    Parser p;
+    feed(p, "52;;?");
+
+    const Command *cmd = p.end();
+    ASSERT_TRUE(cmd != nullptr);
+    ASSERT_TRUE(cmd->key == Key::clipboard_contents);
+    ASSERT_TRUE(cmd->clipboard_contents.kind == 'c');
+    ASSERT_TRUE(cmd->clipboard_contents.data.eql("?"));
+}
+
+TEST(clipboard_operation, OSC_52_get_set_clipboard_with_allocator) {
+    Parser p(true);
+    feed(p, "52;s;?");
+
+    const Command *cmd = p.end();
+    ASSERT_TRUE(cmd != nullptr);
+    ASSERT_TRUE(cmd->key == Key::clipboard_contents);
+    ASSERT_TRUE(cmd->clipboard_contents.kind == 's');
+    ASSERT_TRUE(cmd->clipboard_contents.data.eql("?"));
+}
+
+TEST(clipboard_operation, OSC_52_clear_clipboard) {
+    Parser p;
+    feed(p, "52;;");
+
+    const Command *cmd = p.end();
+    ASSERT_TRUE(cmd != nullptr);
+    ASSERT_TRUE(cmd->key == Key::clipboard_contents);
+    ASSERT_TRUE(cmd->clipboard_contents.kind == 'c');
+    ASSERT_TRUE(cmd->clipboard_contents.data.eql(""));
 }
