@@ -1,7 +1,7 @@
 /* Transliterated from Ghostty src/terminal/osc.zig, src/terminal/osc/
  * encoding.zig and these files under src/terminal/osc/parsers/:
  * change_window_title.zig, change_window_icon.zig, hyperlink.zig,
- * report_pwd.zig, mouse_shape.zig, clipboard_operation.zig
+ * report_pwd.zig, mouse_shape.zig, clipboard_operation.zig, color.zig
  * Copyright (c) 2024 Mitchell Hashimoto, Ghostty contributors
  * MIT License — see THIRD_PARTY_NOTICES.md
  *
@@ -23,8 +23,8 @@
  * Comments are upstream's unless marked "Wisp:".
  *
  * Wisp: PARSERS NOT YET TRANSLITERATED. osc/parsers/ holds one file per
- * command family. Only the ones named above are here; the rest — color,
- * osc9, kitty_color, kitty_text_sizing,
+ * command family. Only the ones named above are here; the rest — osc9,
+ * kitty_color, kitty_text_sizing,
  * kitty_clipboard_protocol, kitty_dnd_protocol, kitty_desktop_notification,
  * context_signal, semantic_prompt, rxvt_extension and iterm2 — arrive in
  * later slices. Until then end() returns null for their states, exactly as
@@ -40,6 +40,9 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+
+#include "color.hpp"
+#include "../datastruct/segmented_list.hpp"
 
 namespace wisp {
 namespace terminal {
@@ -140,6 +143,121 @@ inline const char *terminator_string(Terminator t) {
     return t == Terminator::st ? "\x1b\\" : "\x07";
 }
 
+/* ─── osc/parsers/color.zig: types ──────────────────────────────────────── */
+
+namespace color {
+
+/* The possible operations we support for colors. */
+enum class Operation : uint8_t {
+    osc_4,
+    osc_5,
+    osc_10,
+    osc_11,
+    osc_12,
+    osc_13,
+    osc_14,
+    osc_15,
+    osc_16,
+    osc_17,
+    osc_18,
+    osc_19,
+    osc_104,
+    osc_105,
+    osc_110,
+    osc_111,
+    osc_112,
+    osc_113,
+    osc_114,
+    osc_115,
+    osc_116,
+    osc_117,
+    osc_118,
+    osc_119,
+};
+
+struct Target {
+    enum class Tag : uint8_t { palette, special, dynamic };
+    Tag tag;
+    uint8_t palette;
+    ::wisp::terminal::Special special;
+    ::wisp::terminal::Dynamic dynamic;
+
+    static Target makePalette(uint8_t idx) {
+        Target t = Target();
+        t.tag = Tag::palette;
+        t.palette = idx;
+        return t;
+    }
+    static Target makeSpecial(::wisp::terminal::Special sp) {
+        Target t = Target();
+        t.tag = Tag::special;
+        t.special = sp;
+        return t;
+    }
+    static Target makeDynamic(::wisp::terminal::Dynamic d) {
+        Target t = Target();
+        t.tag = Tag::dynamic;
+        t.dynamic = d;
+        return t;
+    }
+
+    bool eql(const Target &o) const {
+        if (tag != o.tag) return false;
+        switch (tag) {
+            case Tag::palette: return palette == o.palette;
+            case Tag::special: return special == o.special;
+            case Tag::dynamic: return dynamic == o.dynamic;
+        }
+        return false;
+    }
+
+    Target()
+        : tag(Tag::palette), palette(0),
+          special(::wisp::terminal::Special::bold),
+          dynamic(::wisp::terminal::Dynamic::foreground) {}
+};
+
+struct ColoredTarget {
+    Target target;
+    ::wisp::terminal::RGB color;
+};
+
+/* A single operation related to the terminal color palette. */
+struct Request {
+    enum class Tag : uint8_t { set, query, reset, reset_palette, reset_special };
+    Tag tag;
+    ColoredTarget set;
+    Target query;
+    Target reset;
+
+    Request() : tag(Tag::reset_palette), set(), query(), reset() {}
+
+    bool eql(const Request &o) const {
+        if (tag != o.tag) return false;
+        switch (tag) {
+            case Tag::set:
+                return set.target.eql(o.set.target) && set.color.eql(o.set.color);
+            case Tag::query: return query.eql(o.query);
+            case Tag::reset: return reset.eql(o.reset);
+            case Tag::reset_palette:
+            case Tag::reset_special:
+                return true;
+        }
+        return false;
+    }
+};
+
+/* A segmented list is used to avoid copying when many operations
+ * are given in a single OSC. In most cases, OSC 4/104/etc. send
+ * very few so the prealloc is optimized for that.
+ *
+ * The exact prealloc value is chosen arbitrarily assuming most
+ * color ops have very few. If we can get empirical data on more
+ * typical values we can switch to that. */
+typedef ::wisp::datastruct::SegmentedList<Request, 2> List;
+
+} /* namespace color */
+
 struct Command {
     /* NOTE: Order matters, see LibEnum documentation. */
     enum class Key : uint8_t {
@@ -219,6 +337,26 @@ struct Command {
         Terminator terminator;   /* = .st */
     } clipboard_contents;
 
+    /* OSC color operations to set, reset, or report color settings. Some
+     * OSCs allow multiple operations to be specified in a single OSC so we
+     * need a list-like datastructure to manage them. We use
+     * std.SegmentedList because it minimizes the number of allocations and
+     * copies because a large majority of the time there will be only one
+     * operation per OSC.
+     *
+     * Currently, these OSCs are handled by `color_operation`:
+     *
+     * 4, 5, 10-19, 104, 105, 110-119
+     *
+     * Wisp: the list is owned by the Command and freed by Parser::reset, as
+     * upstream's is. A Command copied out of the parser is a shallow copy, as
+     * a Zig struct copy is, and is valid until the parser's next reset. */
+    struct {
+        color::Operation op;
+        color::List      requests;
+        Terminator       terminator;   /* = .st */
+    } color_operation;
+
     /* Start a hyperlink (OSC 8) */
     struct {
         bool has_id;   /* Wisp: id: ?[:0]const u8 = null */
@@ -232,6 +370,8 @@ struct Command {
         clipboard_contents.kind = 0;
         clipboard_contents.data = ZStr();
         clipboard_contents.terminator = Terminator::st;
+        color_operation.op = color::Operation::osc_4;
+        color_operation.terminator = Terminator::st;
         hyperlink_start.has_id = false;
         hyperlink_start.id = ZStr();
         hyperlink_start.uri = ZStr();
@@ -436,9 +576,11 @@ struct Parser {
         if (has_capture) capture.deinit();
 
         /* Handle any cleanup that individual OSCs require.
-         * Wisp: kitty_color_protocol and color_operation own allocations
-         * upstream; neither is transliterated yet, so there is nothing
-         * here to free. */
+         * Wisp: kitty_color_protocol also owns an allocation upstream; it is
+         * not transliterated yet. */
+        if (command.key == Command::Key::color_operation && alloc) {
+            command.color_operation.requests.deinit();
+        }
 
         state = State::start;
         has_capture = false;
@@ -962,6 +1104,328 @@ inline Command *parse(Parser *parser, bool has_ch, uint8_t terminator_ch) {
 }
 } /* namespace clipboard_operation */
 
+namespace color {
+
+using ::wisp::terminal::osc::color::Operation;
+using ::wisp::terminal::osc::color::Target;
+using ::wisp::terminal::osc::color::Request;
+using ::wisp::terminal::osc::color::List;
+
+/* Wisp: std.fmt.parseInt(u9, s, 10). An optional leading '+' is accepted;
+ * a value above 511 overflows. Zig additionally accepts '-' on zero and
+ * '_' separators, which appear in none of upstream's tests and are not
+ * reproduced. */
+inline bool parse_u9(const char *s, size_t len, uint16_t *out) {
+    size_t i = 0;
+    if (i < len && s[i] == '+') i++;
+    if (i >= len) return false;
+    unsigned v = 0;
+    for (; i < len; i++) {
+        if (s[i] < '0' || s[i] > '9') return false;
+        v = v * 10 + (unsigned)(s[i] - '0');
+        if (v > 511) return false;
+    }
+    *out = (uint16_t)v;
+    return true;
+}
+
+/* Wisp: std.mem.tokenizeScalar(u8, buf, ';') — empty tokens are skipped,
+ * which is not what split does, and upstream relies on the difference. */
+struct TokenIterator {
+    const char *buf;
+    size_t      len;
+    size_t      index;
+
+    bool next(const char **tok, size_t *tok_len) {
+        while (index < len && buf[index] == ';') index++;
+        if (index >= len) return false;
+        const size_t start = index;
+        while (index < len && buf[index] != ';') index++;
+        *tok = buf + start;
+        *tok_len = index - start;
+        return true;
+    }
+};
+
+inline bool is_query(const char *s, size_t len) { return len == 1 && s[0] == '?'; }
+
+/* OSC 4/5 */
+inline bool parseGetSetAnsiColor(Operation op, TokenIterator *it, List *result) {
+    /* Note: in ANY error scenario below we return the accumulated results.
+     * This matches the xterm behavior (see misc.c ChangeAnsiColorRequest) */
+
+    while (true) {
+        /* We expect a `c; spec` pair. If either doesn't exist then
+         * we return the results up to this point. */
+        const char *color_str, *spec_str;
+        size_t color_len, spec_len;
+        if (!it->next(&color_str, &color_len)) return true;
+        if (!it->next(&spec_str, &spec_len)) return true;
+
+        /* Color must be numeric. u9 because that'll fit our palette +
+         * special */
+        uint16_t color;
+        if (!parse_u9(color_str, color_len, &color)) return true;
+
+        /* Parse the color. */
+        Target target;
+        if (op == Operation::osc_5) {
+            /* OSC5 maps directly to the Special enum. */
+            if (color > 7 || color > 4) return true;
+            target = Target::makeSpecial((::wisp::terminal::Special)color);
+        } else {
+            /* OSC4 maps 0-255 to palette, 256-259 to special offset
+             * by the palette count. */
+            if (color <= 255) {
+                target = Target::makePalette((uint8_t)color);
+            } else {
+                const unsigned sp = (unsigned)color - 256;
+                if (sp > 7 || sp > 4) return true;
+                target = Target::makeSpecial((::wisp::terminal::Special)sp);
+            }
+        }
+
+        /* "?" always results in a query. */
+        if (is_query(spec_str, spec_len)) {
+            Request *req = result->addOne();
+            if (!req) return false;
+            *req = Request();
+            req->tag = Request::Tag::query;
+            req->query = target;
+            continue;
+        }
+
+        ::wisp::terminal::RGB rgb;
+        if (::wisp::terminal::RGB::parse(spec_str, spec_len, &rgb) !=
+            ::wisp::terminal::ColorError::none) {
+            return true;
+        }
+        Request *req = result->addOne();
+        if (!req) return false;
+        *req = Request();
+        req->tag = Request::Tag::set;
+        req->set.target = target;
+        req->set.color = rgb;
+    }
+}
+
+/* OSC 104/105: Reset ANSI Colors */
+inline bool parseResetAnsiColor(Operation op, TokenIterator *it, List *result) {
+    /* Note: xterm stops parsing the reset list on any error, but we're
+     * more flexible and try the next value. This matches the behavior of
+     * Kitty and I don't see a downside to being more flexible here.
+     * Hopefully no one depends on the exact behavior of xterm. */
+
+    while (true) {
+        const char *color_str;
+        size_t color_len;
+        if (!it->next(&color_str, &color_len)) {
+            /* If no parameters are given, we reset the full table. */
+            if (result->count() == 0) {
+                Request *req = result->addOne();
+                if (!req) return false;
+                *req = Request();
+                req->tag = op == Operation::osc_104 ? Request::Tag::reset_palette
+                                                    : Request::Tag::reset_special;
+            }
+            return true;
+        }
+
+        /* Empty color strings are ignored, not treated as an error. */
+        if (color_len == 0) continue;
+
+        /* Color must be numeric. u9 because that'll fit our palette +
+         * special */
+        uint16_t color;
+        if (!parse_u9(color_str, color_len, &color)) continue;
+
+        /* Parse the color. */
+        Target target;
+        if (op == Operation::osc_105) {
+            /* OSC105 maps directly to the Special enum. */
+            if (color > 7 || color > 4) continue;
+            target = Target::makeSpecial((::wisp::terminal::Special)color);
+        } else {
+            /* OSC104 maps 0-255 to palette, 256-259 to special offset
+             * by the palette count. */
+            if (color <= 255) {
+                target = Target::makePalette((uint8_t)color);
+            } else {
+                const unsigned sp = (unsigned)color - 256;
+                if (sp > 7 || sp > 4) continue;
+                target = Target::makeSpecial((::wisp::terminal::Special)sp);
+            }
+        }
+
+        Request *req = result->addOne();
+        if (!req) return false;
+        *req = Request();
+        req->tag = Request::Tag::reset;
+        req->reset = target;
+    }
+}
+
+/* OSC 10-19: Get/Set Dynamic Colors */
+inline bool parseGetSetDynamicColor(::wisp::terminal::Dynamic start,
+                                    TokenIterator *it, List *result) {
+    /* Note: in ANY error scenario below we return the accumulated results.
+     * This matches the xterm behavior (see misc.c ChangeColorsRequest) */
+
+    ::wisp::terminal::Dynamic color = start;
+    while (true) {
+        const char *spec_str;
+        size_t spec_len;
+        if (!it->next(&spec_str, &spec_len)) return true;
+
+        if (is_query(spec_str, spec_len)) {
+            Request *req = result->addOne();
+            if (!req) return false;
+            *req = Request();
+            req->tag = Request::Tag::query;
+            req->query = Target::makeDynamic(color);
+        } else {
+            ::wisp::terminal::RGB rgb;
+            if (::wisp::terminal::RGB::parse(spec_str, spec_len, &rgb) !=
+                ::wisp::terminal::ColorError::none) {
+                return true;
+            }
+            Request *req = result->addOne();
+            if (!req) return false;
+            *req = Request();
+            req->tag = Request::Tag::set;
+            req->set.target = Target::makeDynamic(color);
+            req->set.color = rgb;
+        }
+
+        /* Each successive value uses the next color so long as it exists. */
+        if (!::wisp::terminal::dynamic_next(color, &color)) return true;
+    }
+}
+
+/* OSC 110-119: Reset Dynamic Colors */
+inline bool parseResetDynamicColor(::wisp::terminal::Dynamic color,
+                                   TokenIterator *it, List *result) {
+    const char *tok;
+    size_t tok_len;
+    if (it->next(&tok, &tok_len)) return true;
+    Request *req = result->addOne();
+    if (!req) return false;
+    *req = Request();
+    req->tag = Request::Tag::reset;
+    req->reset = Target::makeDynamic(color);
+    return true;
+}
+
+/* Parse any color operation string. This should NOT include the operation
+ * itself, but only the body of the operation. e.g. for "4;a;b;c" the body
+ * should be "a;b;c" and the operation should be set accordingly.
+ *
+ * Color parsing is fairly complicated so we pull this out to a specialized
+ * function rather than go through our OSC parsing state machine. This is
+ * much slower and requires more memory (since we need to buffer the full
+ * request) but grants us an easier to understand and testable
+ * implementation.
+ *
+ * If color changing ends up being a bottleneck we can optimize this later.
+ *
+ * Wisp: ParseError!List is the bool return plus *out; false means an
+ * allocation failed. */
+inline bool parseColor(Operation op, const char *buf, size_t len, List *out) {
+    typedef ::wisp::terminal::Dynamic D;
+    TokenIterator it;
+    it.buf = buf;
+    it.len = len;
+    it.index = 0;
+    switch (op) {
+        case Operation::osc_4: return parseGetSetAnsiColor(Operation::osc_4, &it, out);
+        case Operation::osc_5: return parseGetSetAnsiColor(Operation::osc_5, &it, out);
+        case Operation::osc_104: return parseResetAnsiColor(Operation::osc_104, &it, out);
+        case Operation::osc_105: return parseResetAnsiColor(Operation::osc_105, &it, out);
+        case Operation::osc_10: return parseGetSetDynamicColor(D::foreground, &it, out);
+        case Operation::osc_11: return parseGetSetDynamicColor(D::background, &it, out);
+        case Operation::osc_12: return parseGetSetDynamicColor(D::cursor, &it, out);
+        case Operation::osc_13: return parseGetSetDynamicColor(D::pointer_foreground, &it, out);
+        case Operation::osc_14: return parseGetSetDynamicColor(D::pointer_background, &it, out);
+        case Operation::osc_15: return parseGetSetDynamicColor(D::tektronix_foreground, &it, out);
+        case Operation::osc_16: return parseGetSetDynamicColor(D::tektronix_background, &it, out);
+        case Operation::osc_17: return parseGetSetDynamicColor(D::highlight_background, &it, out);
+        case Operation::osc_18: return parseGetSetDynamicColor(D::tektronix_cursor, &it, out);
+        case Operation::osc_19: return parseGetSetDynamicColor(D::highlight_foreground, &it, out);
+        case Operation::osc_110: return parseResetDynamicColor(D::foreground, &it, out);
+        case Operation::osc_111: return parseResetDynamicColor(D::background, &it, out);
+        case Operation::osc_112: return parseResetDynamicColor(D::cursor, &it, out);
+        case Operation::osc_113: return parseResetDynamicColor(D::pointer_foreground, &it, out);
+        case Operation::osc_114: return parseResetDynamicColor(D::pointer_background, &it, out);
+        case Operation::osc_115: return parseResetDynamicColor(D::tektronix_foreground, &it, out);
+        case Operation::osc_116: return parseResetDynamicColor(D::tektronix_background, &it, out);
+        case Operation::osc_117: return parseResetDynamicColor(D::highlight_background, &it, out);
+        case Operation::osc_118: return parseResetDynamicColor(D::tektronix_cursor, &it, out);
+        case Operation::osc_119: return parseResetDynamicColor(D::highlight_foreground, &it, out);
+    }
+    return true;
+}
+
+/* Parse OSCs 4, 5, 10-19, 104, 110-119 */
+inline Command *parse(Parser *parser, bool has_ch, uint8_t terminator_ch) {
+    if (!parser->alloc) {
+        parser->state = Parser::State::invalid;
+        return nullptr;
+    }
+    /* If we've collected any extra data parse that, otherwise use an empty
+     * string. */
+    const char *data = "";
+    size_t data_len = 0;
+    if (parser->has_capture) {
+        data = parser->capture.trailing();
+        data_len = parser->capture.trailing_len();
+    }
+
+    /* Check and make sure that we're parsing the correct OSCs */
+    typedef Parser::State S;
+    Operation op;
+    switch (parser->state) {
+        case S::s4: op = Operation::osc_4; break;
+        case S::s5: op = Operation::osc_5; break;
+        case S::s10: op = Operation::osc_10; break;
+        case S::s11: op = Operation::osc_11; break;
+        case S::s12: op = Operation::osc_12; break;
+        case S::s13: op = Operation::osc_13; break;
+        case S::s14: op = Operation::osc_14; break;
+        case S::s15: op = Operation::osc_15; break;
+        case S::s16: op = Operation::osc_16; break;
+        case S::s17: op = Operation::osc_17; break;
+        case S::s18: op = Operation::osc_18; break;
+        case S::s19: op = Operation::osc_19; break;
+        case S::s104: op = Operation::osc_104; break;
+        case S::s110: op = Operation::osc_110; break;
+        case S::s111: op = Operation::osc_111; break;
+        case S::s112: op = Operation::osc_112; break;
+        case S::s113: op = Operation::osc_113; break;
+        case S::s114: op = Operation::osc_114; break;
+        case S::s115: op = Operation::osc_115; break;
+        case S::s116: op = Operation::osc_116; break;
+        case S::s117: op = Operation::osc_117; break;
+        case S::s118: op = Operation::osc_118; break;
+        case S::s119: op = Operation::osc_119; break;
+        default:
+            parser->state = S::invalid;
+            return nullptr;
+    }
+
+    parser->command = Command();
+    parser->command.key = Command::Key::color_operation;
+    parser->command.color_operation.op = op;
+    if (!parseColor(op, data, data_len, &parser->command.color_operation.requests)) {
+        /* log.info("failed to parse OSC ... color request") and an empty
+         * list, as upstream falls back to .{} */
+        parser->command.color_operation.requests.deinit();
+    }
+    parser->command.color_operation.terminator = terminator_init(has_ch, terminator_ch);
+    return &parser->command;
+}
+
+} /* namespace color */
+
 } /* namespace parsers */
 
 inline Command *Parser::end(bool has_ch, uint8_t ch) {
@@ -978,14 +1442,13 @@ inline Command *Parser::end(bool has_ch, uint8_t ch) {
         case S::s1:
             return parsers::change_window_icon::parse(this, has_ch, ch);
 
-        /* Wisp: parsers.color — not yet transliterated. */
         case S::s4: case S::s5:
         case S::s10: case S::s11: case S::s12: case S::s13: case S::s14:
         case S::s15: case S::s16: case S::s17: case S::s18: case S::s19:
         case S::s104:
         case S::s110: case S::s111: case S::s112: case S::s113: case S::s114:
         case S::s115: case S::s116: case S::s117: case S::s118: case S::s119:
-            return nullptr;
+            return parsers::color::parse(this, has_ch, ch);
 
         case S::s7:
             return parsers::report_pwd::parse(this, has_ch, ch);

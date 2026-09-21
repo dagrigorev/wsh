@@ -11,9 +11,6 @@
  *   a[1].? == .print       a.has(1) && a[1].tag == Tag::print
  *   d.params.len           d.params_len
  *   d.final                d.final_
- *
- * Not ported yet: "osc: 112 incomplete sequence" and "osc: 104 empty". They
- * inspect a color_operation command, which needs osc/parsers/color.zig.
  */
 
 #include "test_helpers.h"
@@ -413,6 +410,75 @@ TEST(parser, csi_change_cursor) {
         ASSERT_EQ(d.params_len, 1u);
         ASSERT_EQ(d.intermediates[0], ' ');
         ASSERT_EQ(d.params[0], 3);
+    }
+}
+
+TEST(parser, osc_112_incomplete_sequence) {
+    Parser p; /* init() */
+    p.osc_parser.alloc = true;
+
+    (void)p.next(0x1B);
+    (void)p.next(']');
+    (void)p.next('1');
+    (void)p.next('1');
+    (void)p.next('2');
+
+    {
+        const Next a = p.next(0x07);
+        ASSERT_TRUE(p.state == State::ground);
+        ASSERT_TRUE(a.has(0) && a[0].tag == Tag::osc_dispatch);
+        ASSERT_FALSE(a.has(1));
+        ASSERT_FALSE(a.has(2));
+
+        const wisp::terminal::osc::Command &cmd = a[0].osc_dispatch;
+        ASSERT_TRUE(cmd.key == wisp::terminal::osc::Command::Key::color_operation);
+        ASSERT_TRUE(cmd.color_operation.terminator == wisp::terminal::osc::Terminator::bel);
+        ASSERT_TRUE(cmd.color_operation.op == wisp::terminal::osc::color::Operation::osc_112);
+        ASSERT_TRUE(cmd.color_operation.requests.count() == 1);
+        auto it = cmd.color_operation.requests.constIterator(0);
+        {
+            const wisp::terminal::osc::color::Request *op = it.next();
+            ASSERT_TRUE(op != nullptr);
+            ASSERT_TRUE(op->tag == wisp::terminal::osc::color::Request::Tag::reset);
+            wisp::terminal::osc::color::Request want;
+            want.tag = wisp::terminal::osc::color::Request::Tag::reset;
+            want.reset = wisp::terminal::osc::color::Target::makeDynamic(
+                wisp::terminal::Dynamic::cursor);
+            ASSERT_TRUE(op->eql(want));
+        }
+        ASSERT_TRUE(it.next() == nullptr);
+    }
+}
+
+TEST(parser, osc_104_empty) {
+    Parser p; /* init() */
+    p.osc_parser.alloc = true;
+
+    (void)p.next(0x1B);
+    (void)p.next(']');
+    (void)p.next('1');
+    (void)p.next('0');
+    (void)p.next('4');
+
+    {
+        const Next a = p.next(0x07);
+        ASSERT_TRUE(p.state == State::ground);
+        ASSERT_TRUE(a.has(0) && a[0].tag == Tag::osc_dispatch);
+        ASSERT_FALSE(a.has(1));
+        ASSERT_FALSE(a.has(2));
+
+        const wisp::terminal::osc::Command &cmd = a[0].osc_dispatch;
+        ASSERT_TRUE(cmd.key == wisp::terminal::osc::Command::Key::color_operation);
+        ASSERT_TRUE(cmd.color_operation.terminator == wisp::terminal::osc::Terminator::bel);
+        ASSERT_TRUE(cmd.color_operation.op == wisp::terminal::osc::color::Operation::osc_104);
+        ASSERT_TRUE(cmd.color_operation.requests.count() == 1);
+        auto it = cmd.color_operation.requests.constIterator(0);
+        {
+            const wisp::terminal::osc::color::Request *op = it.next();
+            ASSERT_TRUE(op != nullptr);
+            ASSERT_TRUE(op->tag == wisp::terminal::osc::color::Request::Tag::reset_palette);
+        }
+        ASSERT_TRUE(it.next() == nullptr);
     }
 }
 
