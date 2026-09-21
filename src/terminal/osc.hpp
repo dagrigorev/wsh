@@ -4,8 +4,8 @@
  * report_pwd.zig, mouse_shape.zig, clipboard_operation.zig, color.zig,
  * kitty_color.zig, kitty_dnd_protocol.zig, rxvt_extension.zig,
  * kitty_text_sizing.zig, context_signal.zig, iterm2.zig,
- * kitty_clipboard_protocol.zig, semantic_prompt.zig, and
- * src/terminal/osc/kitty_metadata.zig
+ * kitty_clipboard_protocol.zig, semantic_prompt.zig, osc9.zig,
+ * kitty_desktop_notification.zig; and src/terminal/osc/kitty_metadata.zig
  * Copyright (c) 2024 Mitchell Hashimoto, Ghostty contributors
  * MIT License — see THIRD_PARTY_NOTICES.md
  *
@@ -26,13 +26,11 @@
  *
  * Comments are upstream's unless marked "Wisp:".
  *
- * Wisp: PARSERS NOT YET TRANSLITERATED. osc/parsers/ holds one file per
- * command family. Only the ones named above are here; the rest —
- * kitty_desktop_notification
- * — arrive in
- * later slices. Until then end() returns null for their states, exactly as
- * it would for an invalid sequence, and Command keeps a tag for each so the
- * dispatch in end() already has upstream's shape.
+ * Wisp: every file under osc/parsers/ is transliterated here. Upstream's
+ * types that live beside each parser (kitty_text_sizing.OSC,
+ * context_signal.Command, ...) are namespaces ahead of Command; the parse
+ * functions are under parsers::. kitty/color.zig is kitty/color.hpp and
+ * os/string_encoding.zig is ../os/string_encoding.hpp.
  */
 
 #pragma once
@@ -1175,6 +1173,351 @@ struct ProgressReport {
     }
 };
 
+/* ─── osc/parsers/kitty_desktop_notification.zig: types ────────────────── */
+
+/* Kitty's desktop notification protocol (OSC 99)
+ * Specification: https://sw.kovidgoyal.net/kitty/desktop-notifications/ */
+namespace kitty_desktop_notification {
+
+static const size_t MAX_PLAIN_PAYLOAD_BYTES = 2048;
+static const size_t MAX_ENCODED_PAYLOAD_BYTES = 4096;
+
+/* Wisp: std.meta.stringToEnum over a name table. */
+inline bool name_to_index(const char *const *names, size_t count,
+                          const char *s, size_t len, size_t *out) {
+    for (size_t i = 0; i < count; i++) {
+        if (strlen(names[i]) == len && memcmp(names[i], s, len) == 0) {
+            *out = i;
+            return true;
+        }
+    }
+    return false;
+}
+
+/* Wisp: packed struct { focus: bool, report: bool }. */
+struct Action {
+    bool focus;
+    bool report;
+
+    static Action default_() {
+        Action a;
+        a.focus = true;
+        a.report = false;
+        return a;
+    }
+
+    static Action make(bool focus, bool report) {
+        Action a;
+        a.focus = focus;
+        a.report = report;
+        return a;
+    }
+
+    bool eql(const Action &o) const { return focus == o.focus && report == o.report; }
+
+    static Action init(const char *str, size_t len);
+};
+
+/* This is similar to the packed struct parser used in the configs. The
+ * differences are that a literal `true` or `false` value does not turn on/off
+ * all the values, and the negation prefix is `-` not `no-`.
+ *
+ * Wisp: parsePackedStruct(Action, str), with Action's two fields spelled
+ * out in place of the inline for over @typeInfo. */
+inline Action Action::init(const char *str, size_t len) {
+    Action result = default_();
+
+    /* We split each value by "," */
+    size_t start = 0;
+    bool more = true;
+    while (more) {
+        const char *comma = (const char *)memchr(str + start, ',', len - start);
+        const size_t end = comma ? (size_t)(comma - str) : len;
+        const char *raw = str + start;
+        size_t raw_len = end - start;
+        if (comma) start = end + 1; else more = false;
+
+        /* Determine the field we're looking for and the value. If the
+         * field is prefixed with "-" then we set the value to false. */
+        while (raw_len > 0 && kitty_metadata::is_ascii_whitespace(raw[0])) { raw++; raw_len--; }
+        while (raw_len > 0 && kitty_metadata::is_ascii_whitespace(raw[raw_len - 1])) raw_len--;
+        const char *part = raw;
+        size_t part_len = raw_len;
+        bool value = true;
+        if (raw_len >= 1 && raw[0] == '-') {
+            part = raw + 1;
+            part_len = raw_len - 1;
+            value = false;
+        }
+
+        if (part_len == 5 && memcmp(part, "focus", 5) == 0) {
+            result.focus = value;
+            continue;
+        }
+        if (part_len == 6 && memcmp(part, "report", 6) == 0) {
+            result.report = value;
+            continue;
+        }
+
+        /* No field matched */
+        return default_();
+    }
+
+    return result;
+}
+
+enum class Occasion : uint8_t {
+    always,
+    invisible,
+    unfocused,
+};
+
+inline Occasion Occasion_init(const char *str, size_t len) {
+    static const char *const names[] = { "always", "invisible", "unfocused" };
+    size_t i;
+    if (!name_to_index(names, 3, str, len, &i)) return Occasion::always; /* .default */
+    return (Occasion)i;
+}
+
+enum class Payload : uint8_t {
+    alive,
+    body,
+    buttons,
+    close,
+    icon,
+    query,
+    title,
+    /* This is a special value to indicate that an unknown payload value was
+     * specified and it should be ignored. */
+    unknown,
+};
+
+inline Payload Payload_init(const char *str, size_t len) {
+    if (len == 1 && str[0] == '?') return Payload::query;
+    /* The string `query` is not allowed, it should be a single question
+     * mark if you want a query. */
+    if (len == 5 && memcmp(str, "query", 5) == 0) return Payload::unknown;
+    static const char *const names[] = {
+        "alive", "body", "buttons", "close", "icon", "query", "title", "unknown",
+    };
+    size_t i;
+    if (!name_to_index(names, 8, str, len, &i)) return Payload::unknown;
+    return (Payload)i;
+}
+
+enum class Urgency : uint8_t {
+    low,
+    normal,
+    high,
+};
+
+inline Urgency Urgency_init(const char *str, size_t len) {
+    if (len != 1) return Urgency::normal; /* .default */
+    switch (str[0]) {
+        case '0': return Urgency::low;
+        case '1': return Urgency::normal;
+        case '2': return Urgency::high;
+        default: return Urgency::normal;
+    }
+}
+
+enum class Option : uint8_t {
+    /* What action(s) should be taken when a notification is clicked. */
+    a,
+    /* Should a notification be sent to the application when the notification
+     * is closed? */
+    c,
+    /* Are we done with the notification, and it is ready to be sent? */
+    d,
+    /* Is the payload encoded with Base64? */
+    e,
+    /* The name of the application that is sending the notification. */
+    f,
+    /* Identifier for icon data. Only used when the payload is icon data. */
+    g,
+    /* Identifier for the notification. */
+    i,
+    /* Icon name. */
+    n,
+    /* When to honor the notification request. */
+    o,
+    /* Type of the payload. */
+    p,
+    /* The sound name to play with the notification. */
+    s,
+    /* The type of the notification. */
+    t,
+    /* The urgency of the notification. */
+    u,
+    /* When to auto-close the notification. */
+    w,
+};
+
+inline const char *Option_name(Option o) {
+    static const char *const names[] = {
+        "a", "c", "d", "e", "f", "g", "i", "n", "o", "p", "s", "t", "u", "w",
+    };
+    return names[(size_t)o];
+}
+
+/* Characters that are valid in identifiers. */
+static const char valid_identifier_characters[] =
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_+.";
+
+/* Characters that are valid in a metadata value. Including `=` is technically
+ * against the spec but is needed since Base64 encoded values (with padding)
+ * are valid for some options. Including `?` is technically against the spec
+ * but is needed since it is a valid value for the `p` option. */
+static const char valid_metadata_value_characters[] =
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_+."
+    "/,(){}[]*&^%$#@!`~=?";
+
+inline bool isValidIdentifier(const char *str, size_t len) {
+    for (size_t i = 0; i < len; i++) {
+        if (str[i] == 0 || !strchr(valid_identifier_characters, str[i])) return false;
+    }
+    return true;
+}
+
+/* Parse the protocol's booleans */
+inline bool parseBool(const char *str, size_t len, bool *out) {
+    if (len != 1) return false;
+    switch (str[0]) {
+        case '0': *out = false; return true;
+        case '1': *out = true; return true;
+        default: return false;
+    }
+}
+
+/* Read the option value from the raw metadata string.
+ *
+ * Unknown and malformed values are ignored. Optional values return null;
+ * all other values return the protocol default.
+ *
+ * Wisp: key.Type() depends on the option, so Option.read is one function per
+ * result type: Option_readAction (.a), Option_readBool (.c .d .e),
+ * Option_readOptional (.f .g .i, false for null), Option_readIterator
+ * (.n .t), Option_readOccasion (.o), Option_readPayload (.p),
+ * Option_readString (.s), Option_readUrgency (.u), Option_readW (.w). */
+inline kitty_metadata::ValueIterator Option_readIterator(Option key, const char *md, size_t len) {
+    /* assert(key is .n or .t) */
+    return kitty_metadata::ValueIterator(Option_name(key), valid_metadata_value_characters, md, len);
+}
+
+inline bool Option_first(Option key, const char *md, size_t len, ZStr *value) {
+    kitty_metadata::ValueIterator it(Option_name(key), valid_metadata_value_characters, md, len);
+    return it.next(value);
+}
+
+inline Action Option_readAction(const char *md, size_t len) {
+    ZStr v;
+    if (!Option_first(Option::a, md, len, &v)) return Action::default_();
+    return Action::init(v.ptr, v.len);
+}
+
+inline bool Option_readBool(Option key, const char *md, size_t len) {
+    /* assert(key is .c, .d or .e); defaults: c false, d true, e false */
+    const bool def = key == Option::d;
+    ZStr v;
+    if (!Option_first(key, md, len, &v)) return def;
+    bool b;
+    if (!parseBool(v.ptr, v.len, &b)) return def;
+    return b;
+}
+
+inline bool Option_readOptional(Option key, const char *md, size_t len, ZStr *out) {
+    /* assert(key is .f, .g or .i) */
+    ZStr v;
+    if (!Option_first(key, md, len, &v)) return false;
+    if (key == Option::g || key == Option::i) {
+        /* parseIdentifier */
+        if (!isValidIdentifier(v.ptr, v.len)) return false;
+    }
+    *out = v;
+    return true;
+}
+
+inline Occasion Option_readOccasion(const char *md, size_t len) {
+    ZStr v;
+    if (!Option_first(Option::o, md, len, &v)) return Occasion::always;
+    return Occasion_init(v.ptr, v.len);
+}
+
+inline Payload Option_readPayload(const char *md, size_t len) {
+    ZStr v;
+    if (!Option_first(Option::p, md, len, &v)) return Payload::title;
+    return Payload_init(v.ptr, v.len);
+}
+
+inline ZStr Option_readString(const char *md, size_t len) {
+    /* .s */
+    ZStr v;
+    if (!Option_first(Option::s, md, len, &v)) return ZStr("system", 6);
+    return v;
+}
+
+inline Urgency Option_readUrgency(const char *md, size_t len) {
+    ZStr v;
+    if (!Option_first(Option::u, md, len, &v)) return Urgency::normal;
+    return Urgency_init(v.ptr, v.len);
+}
+
+inline int32_t Option_readW(const char *md, size_t len) {
+    ZStr v;
+    if (!Option_first(Option::w, md, len, &v)) return -1;
+    /* Zig's integer parser allows '_', we don't */
+    if (memchr(v.ptr, '_', v.len)) return -1;
+    /* std.fmt.parseInt(i32, value, 10) */
+    size_t i = 0;
+    bool neg = false;
+    if (i < v.len && (v.ptr[i] == '+' || v.ptr[i] == '-')) {
+        neg = v.ptr[i] == '-';
+        i++;
+    }
+    if (i >= v.len) return -1;
+    int64_t r = 0;
+    for (; i < v.len; i++) {
+        if (v.ptr[i] < '0' || v.ptr[i] > '9') return -1;
+        r = r * 10 + (v.ptr[i] - '0');
+        if (r > (int64_t)INT32_MAX + 1) return -1;
+    }
+    if (neg) r = -r;
+    if (r > INT32_MAX || r < INT32_MIN) return -1;
+    /* negative values less than -1 are not allowed */
+    if (r < -1) return -1;
+    return (int32_t)r;
+}
+
+struct OSC {
+    /* The raw metadata that was received. It can be parsed by using the
+     * `readOption` method. */
+    ZStr metadata;
+    /* The raw payload. It may be Base64 encoded, check the `e` option. */
+    ZStr payload;
+    /* The terminator that was used in case we need to send a response. */
+    Terminator terminator;
+
+    OSC() : metadata(), payload(), terminator(Terminator::st) {}
+
+    /* Decode an option from the metadata. Wisp: one reader per result type,
+     * see Option_read* above. */
+    Action readA() const { return Option_readAction(metadata.ptr, metadata.len); }
+    bool readBool(Option key) const { return Option_readBool(key, metadata.ptr, metadata.len); }
+    bool readOptional(Option key, ZStr *out) const {
+        return Option_readOptional(key, metadata.ptr, metadata.len, out);
+    }
+    kitty_metadata::ValueIterator readIterator(Option key) const {
+        return Option_readIterator(key, metadata.ptr, metadata.len);
+    }
+    Occasion readO() const { return Option_readOccasion(metadata.ptr, metadata.len); }
+    Payload readP() const { return Option_readPayload(metadata.ptr, metadata.len); }
+    ZStr readS() const { return Option_readString(metadata.ptr, metadata.len); }
+    Urgency readU() const { return Option_readUrgency(metadata.ptr, metadata.len); }
+    int32_t readW() const { return Option_readW(metadata.ptr, metadata.len); }
+};
+
+} /* namespace kitty_desktop_notification */
+
 struct Command {
     /* NOTE: Order matters, see LibEnum documentation. */
     enum class Key : uint8_t {
@@ -1289,6 +1632,9 @@ struct Command {
 
     /* OSC 133 and OSC 9;12 semantic prompts */
     semantic_prompt::Command semantic_prompt;
+
+    /* Kitty desktop notifications (OSC 99) */
+    kitty_desktop_notification::OSC kitty_desktop_notification;
 
     /* Kitty clipboard protocol (OSC 5522) */
     kitty_clipboard_protocol::OSC kitty_clipboard_protocol;
@@ -2928,6 +3274,58 @@ not_conemu:
 }
 } /* namespace osc9 */
 
+namespace kitty_desktop_notification {
+inline Command *parse(Parser *parser, bool has_ch, uint8_t terminator_ch) {
+    namespace kdn = ::wisp::terminal::osc::kitty_desktop_notification;
+    /* assert(parser.state == .@"99") */
+
+    if (!parser->has_capture) {
+        parser->state = Parser::State::invalid;
+        return nullptr;
+    }
+    Parser::Capture *cap = &parser->capture;
+
+    const char *data = cap->trailing();
+    const size_t data_len = cap->trailing_len();
+
+    const char *semi = (const char *)memchr(data, ';', data_len);
+    if (!semi) {
+        /* log.warn("missing semicolon before payload") */
+        parser->state = Parser::State::invalid;
+        return nullptr;
+    }
+    const size_t payload_start = (size_t)(semi - data);
+
+    const ZStr metadata(data, payload_start);
+    const ZStr payload(data + payload_start + 1, data_len - (payload_start + 1));
+
+    const size_t max_payload_bytes =
+        kdn::Option_readBool(kdn::Option::e, metadata.ptr, metadata.len)
+            ? kdn::MAX_ENCODED_PAYLOAD_BYTES
+            : kdn::MAX_PLAIN_PAYLOAD_BYTES;
+    if (payload.len > max_payload_bytes) {
+        /* log.warn("payload is too large: size={d} max={d}") */
+        parser->state = Parser::State::invalid;
+        return nullptr;
+    }
+
+    /* Payload has to be an escape-code-safe UTF-8 string. */
+    if (!isSafeUtf8(payload.ptr, payload.len)) {
+        /* log.warn("payload is not escape code safe UTF-8") */
+        parser->state = Parser::State::invalid;
+        return nullptr;
+    }
+
+    parser->command = Command();
+    parser->command.key = Command::Key::kitty_desktop_notification;
+    parser->command.kitty_desktop_notification.metadata = metadata;
+    parser->command.kitty_desktop_notification.payload = payload;
+    parser->command.kitty_desktop_notification.terminator = terminator_init(has_ch, terminator_ch);
+
+    return &parser->command;
+}
+} /* namespace kitty_desktop_notification */
+
 namespace kitty_dnd_protocol {
 inline Command *parse(Parser *parser, bool has_ch, uint8_t terminator_ch) {
     /* assert(parser.state == .@"72") */
@@ -3388,9 +3786,8 @@ inline Command *Parser::end(bool has_ch, uint8_t ch) {
 
         case S::s77: return nullptr;
 
-        /* Wisp: parsers.kitty_desktop_notification — not yet
-         * transliterated. */
-        case S::s99: return nullptr;
+        case S::s99:
+            return parsers::kitty_desktop_notification::parse(this, has_ch, ch);
 
         case S::s133:
             return parsers::semantic_prompt::parse(this, has_ch, ch);

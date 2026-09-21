@@ -2978,3 +2978,770 @@ TEST(osc9, OSC_9_12_ConEmu_mark_prompt_start_2) {
     const Command &cmd = *cmdp;
     ASSERT_TRUE(cmd.key == Command::Key::semantic_prompt);
 }
+
+/* kitty_desktop_notification.zig */
+
+namespace kdn = wisp::terminal::osc::kitty_desktop_notification;
+
+TEST(kitty_desktop_notification, OSC_99_empty_metadata_and_payload) {
+    Parser p; /* .init(null) */
+    const char *input = "99;;";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end('\x1b');
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::kitty_desktop_notification);
+    ASSERT_TRUE(cmd.kitty_desktop_notification.metadata.eql(""));
+    ASSERT_TRUE(cmd.kitty_desktop_notification.payload.eql(""));
+    ASSERT_TRUE(cmd.kitty_desktop_notification.readA().eql(kdn::Action::default_()));
+    ASSERT_TRUE(cmd.kitty_desktop_notification.readBool(kdn::Option::c) == false);
+    ASSERT_TRUE(cmd.kitty_desktop_notification.readBool(kdn::Option::d) == true);
+    ASSERT_TRUE(cmd.kitty_desktop_notification.readBool(kdn::Option::e) == false);
+    { ZStr v; ASSERT_FALSE(cmd.kitty_desktop_notification.readOptional(kdn::Option::f, &v)); }
+    { ZStr v; ASSERT_FALSE(cmd.kitty_desktop_notification.readOptional(kdn::Option::g, &v)); }
+    { ZStr v; ASSERT_FALSE(cmd.kitty_desktop_notification.readOptional(kdn::Option::i, &v)); }
+    {
+        kitty_metadata::ValueIterator it = cmd.kitty_desktop_notification.readIterator(kdn::Option::n);
+        ZStr v;
+        ASSERT_FALSE(it.next(&v));
+    }
+    ASSERT_TRUE(cmd.kitty_desktop_notification.readO() == kdn::Occasion::always);
+    ASSERT_TRUE(cmd.kitty_desktop_notification.readP() == kdn::Payload::title);
+    ASSERT_TRUE(cmd.kitty_desktop_notification.readS().eql("system"));
+    {
+        kitty_metadata::ValueIterator it = cmd.kitty_desktop_notification.readIterator(kdn::Option::t);
+        ZStr v;
+        ASSERT_FALSE(it.next(&v));
+    }
+    ASSERT_TRUE(cmd.kitty_desktop_notification.readU() == kdn::Urgency::normal);
+    ASSERT_TRUE(cmd.kitty_desktop_notification.readW() == -1);
+    ASSERT_TRUE(cmd.kitty_desktop_notification.terminator == Terminator::st);
+}
+
+TEST(kitty_desktop_notification, OSC_99_empty_metadata_with_payload) {
+    Parser p; /* .init(null) */
+    const char *input = "99;;bobr";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end('\x1b');
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::kitty_desktop_notification);
+    ASSERT_TRUE(cmd.kitty_desktop_notification.metadata.eql(""));
+    ASSERT_TRUE(cmd.kitty_desktop_notification.payload.eql("bobr"));
+    ASSERT_TRUE(cmd.kitty_desktop_notification.readA().eql(kdn::Action::default_()));
+    ASSERT_TRUE(cmd.kitty_desktop_notification.readBool(kdn::Option::c) == false);
+    ASSERT_TRUE(cmd.kitty_desktop_notification.readBool(kdn::Option::d) == true);
+    ASSERT_TRUE(cmd.kitty_desktop_notification.readBool(kdn::Option::e) == false);
+    { ZStr v; ASSERT_FALSE(cmd.kitty_desktop_notification.readOptional(kdn::Option::f, &v)); }
+    { ZStr v; ASSERT_FALSE(cmd.kitty_desktop_notification.readOptional(kdn::Option::g, &v)); }
+    { ZStr v; ASSERT_FALSE(cmd.kitty_desktop_notification.readOptional(kdn::Option::i, &v)); }
+    {
+        kitty_metadata::ValueIterator it = cmd.kitty_desktop_notification.readIterator(kdn::Option::n);
+        ZStr v;
+        ASSERT_FALSE(it.next(&v));
+    }
+    ASSERT_TRUE(cmd.kitty_desktop_notification.readO() == kdn::Occasion::always);
+    ASSERT_TRUE(cmd.kitty_desktop_notification.readP() == kdn::Payload::title);
+    ASSERT_TRUE(cmd.kitty_desktop_notification.readS().eql("system"));
+    {
+        kitty_metadata::ValueIterator it = cmd.kitty_desktop_notification.readIterator(kdn::Option::t);
+        ZStr v;
+        ASSERT_FALSE(it.next(&v));
+    }
+    ASSERT_TRUE(cmd.kitty_desktop_notification.readU() == kdn::Urgency::normal);
+    ASSERT_TRUE(cmd.kitty_desktop_notification.readW() == -1);
+}
+
+TEST(kitty_desktop_notification, OSC_99_payload_size_limits) {
+    struct Case {
+        const char *metadata;
+        size_t payload_size;
+        bool valid;
+    };
+    const Case cases[] = {
+        { "", kdn::MAX_PLAIN_PAYLOAD_BYTES, true },
+        { "", kdn::MAX_PLAIN_PAYLOAD_BYTES + 1, false },
+        { "e=1", kdn::MAX_ENCODED_PAYLOAD_BYTES, true },
+        { "e=1", kdn::MAX_ENCODED_PAYLOAD_BYTES + 1, false },
+    };
+
+    for (size_t k = 0; k < sizeof(cases) / sizeof(cases[0]); k++) {
+        const Case &c = cases[k];
+        Parser p(true);
+
+        for (const char *ch = "99;"; *ch; ch++) p.next((uint8_t)*ch);
+        for (const char *ch = c.metadata; *ch; ch++) p.next((uint8_t)*ch);
+        p.next(';');
+        for (size_t i = 0; i < c.payload_size; i++) p.next('a');
+
+        ASSERT_TRUE(c.valid == (p.end('\x1b') != nullptr));
+    }
+}
+
+TEST(kitty_desktop_notification, OSC_99_unknown_prefix_does_not_hide_dotted_identifier) {
+    Parser p; /* .init(null) */
+    const char *input = "99;invalid=wrong:i=org.ghostty;payload";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+
+    Command *cmdp = p.end('\x1b');
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ZStr v;
+    ASSERT_TRUE(cmd.kitty_desktop_notification.readOptional(kdn::Option::i, &v) &&
+                v.eql("org.ghostty"));
+}
+
+TEST(kitty_desktop_notification, OSC_99_single_parameter_i) {
+    Parser p; /* .init(null) */
+    const char *input = "99;i=bobr;payload";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end('\x1b');
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::kitty_desktop_notification);
+    { ZStr v; ASSERT_TRUE(cmd.kitty_desktop_notification.readOptional(kdn::Option::i, &v) && v.eql("bobr")); }
+    ASSERT_TRUE(cmd.kitty_desktop_notification.payload.eql("payload"));
+}
+
+TEST(kitty_desktop_notification, OSC_99_repeated_parameter_i) {
+    Parser p; /* .init(null) */
+    const char *input = "99;i=bobr:i=foobar;payload";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end('\x1b');
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::kitty_desktop_notification);
+    { ZStr v; ASSERT_TRUE(cmd.kitty_desktop_notification.readOptional(kdn::Option::i, &v) && v.eql("bobr")); }
+    ASSERT_TRUE(cmd.kitty_desktop_notification.payload.eql("payload"));
+}
+
+TEST(kitty_desktop_notification, OSC_99_multiple_types) {
+    Parser p; /* .init(null) */
+    const char *input = "99;t=mail: t = chat : t = alert ;notification";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end('\x1b');
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::kitty_desktop_notification);
+    ASSERT_TRUE(cmd.kitty_desktop_notification.payload.eql("notification"));
+    kitty_metadata::ValueIterator it = cmd.kitty_desktop_notification.readIterator(kdn::Option::t);
+    ZStr v;
+    ASSERT_TRUE(it.next(&v) && v.eql("mail"));
+    ASSERT_TRUE(it.next(&v) && v.eql("chat"));
+    ASSERT_TRUE(it.next(&v) && v.eql("alert"));
+    ASSERT_FALSE(it.next(&v));
+}
+
+TEST(kitty_desktop_notification, OSC_99_a_1) {
+    Parser p; /* .init(null) */
+    const char *input = "99;a=report,focus;foobar";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end('\x1b');
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::kitty_desktop_notification);
+    ASSERT_TRUE(cmd.kitty_desktop_notification.payload.eql("foobar"));
+    ASSERT_TRUE(cmd.kitty_desktop_notification.readA().eql(kdn::Action::make(true, true)));
+}
+
+TEST(kitty_desktop_notification, OSC_99_a_2) {
+    Parser p; /* .init(null) */
+    const char *input = "99;a=report,-focus;foobar";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end('\x1b');
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::kitty_desktop_notification);
+    ASSERT_TRUE(cmd.kitty_desktop_notification.payload.eql("foobar"));
+    ASSERT_TRUE(cmd.kitty_desktop_notification.readA().eql(kdn::Action::make(false, true)));
+}
+
+TEST(kitty_desktop_notification, OSC_99_a_3) {
+    Parser p; /* .init(null) */
+    const char *input = "99;a=-report,focus;foobar";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end('\x1b');
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::kitty_desktop_notification);
+    ASSERT_TRUE(cmd.kitty_desktop_notification.payload.eql("foobar"));
+    ASSERT_TRUE(cmd.kitty_desktop_notification.readA().eql(kdn::Action::make(true, false)));
+}
+
+TEST(kitty_desktop_notification, OSC_99_a_4) {
+    Parser p; /* .init(null) */
+    const char *input = "99;a=-report,-focus;foobar";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end('\x1b');
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::kitty_desktop_notification);
+    ASSERT_TRUE(cmd.kitty_desktop_notification.payload.eql("foobar"));
+    ASSERT_TRUE(cmd.kitty_desktop_notification.readA().eql(kdn::Action::make(false, false)));
+}
+
+TEST(kitty_desktop_notification, OSC_99_c_1) {
+    Parser p; /* .init(null) */
+    const char *input = "99;c=0;foobar";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end('\x1b');
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::kitty_desktop_notification);
+    ASSERT_TRUE(cmd.kitty_desktop_notification.payload.eql("foobar"));
+    ASSERT_TRUE(cmd.kitty_desktop_notification.readBool(kdn::Option::c) == false);
+}
+
+TEST(kitty_desktop_notification, OSC_99_c_2) {
+    Parser p; /* .init(null) */
+    const char *input = "99;c=1;foobar";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end('\x1b');
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::kitty_desktop_notification);
+    ASSERT_TRUE(cmd.kitty_desktop_notification.payload.eql("foobar"));
+    ASSERT_TRUE(cmd.kitty_desktop_notification.readBool(kdn::Option::c) == true);
+}
+
+TEST(kitty_desktop_notification, OSC_99_c_3) {
+    Parser p; /* .init(null) */
+    const char *input = "99;c=bobr;foobar";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end('\x1b');
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::kitty_desktop_notification);
+    ASSERT_TRUE(cmd.kitty_desktop_notification.payload.eql("foobar"));
+    ASSERT_TRUE(cmd.kitty_desktop_notification.readBool(kdn::Option::c) == false);
+}
+
+TEST(kitty_desktop_notification, OSC_99_d_1) {
+    Parser p; /* .init(null) */
+    const char *input = "99;d=0;foobar";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end('\x1b');
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::kitty_desktop_notification);
+    ASSERT_TRUE(cmd.kitty_desktop_notification.payload.eql("foobar"));
+    ASSERT_TRUE(cmd.kitty_desktop_notification.readBool(kdn::Option::d) == false);
+}
+
+TEST(kitty_desktop_notification, OSC_99_d_2) {
+    Parser p; /* .init(null) */
+    const char *input = "99;d=1;foobar";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end('\x1b');
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::kitty_desktop_notification);
+    ASSERT_TRUE(cmd.kitty_desktop_notification.payload.eql("foobar"));
+    ASSERT_TRUE(cmd.kitty_desktop_notification.readBool(kdn::Option::d) == true);
+}
+
+TEST(kitty_desktop_notification, OSC_99_d_3) {
+    Parser p; /* .init(null) */
+    const char *input = "99;d=bobr;foobar";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end('\x1b');
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::kitty_desktop_notification);
+    ASSERT_TRUE(cmd.kitty_desktop_notification.payload.eql("foobar"));
+    ASSERT_TRUE(cmd.kitty_desktop_notification.readBool(kdn::Option::d) == true);
+}
+
+TEST(kitty_desktop_notification, OSC_99_e_1) {
+    Parser p; /* .init(null) */
+    const char *input = "99;e=0;foobar";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end('\x1b');
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::kitty_desktop_notification);
+    ASSERT_TRUE(cmd.kitty_desktop_notification.payload.eql("foobar"));
+    ASSERT_TRUE(cmd.kitty_desktop_notification.readBool(kdn::Option::e) == false);
+}
+
+TEST(kitty_desktop_notification, OSC_99_e_2) {
+    Parser p; /* .init(null) */
+    const char *input = "99;e=1;foobar";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end('\x1b');
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::kitty_desktop_notification);
+    ASSERT_TRUE(cmd.kitty_desktop_notification.payload.eql("foobar"));
+    ASSERT_TRUE(cmd.kitty_desktop_notification.readBool(kdn::Option::e) == true);
+}
+
+TEST(kitty_desktop_notification, OSC_99_e_3) {
+    Parser p; /* .init(null) */
+    const char *input = "99;e=bobr;foobar";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end('\x1b');
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::kitty_desktop_notification);
+    ASSERT_TRUE(cmd.kitty_desktop_notification.payload.eql("foobar"));
+    ASSERT_TRUE(cmd.kitty_desktop_notification.readBool(kdn::Option::e) == false);
+}
+
+TEST(kitty_desktop_notification, OSC_99_f_1) {
+    Parser p; /* .init(null) */
+    const char *input = "99;f=R2hvc3R0eQ==;foobar";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end('\x1b');
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::kitty_desktop_notification);
+    ASSERT_TRUE(cmd.kitty_desktop_notification.payload.eql("foobar"));
+    { ZStr v; ASSERT_TRUE(cmd.kitty_desktop_notification.readOptional(kdn::Option::f, &v) && v.eql("R2hvc3R0eQ==")); }
+}
+
+TEST(kitty_desktop_notification, OSC_99_f_2) {
+    Parser p; /* .init(null) */
+    const char *input = "99;c=0:f= R2hvc3R0eQ== ;foobar";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end('\x1b');
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::kitty_desktop_notification);
+    ASSERT_TRUE(cmd.kitty_desktop_notification.payload.eql("foobar"));
+    { ZStr v; ASSERT_TRUE(cmd.kitty_desktop_notification.readOptional(kdn::Option::f, &v) && v.eql("R2hvc3R0eQ==")); }
+}
+
+TEST(kitty_desktop_notification, OSC_99_g_1) {
+    Parser p; /* .init(null) */
+    const char *input = "99;c=0:g=7f8a9129-a35d-4e9f-8043-ce2700e15e2c;foobar";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end('\x1b');
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::kitty_desktop_notification);
+    ASSERT_TRUE(cmd.kitty_desktop_notification.payload.eql("foobar"));
+    { ZStr v; ASSERT_TRUE(cmd.kitty_desktop_notification.readOptional(kdn::Option::g, &v) && v.eql("7f8a9129-a35d-4e9f-8043-ce2700e15e2c")); }
+}
+
+TEST(kitty_desktop_notification, OSC_99_g_2) {
+    Parser p; /* .init(null) */
+    const char *input = "99;c=0:g=aaa*bbb;foobar";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end('\x1b');
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::kitty_desktop_notification);
+    ASSERT_TRUE(cmd.kitty_desktop_notification.payload.eql("foobar"));
+    { ZStr v; ASSERT_FALSE(cmd.kitty_desktop_notification.readOptional(kdn::Option::g, &v)); }
+}
+
+TEST(kitty_desktop_notification, OSC_99_i_1) {
+    Parser p; /* .init(null) */
+    const char *input = "99;;foobar";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end('\x1b');
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::kitty_desktop_notification);
+    ASSERT_TRUE(cmd.kitty_desktop_notification.payload.eql("foobar"));
+    { ZStr v; ASSERT_FALSE(cmd.kitty_desktop_notification.readOptional(kdn::Option::i, &v)); }
+}
+
+TEST(kitty_desktop_notification, OSC_99_i_2) {
+    Parser p; /* .init(null) */
+    const char *input = "99;i=bobr;foobar";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end('\x1b');
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::kitty_desktop_notification);
+    ASSERT_TRUE(cmd.kitty_desktop_notification.payload.eql("foobar"));
+    { ZStr v; ASSERT_TRUE(cmd.kitty_desktop_notification.readOptional(kdn::Option::i, &v) && v.eql("bobr")); }
+}
+
+TEST(kitty_desktop_notification, OSC_99_i_3) {
+    Parser p; /* .init(null) */
+    const char *input = "99;i=;foobar";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end('\x1b');
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::kitty_desktop_notification);
+    ASSERT_TRUE(cmd.kitty_desktop_notification.payload.eql("foobar"));
+    { ZStr v; ASSERT_TRUE(cmd.kitty_desktop_notification.readOptional(kdn::Option::i, &v) && v.eql("")); }
+}
+
+TEST(kitty_desktop_notification, OSC_99_i_4) {
+    Parser p; /* .init(null) */
+    const char *input = "99;i= :;foobar";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end('\x1b');
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::kitty_desktop_notification);
+    ASSERT_TRUE(cmd.kitty_desktop_notification.payload.eql("foobar"));
+    { ZStr v; ASSERT_TRUE(cmd.kitty_desktop_notification.readOptional(kdn::Option::i, &v) && v.eql("")); }
+}
+
+TEST(kitty_desktop_notification, OSC_99_i_5) {
+    Parser p; /* .init(null) */
+    const char *input = "99;i= bobr ;foobar";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end('\x1b');
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::kitty_desktop_notification);
+    ASSERT_TRUE(cmd.kitty_desktop_notification.payload.eql("foobar"));
+    { ZStr v; ASSERT_TRUE(cmd.kitty_desktop_notification.readOptional(kdn::Option::i, &v) && v.eql("bobr")); }
+}
+
+TEST(kitty_desktop_notification, OSC_99_i_6) {
+    Parser p; /* .init(null) */
+    const char *input = "99;i= bobr : i=kurwa ;foobar";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end('\x1b');
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::kitty_desktop_notification);
+    ASSERT_TRUE(cmd.kitty_desktop_notification.payload.eql("foobar"));
+    { ZStr v; ASSERT_TRUE(cmd.kitty_desktop_notification.readOptional(kdn::Option::i, &v) && v.eql("bobr")); }
+}
+
+TEST(kitty_desktop_notification, OSC_99_n_1) {
+    Parser p; /* .init(null) */
+    const char *input = "99;n=R2hvc3R0eQ==;foobar";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end('\x1b');
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::kitty_desktop_notification);
+    ASSERT_TRUE(cmd.kitty_desktop_notification.payload.eql("foobar"));
+    kitty_metadata::ValueIterator it = cmd.kitty_desktop_notification.readIterator(kdn::Option::n);
+    ZStr v;
+    ASSERT_TRUE(it.next(&v) && v.eql("R2hvc3R0eQ=="));
+    ASSERT_FALSE(it.next(&v));
+}
+
+TEST(kitty_desktop_notification, OSC_99_n_2) {
+    Parser p; /* .init(null) */
+    const char *input = "99;n=R2hvc3R0eQ==:n=R2hvc3R0eQ==;foobar";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end('\x1b');
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::kitty_desktop_notification);
+    ASSERT_TRUE(cmd.kitty_desktop_notification.payload.eql("foobar"));
+    kitty_metadata::ValueIterator it = cmd.kitty_desktop_notification.readIterator(kdn::Option::n);
+    ZStr v;
+    ASSERT_TRUE(it.next(&v) && v.eql("R2hvc3R0eQ=="));
+    ASSERT_TRUE(it.next(&v) && v.eql("R2hvc3R0eQ=="));
+    ASSERT_FALSE(it.next(&v));
+}
+
+TEST(kitty_desktop_notification, OSC_99_o_1) {
+    Parser p; /* .init(null) */
+    const char *input = "99;o= ;foobar";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end('\x1b');
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::kitty_desktop_notification);
+    ASSERT_TRUE(cmd.kitty_desktop_notification.payload.eql("foobar"));
+    ASSERT_TRUE(cmd.kitty_desktop_notification.readO() == kdn::Occasion::always);
+}
+
+TEST(kitty_desktop_notification, OSC_99_o_2) {
+    Parser p; /* .init(null) */
+    const char *input = "99;o=always;foobar";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end('\x1b');
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::kitty_desktop_notification);
+    ASSERT_TRUE(cmd.kitty_desktop_notification.payload.eql("foobar"));
+    ASSERT_TRUE(cmd.kitty_desktop_notification.readO() == kdn::Occasion::always);
+}
+
+TEST(kitty_desktop_notification, OSC_99_o_3) {
+    Parser p; /* .init(null) */
+    const char *input = "99;o=unfocused;foobar";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end('\x1b');
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::kitty_desktop_notification);
+    ASSERT_TRUE(cmd.kitty_desktop_notification.payload.eql("foobar"));
+    ASSERT_TRUE(cmd.kitty_desktop_notification.readO() == kdn::Occasion::unfocused);
+}
+
+TEST(kitty_desktop_notification, OSC_99_o_4) {
+    Parser p; /* .init(null) */
+    const char *input = "99;o=invisible;foobar";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end('\x1b');
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::kitty_desktop_notification);
+    ASSERT_TRUE(cmd.kitty_desktop_notification.payload.eql("foobar"));
+    ASSERT_TRUE(cmd.kitty_desktop_notification.readO() == kdn::Occasion::invisible);
+}
+
+TEST(kitty_desktop_notification, OSC_99_o_5) {
+    Parser p; /* .init(null) */
+    const char *input = "99;o=bobr;foobar";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end('\x1b');
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::kitty_desktop_notification);
+    ASSERT_TRUE(cmd.kitty_desktop_notification.payload.eql("foobar"));
+    ASSERT_TRUE(cmd.kitty_desktop_notification.readO() == kdn::Occasion::always);
+}
+
+TEST(kitty_desktop_notification, OSC_99_p_1) {
+    Parser p; /* .init(null) */
+    const char *input = "99;p=alive;foobar";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end('\x1b');
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::kitty_desktop_notification);
+    ASSERT_TRUE(cmd.kitty_desktop_notification.payload.eql("foobar"));
+    ASSERT_TRUE(cmd.kitty_desktop_notification.readP() == kdn::Payload::alive);
+}
+
+TEST(kitty_desktop_notification, OSC_99_p_2) {
+    Parser p; /* .init(null) */
+    const char *input = "99;p=body;foobar";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end('\x1b');
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::kitty_desktop_notification);
+    ASSERT_TRUE(cmd.kitty_desktop_notification.payload.eql("foobar"));
+    ASSERT_TRUE(cmd.kitty_desktop_notification.readP() == kdn::Payload::body);
+}
+
+TEST(kitty_desktop_notification, OSC_99_p_3) {
+    Parser p; /* .init(null) */
+    const char *input = "99;p=buttons;foobar";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end('\x1b');
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::kitty_desktop_notification);
+    ASSERT_TRUE(cmd.kitty_desktop_notification.payload.eql("foobar"));
+    ASSERT_TRUE(cmd.kitty_desktop_notification.readP() == kdn::Payload::buttons);
+}
+
+TEST(kitty_desktop_notification, OSC_99_p_4) {
+    Parser p; /* .init(null) */
+    const char *input = "99;p=close;foobar";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end('\x1b');
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::kitty_desktop_notification);
+    ASSERT_TRUE(cmd.kitty_desktop_notification.payload.eql("foobar"));
+    ASSERT_TRUE(cmd.kitty_desktop_notification.readP() == kdn::Payload::close);
+}
+
+TEST(kitty_desktop_notification, OSC_99_p_5) {
+    Parser p; /* .init(null) */
+    const char *input = "99;p=icon;foobar";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end('\x1b');
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::kitty_desktop_notification);
+    ASSERT_TRUE(cmd.kitty_desktop_notification.payload.eql("foobar"));
+    ASSERT_TRUE(cmd.kitty_desktop_notification.readP() == kdn::Payload::icon);
+}
+
+TEST(kitty_desktop_notification, OSC_99_p_6) {
+    Parser p; /* .init(null) */
+    const char *input = "99;p=?;foobar";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end('\x1b');
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::kitty_desktop_notification);
+    ASSERT_TRUE(cmd.kitty_desktop_notification.payload.eql("foobar"));
+    ASSERT_TRUE(cmd.kitty_desktop_notification.readP() == kdn::Payload::query);
+}
+
+TEST(kitty_desktop_notification, OSC_99_p_7) {
+    Parser p; /* .init(null) */
+    const char *input = "99;p=title;foobar";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end('\x1b');
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::kitty_desktop_notification);
+    ASSERT_TRUE(cmd.kitty_desktop_notification.payload.eql("foobar"));
+    ASSERT_TRUE(cmd.kitty_desktop_notification.readP() == kdn::Payload::title);
+}
+
+TEST(kitty_desktop_notification, OSC_99_p_8) {
+    Parser p; /* .init(null) */
+    const char *input = "99;p=query;foobar";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end('\x1b');
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::kitty_desktop_notification);
+    ASSERT_TRUE(cmd.kitty_desktop_notification.payload.eql("foobar"));
+    ASSERT_TRUE(cmd.kitty_desktop_notification.readP() == kdn::Payload::unknown);
+}
+
+TEST(kitty_desktop_notification, OSC_99_p_9) {
+    Parser p; /* .init(null) */
+    const char *input = "99;p=bobr;foobar";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end('\x1b');
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::kitty_desktop_notification);
+    ASSERT_TRUE(cmd.kitty_desktop_notification.payload.eql("foobar"));
+    ASSERT_TRUE(cmd.kitty_desktop_notification.readP() == kdn::Payload::unknown);
+}
+
+TEST(kitty_desktop_notification, OSC_99_s_1) {
+    Parser p; /* .init(null) */
+    const char *input = "99;s=R2hvc3R0eQ==;foobar";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end('\x1b');
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::kitty_desktop_notification);
+    ASSERT_TRUE(cmd.kitty_desktop_notification.payload.eql("foobar"));
+    ASSERT_TRUE(cmd.kitty_desktop_notification.readS().eql("R2hvc3R0eQ=="));
+}
+
+TEST(kitty_desktop_notification, OSC_99_t_1) {
+    Parser p; /* .init(null) */
+    const char *input = "99;t=R2hvc3R0eQ==;foobar";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end('\x1b');
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::kitty_desktop_notification);
+    ASSERT_TRUE(cmd.kitty_desktop_notification.payload.eql("foobar"));
+    kitty_metadata::ValueIterator it = cmd.kitty_desktop_notification.readIterator(kdn::Option::t);
+    ZStr v;
+    ASSERT_TRUE(it.next(&v) && v.eql("R2hvc3R0eQ=="));
+    ASSERT_FALSE(it.next(&v));
+}
+
+TEST(kitty_desktop_notification, OSC_99_t_2) {
+    Parser p; /* .init(null) */
+    const char *input = "99;t=R2hvc3R0eQ==:t=R2hvc3R0eQ==;foobar";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end('\x1b');
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::kitty_desktop_notification);
+    ASSERT_TRUE(cmd.kitty_desktop_notification.payload.eql("foobar"));
+    kitty_metadata::ValueIterator it = cmd.kitty_desktop_notification.readIterator(kdn::Option::t);
+    ZStr v;
+    ASSERT_TRUE(it.next(&v) && v.eql("R2hvc3R0eQ=="));
+    ASSERT_TRUE(it.next(&v) && v.eql("R2hvc3R0eQ=="));
+    ASSERT_FALSE(it.next(&v));
+}
+
+TEST(kitty_desktop_notification, OSC_99_u_1) {
+    Parser p; /* .init(null) */
+    const char *input = "99;u=0;foobar";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end('\x1b');
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::kitty_desktop_notification);
+    ASSERT_TRUE(cmd.kitty_desktop_notification.payload.eql("foobar"));
+    ASSERT_TRUE(cmd.kitty_desktop_notification.readU() == kdn::Urgency::low);
+}
+
+TEST(kitty_desktop_notification, OSC_99_u_2) {
+    Parser p; /* .init(null) */
+    const char *input = "99;u=1;foobar";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end('\x1b');
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::kitty_desktop_notification);
+    ASSERT_TRUE(cmd.kitty_desktop_notification.payload.eql("foobar"));
+    ASSERT_TRUE(cmd.kitty_desktop_notification.readU() == kdn::Urgency::normal);
+}
+
+TEST(kitty_desktop_notification, OSC_99_u_3) {
+    Parser p; /* .init(null) */
+    const char *input = "99;u=2;foobar";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end('\x1b');
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::kitty_desktop_notification);
+    ASSERT_TRUE(cmd.kitty_desktop_notification.payload.eql("foobar"));
+    ASSERT_TRUE(cmd.kitty_desktop_notification.readU() == kdn::Urgency::high);
+}
+
+TEST(kitty_desktop_notification, OSC_99_u_4) {
+    Parser p; /* .init(null) */
+    const char *input = "99;u=bobr;foobar";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end('\x1b');
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::kitty_desktop_notification);
+    ASSERT_TRUE(cmd.kitty_desktop_notification.payload.eql("foobar"));
+    ASSERT_TRUE(cmd.kitty_desktop_notification.readU() == kdn::Urgency::normal);
+}
+
+TEST(kitty_desktop_notification, OSC_99_w_1) {
+    Parser p; /* .init(null) */
+    const char *input = "99;w=0;foobar";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end('\x1b');
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::kitty_desktop_notification);
+    ASSERT_TRUE(cmd.kitty_desktop_notification.payload.eql("foobar"));
+    ASSERT_TRUE(cmd.kitty_desktop_notification.readW() == 0);
+}
+
+TEST(kitty_desktop_notification, OSC_99_w_2) {
+    Parser p; /* .init(null) */
+    const char *input = "99;w=-1;foobar";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end('\x1b');
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::kitty_desktop_notification);
+    ASSERT_TRUE(cmd.kitty_desktop_notification.payload.eql("foobar"));
+    ASSERT_TRUE(cmd.kitty_desktop_notification.readW() == -1);
+}
+
+TEST(kitty_desktop_notification, OSC_99_w_3) {
+    Parser p; /* .init(null) */
+    const char *input = "99;w=-42;foobar";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end('\x1b');
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::kitty_desktop_notification);
+    ASSERT_TRUE(cmd.kitty_desktop_notification.payload.eql("foobar"));
+    ASSERT_TRUE(cmd.kitty_desktop_notification.readW() == -1);
+}
+
+TEST(kitty_desktop_notification, OSC_99_w_4) {
+    Parser p; /* .init(null) */
+    const char *input = "99;w=4294967296;foobar";
+    for (const char *c = input; *c; c++) p.next((uint8_t)*c);
+    Command *cmdp = p.end('\x1b');
+    ASSERT_TRUE(cmdp != nullptr);
+    const Command &cmd = *cmdp;
+    ASSERT_TRUE(cmd.key == Command::Key::kitty_desktop_notification);
+    ASSERT_TRUE(cmd.kitty_desktop_notification.payload.eql("foobar"));
+    ASSERT_TRUE(cmd.kitty_desktop_notification.readW() == -1);
+}
