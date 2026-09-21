@@ -24,7 +24,7 @@ typedef struct {
     TestFn      fn;
 } TestCase;
 
-#define MAX_TESTS 256
+#define MAX_TESTS 1024
 extern TestCase g_tests[MAX_TESTS];
 extern int      g_test_count;
 extern int      g_pass_count;

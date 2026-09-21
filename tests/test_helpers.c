@@ -1,5 +1,6 @@
 #include "test_helpers.h"
 #include <stdio.h>
+#include <stdlib.h>
 
 TestCase g_tests[MAX_TESTS];
 int      g_test_count = 0;
@@ -13,6 +14,11 @@ void wisp_register_test(const char *suite, const char *name, TestFn fn) {
         g_tests[g_test_count].name  = name;
         g_tests[g_test_count].fn    = fn;
         g_test_count++;
+    } else {
+        /* Dropping a test silently would report a partial run as a pass. */
+        fprintf(stderr, "MAX_TESTS (%d) exceeded registering %s::%s\n",
+                MAX_TESTS, suite, name);
+        exit(1);
     }
 }
 
