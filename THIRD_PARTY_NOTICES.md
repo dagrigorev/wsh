@@ -36,3 +36,11 @@ own notice; the two are the same license, and it covers both.
 Wisp is not affiliated with, endorsed by, or an official product of the
 Ghostty project. "Ghostty" is the name of that project and is used here only
 to describe Wisp's lineage.
+
+## X11 color names (rgb.txt)
+
+`src/terminal/res/x11_rgb_data.inc` embeds `rgb.txt` from the X.Org
+project (https://gitlab.freedesktop.org/xorg/app/rgb), by way of Ghostty,
+which ships the same file as `src/terminal/res/rgb.txt`. It is used by
+`color.hpp` to resolve X11 color names such as "ForestGreen". The file is
+distributed under the MIT/X11 license.
