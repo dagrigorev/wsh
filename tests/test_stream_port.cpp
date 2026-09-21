@@ -987,11 +987,12 @@ TEST(charset, the_alternate_screen_gives_them_back) {
 TEST(charset, the_mapping_table_is_complete) {
     /* Every byte in the substituted range maps to something other than
      * itself, and nothing outside it moves. */
-    for (uint32_t c = 0x5F; c <= 0x7E; c++) {
+    for (uint32_t c = 0x60; c <= 0x7E; c++) {
         ASSERT_TRUE(charset_map(Charset::dec_special, c) != c);
         ASSERT_TRUE(charset_map(Charset::dec_special, c) >= 0xA0u);
     }
-    for (uint32_t c = 0x20; c < 0x5F; c++) {
+    /* Upstream's dec_special table starts at 0x60; '_' is unchanged. */
+    for (uint32_t c = 0x20; c < 0x60; c++) {
         ASSERT_EQ(charset_map(Charset::dec_special, c), c);
     }
     ASSERT_EQ(charset_map(Charset::dec_special, 0x7F), 0x7Fu);
