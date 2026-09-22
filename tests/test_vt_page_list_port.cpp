@@ -3410,6 +3410,677 @@ TEST(page_list, PageList_pageIterator_history_two_pages) {
     ASSERT_FALSE(it.next(&chunk));
 }
 
+typedef PageList::Direction Dir;
+typedef page::Row::SemanticPrompt SP;
+typedef page::Cell::SemanticContent SC;
+
+/* `s.pointFromPin(.screen, p).? == .{ .screen = .{ .x = x, .y = y } }` */
+static bool screenAt(PageList &s, const Pin &p, uint32_t x, uint32_t y) {
+    return pointEq(s.pointFromPin(point::Tag::screen, p), Point::screen((size::CellCountInt)x, y));
+}
+
+static page::Cell scCell(uint32_t cp, SC sc) {
+    page::Cell c = page::Cell::init(cp);
+    c.setSemanticContent(sc);
+    return c;
+}
+
+TEST(page_list, PageList_pageIterator_reverse_single_page) {
+    ListHolder s(opts(80, 24));
+
+    /* The viewport should be within a single page */
+    ASSERT_TRUE(s->pages.first->next == nullptr);
+
+    /* Iterate the active area */
+    PageList::PageIterator it = s->pageIterator(Dir::left_up, Point::active());
+    PageList::Chunk chunk;
+    {
+        ASSERT_TRUE(it.next(&chunk));
+        ASSERT_TRUE(chunk.node == s->pages.first);
+        ASSERT_TRUE(0 == chunk.start);
+        ASSERT_TRUE(s->rows == chunk.end);
+    }
+
+    /* Should only have one chunk */
+    ASSERT_FALSE(it.next(&chunk));
+}
+
+TEST(page_list, PageList_pageIterator_reverse_two_pages) {
+    ListHolder s(opts(80, 24));
+
+    /* Grow to capacity */
+    fillFirstPagePlusOne(*s);
+
+    /* Iterate the active area */
+    PageList::PageIterator it = s->pageIterator(Dir::left_up, Point::active());
+    size_t count = 0;
+    PageList::Chunk chunk;
+    {
+        ASSERT_TRUE(it.next(&chunk));
+        ASSERT_TRUE(chunk.node == s->pages.last);
+        ASSERT_TRUE(0 == chunk.start);
+        ASSERT_TRUE(1 == chunk.end);
+        count += (size_t)chunk.end - chunk.start;
+    }
+    {
+        ASSERT_TRUE(it.next(&chunk));
+        ASSERT_TRUE(chunk.node == s->pages.first);
+        const size_t start = (size_t)chunk.node->rows() - s->rows + 1;
+        ASSERT_TRUE(start == chunk.start);
+        ASSERT_TRUE(chunk.node->rows() == chunk.end);
+        count += (size_t)chunk.end - chunk.start;
+    }
+    ASSERT_FALSE(it.next(&chunk));
+    ASSERT_TRUE(s->rows == count);
+}
+
+TEST(page_list, PageList_pageIterator_reverse_history_two_pages) {
+    ListHolder s(opts(80, 24));
+
+    /* Grow to capacity */
+    fillFirstPagePlusOne(*s);
+
+    /* Iterate the active area */
+    PageList::PageIterator it = s->pageIterator(Dir::left_up, Point::history());
+    PageList::Chunk chunk;
+    {
+        const Pin active_tl = s->getTopLeft(point::Tag::active);
+        ASSERT_TRUE(it.next(&chunk));
+        ASSERT_TRUE(chunk.node == s->pages.first);
+        ASSERT_TRUE(0 == chunk.start);
+        ASSERT_TRUE(active_tl.y == chunk.end);
+    }
+    ASSERT_FALSE(it.next(&chunk));
+}
+
+TEST(page_list, PageList_PageIterator_reverse_count_includes_row_zero) {
+    ListHolder s(opts(2, 2));
+
+    PageList::PageIterator it;
+    it.row = s->getTopLeft(point::Tag::screen);
+    it.limit.tag = PageList::PageIterator::Limit::Tag::count;
+    it.limit.count = 1;
+    it.direction = Dir::left_up;
+    PageList::Chunk chunk;
+    ASSERT_TRUE(it.next(&chunk));
+    ASSERT_TRUE(0 == chunk.start);
+    ASSERT_TRUE(1 == chunk.end);
+    ASSERT_FALSE(it.next(&chunk));
+}
+
+TEST(page_list, PageList_PageIterator_count_crosses_page_boundaries) {
+    ListHolder s(opts(80, 24));
+
+    Node *first = s->pages.first;
+    first->page()->pauseIntegrityChecks(true);
+    while (first->rows() < first->capacity().rows) (void)growNode(&*s);
+    first->page()->pauseIntegrityChecks(false);
+    Node *second = growNode(&*s);
+    ASSERT_TRUE(second != nullptr);
+
+    PageList::PageIterator down;
+    down.row = Pin(first, (size::CellCountInt)(first->rows() - 1));
+    down.limit.tag = PageList::PageIterator::Limit::Tag::count;
+    down.limit.count = 2;
+    down.direction = Dir::right_down;
+    PageList::Chunk chunk;
+    {
+        ASSERT_TRUE(down.next(&chunk));
+        ASSERT_TRUE(first == chunk.node);
+        ASSERT_TRUE(first->rows() - 1 == chunk.start);
+        ASSERT_TRUE(first->rows() == chunk.end);
+    }
+    {
+        ASSERT_TRUE(down.next(&chunk));
+        ASSERT_TRUE(second == chunk.node);
+        ASSERT_TRUE(0 == chunk.start);
+        ASSERT_TRUE(1 == chunk.end);
+    }
+    ASSERT_FALSE(down.next(&chunk));
+
+    PageList::PageIterator up;
+    up.row = Pin(second);
+    up.limit.tag = PageList::PageIterator::Limit::Tag::count;
+    up.limit.count = 2;
+    up.direction = Dir::left_up;
+    {
+        ASSERT_TRUE(up.next(&chunk));
+        ASSERT_TRUE(second == chunk.node);
+        ASSERT_TRUE(0 == chunk.start);
+        ASSERT_TRUE(1 == chunk.end);
+    }
+    {
+        ASSERT_TRUE(up.next(&chunk));
+        ASSERT_TRUE(first == chunk.node);
+        ASSERT_TRUE(first->rows() - 1 == chunk.start);
+        ASSERT_TRUE(first->rows() == chunk.end);
+    }
+    ASSERT_FALSE(up.next(&chunk));
+}
+
+TEST(page_list, PageList_cellIterator) {
+    ListHolder s(opts(2, 2, (size_t)0));
+    ASSERT_TRUE(s->pages.first == s->pages.last);
+    fillCodepoints(*s, s->pages.first->page(), 0);
+
+    PageList::CellIterator it = s->cellIterator(Dir::right_down, Point::screen());
+    Pin p;
+    ASSERT_TRUE(it.next(&p) && screenAt(*s, p, 0, 0));
+    ASSERT_TRUE(it.next(&p) && screenAt(*s, p, 1, 0));
+    ASSERT_TRUE(it.next(&p) && screenAt(*s, p, 0, 1));
+    ASSERT_TRUE(it.next(&p) && screenAt(*s, p, 1, 1));
+    ASSERT_FALSE(it.next(&p));
+}
+
+TEST(page_list, PageList_cellIterator_reverse) {
+    ListHolder s(opts(2, 2, (size_t)0));
+    ASSERT_TRUE(s->pages.first == s->pages.last);
+    fillCodepoints(*s, s->pages.first->page(), 0);
+
+    PageList::CellIterator it = s->cellIterator(Dir::left_up, Point::screen());
+    Pin p;
+    ASSERT_TRUE(it.next(&p) && screenAt(*s, p, 1, 1));
+    ASSERT_TRUE(it.next(&p) && screenAt(*s, p, 0, 1));
+    ASSERT_TRUE(it.next(&p) && screenAt(*s, p, 1, 0));
+    ASSERT_TRUE(it.next(&p) && screenAt(*s, p, 0, 0));
+    ASSERT_FALSE(it.next(&p));
+}
+
+TEST(page_list, PageList_promptIterator_left_up) {
+    ListHolder s(opts(2, 20, (size_t)0));
+    ASSERT_TRUE(s->pages.first == s->pages.last);
+    Page *page = s->pages.first->page();
+    /* Normal prompt */
+    setPrompt(page, 3, SP::prompt);
+    /* Continuation */
+    setPrompt(page, 6, SP::prompt);
+    setPrompt(page, 7, SP::prompt_continuation);
+    setPrompt(page, 8, SP::prompt_continuation);
+    /* Broken continuation that has non-prompts in between */
+    setPrompt(page, 12, SP::prompt_continuation);
+
+    PageList::PromptIterator it = s->promptIterator(Dir::left_up, Point::screen());
+    Pin p;
+    ASSERT_TRUE(it.next(&p) && screenAt(*s, p, 0, 12));
+    ASSERT_TRUE(it.next(&p) && screenAt(*s, p, 0, 6));
+    ASSERT_TRUE(it.next(&p) && screenAt(*s, p, 0, 3));
+    ASSERT_FALSE(it.next(&p));
+}
+
+TEST(page_list, PageList_promptIterator_right_down) {
+    ListHolder s(opts(2, 20, (size_t)0));
+    ASSERT_TRUE(s->pages.first == s->pages.last);
+    Page *page = s->pages.first->page();
+    /* Normal prompt */
+    setPrompt(page, 3, SP::prompt);
+    /* Continuation (prompt on row 6, continuation on rows 7-8) */
+    setPrompt(page, 6, SP::prompt);
+    setPrompt(page, 7, SP::prompt_continuation);
+    setPrompt(page, 8, SP::prompt_continuation);
+    /* Broken continuation that has non-prompts in between (orphaned continuation at row 12) */
+    setPrompt(page, 12, SP::prompt_continuation);
+
+    PageList::PromptIterator it = s->promptIterator(Dir::right_down, Point::screen());
+    Pin p;
+    ASSERT_TRUE(it.next(&p) && screenAt(*s, p, 0, 3));
+    ASSERT_TRUE(it.next(&p) && screenAt(*s, p, 0, 6));
+    ASSERT_TRUE(it.next(&p) && screenAt(*s, p, 0, 12));
+    ASSERT_FALSE(it.next(&p));
+}
+
+TEST(page_list, PageList_promptIterator_right_down_continuation_at_start) {
+    ListHolder s(opts(2, 20, (size_t)0));
+    ASSERT_TRUE(s->pages.first == s->pages.last);
+    Page *page = s->pages.first->page();
+
+    /* Prompt continuation at row 0 (no prior rows - simulates trimmed scrollback) */
+    setPrompt(page, 0, SP::prompt_continuation);
+    setPrompt(page, 1, SP::prompt_continuation);
+    /* Normal prompt later */
+    setPrompt(page, 5, SP::prompt);
+
+    PageList::PromptIterator it = s->promptIterator(Dir::right_down, Point::screen());
+    Pin p;
+    /* Should return the first continuation line since there's no prior prompt */
+    ASSERT_TRUE(it.next(&p) && screenAt(*s, p, 0, 0));
+    ASSERT_TRUE(it.next(&p) && screenAt(*s, p, 0, 5));
+    ASSERT_FALSE(it.next(&p));
+}
+
+TEST(page_list, PageList_promptIterator_right_down_with_prompt_before_continuation) {
+    ListHolder s(opts(2, 20, (size_t)0));
+    ASSERT_TRUE(s->pages.first == s->pages.last);
+    Page *page = s->pages.first->page();
+
+    /* Prompt on row 2, continuation on rows 3-4
+     * Starting iteration from row 3 should still find the prompt at row 2 */
+    setPrompt(page, 2, SP::prompt);
+    setPrompt(page, 3, SP::prompt_continuation);
+    setPrompt(page, 4, SP::prompt_continuation);
+
+    /* Start iteration from row 3 (middle of the continuation)
+     * Since we start on a continuation line, we treat it as the prompt start
+     * (handles case where scrollback pruned the actual prompt) */
+    PageList::PromptIterator it = s->promptIterator(Dir::right_down, Point::screen(0, 3));
+    Pin p;
+    /* Returns row 3 since that's the first prompt-related line we encounter */
+    ASSERT_TRUE(it.next(&p) && screenAt(*s, p, 0, 3));
+    ASSERT_FALSE(it.next(&p));
+}
+
+TEST(page_list, PageList_promptIterator_right_down_limit_inclusive) {
+    ListHolder s(opts(2, 20, (size_t)0));
+    ASSERT_TRUE(s->pages.first == s->pages.last);
+    Page *page = s->pages.first->page();
+
+    /* Prompt on row 5 */
+    setPrompt(page, 5, SP::prompt);
+    /* Prompt on row 10 */
+    setPrompt(page, 10, SP::prompt);
+
+    /* Iterate with limit at row 5 (the prompt row) - should include it */
+    PageList::PromptIterator it = s->promptIterator(Dir::right_down, Point::screen(), Point::screen(0, 5));
+    Pin p;
+    ASSERT_TRUE(it.next(&p) && screenAt(*s, p, 0, 5));
+    ASSERT_FALSE(it.next(&p));
+}
+
+TEST(page_list, PageList_promptIterator_left_up_limit_inclusive) {
+    ListHolder s(opts(2, 20, (size_t)0));
+    ASSERT_TRUE(s->pages.first == s->pages.last);
+    Page *page = s->pages.first->page();
+
+    /* Prompt on row 5 */
+    setPrompt(page, 5, SP::prompt);
+    /* Prompt on row 10 */
+    setPrompt(page, 10, SP::prompt);
+
+    /* Iterate with limit at row 10 (the prompt row) - should include it
+     * tl_pt is the limit (upper bound), bl_pt is the start point for left_up */
+    PageList::PromptIterator it = s->promptIterator(Dir::left_up, Point::screen(0, 10), Point::screen(0, 15));
+    Pin p;
+    ASSERT_TRUE(it.next(&p) && screenAt(*s, p, 0, 10));
+    ASSERT_FALSE(it.next(&p));
+}
+
+TEST(page_list, PageList_highlightSemanticContent_prompt) {
+    ListHolder s(opts(10, 20, (size_t)0));
+    ASSERT_TRUE(s->pages.first == s->pages.last);
+    Page *page = s->pages.first->page();
+
+    /* Prompt on row 5 */
+    {
+        setPrompt(page, 5, SP::prompt);
+
+        /* Start the prompt for the first 5 cols */
+        for (size_t x = 0; x < 5; x++) *page->getRowAndCell(x, 5).cell = scCell('A', SC::prompt);
+
+        /* Next 3 let's make input */
+        for (size_t x = 5; x < 8; x++) *page->getRowAndCell(x, 5).cell = scCell('B', SC::input);
+    }
+    /* Prompt on row 10 */
+    setPrompt(page, 10, SP::prompt);
+
+    const PageList::HighlightUntracked hl = s->highlightSemanticContent(s->pin(Point::screen(2, 5)).value, SC::prompt).value;
+    ASSERT_TRUE(screenAt(*s, hl.start, 0, 5));
+    ASSERT_TRUE(screenAt(*s, hl.end, 7, 5));
+}
+
+/* Wisp: `for (x0..x1) |x| page.getRowAndCell(x, y).cell.* = .{ codepoint cp, semantic_content sc }` */
+static void fillSC(Page *page, size_t y, size_t x0, size_t x1, uint32_t cp, SC sc) {
+    for (size_t x = x0; x < x1; x++) *page->getRowAndCell(x, y).cell = scCell(cp, sc);
+}
+/* Wisp: `cell.semantic_content = sc` only. */
+static void markSC(Page *page, size_t y, size_t x0, size_t x1, SC sc) {
+    for (size_t x = x0; x < x1; x++) page->getRowAndCell(x, y).cell->setSemanticContent(sc);
+}
+
+static Maybe<PageList::HighlightUntracked> hlAt(PageList &s, uint32_t x, uint32_t y, SC sc) {
+    return s.highlightSemanticContent(s.pin(Point::screen((size::CellCountInt)x, y)).value, sc);
+}
+
+TEST(page_list, PageList_highlightSemanticContent_prompt_with_output) {
+    ListHolder s(opts(10, 20, (size_t)0));
+    ASSERT_TRUE(s->pages.first == s->pages.last);
+    Page *page = s->pages.first->page();
+
+    /* Prompt on row 5 */
+    setPrompt(page, 5, SP::prompt);
+    /* First 3 cols are prompt */
+    fillSC(page, 5, 0, 3, '$', SC::prompt);
+    /* Next 4 are input */
+    fillSC(page, 5, 3, 7, 'l', SC::input);
+    /* Rest is output (shouldn't be included in prompt highlight) */
+    fillSC(page, 5, 7, 10, 'o', SC::output);
+    /* Prompt on row 10 */
+    setPrompt(page, 10, SP::prompt);
+
+    /* Highlighting from prompt should include prompt and input, but stop at output */
+    const PageList::HighlightUntracked hl = hlAt(*s, 0, 5, SC::prompt).value;
+    ASSERT_TRUE(screenAt(*s, hl.start, 0, 5));
+    ASSERT_TRUE(screenAt(*s, hl.end, 6, 5));
+}
+
+TEST(page_list, PageList_highlightSemanticContent_prompt_multiline) {
+    ListHolder s(opts(10, 20, (size_t)0));
+    ASSERT_TRUE(s->pages.first == s->pages.last);
+    Page *page = s->pages.first->page();
+
+    /* Prompt starts on row 5 */
+    setPrompt(page, 5, SP::prompt);
+    /* First row is all prompt */
+    fillSC(page, 5, 0, 10, '$', SC::prompt);
+    /* Row 6 continues with input */
+    fillSC(page, 6, 0, 5, 'c', SC::input);
+    /* Prompt on row 10 */
+    setPrompt(page, 10, SP::prompt);
+
+    /* Highlighting should span both rows */
+    const PageList::HighlightUntracked hl = hlAt(*s, 2, 5, SC::prompt).value;
+    ASSERT_TRUE(screenAt(*s, hl.start, 0, 5));
+    ASSERT_TRUE(screenAt(*s, hl.end, 4, 6));
+}
+
+TEST(page_list, PageList_highlightSemanticContent_prompt_only) {
+    ListHolder s(opts(10, 20, (size_t)0));
+    ASSERT_TRUE(s->pages.first == s->pages.last);
+    Page *page = s->pages.first->page();
+
+    /* Prompt on row 5 with only prompt content (no input) */
+    setPrompt(page, 5, SP::prompt);
+    fillSC(page, 5, 0, 5, '$', SC::prompt);
+    /* Prompt on row 10 */
+    setPrompt(page, 10, SP::prompt);
+
+    /* Highlighting should only include the prompt cells */
+    const PageList::HighlightUntracked hl = hlAt(*s, 0, 5, SC::prompt).value;
+    ASSERT_TRUE(screenAt(*s, hl.start, 0, 5));
+    ASSERT_TRUE(screenAt(*s, hl.end, 4, 5));
+}
+
+TEST(page_list, PageList_highlightSemanticContent_prompt_to_end_of_screen) {
+    ListHolder s(opts(10, 20, (size_t)0));
+    ASSERT_TRUE(s->pages.first == s->pages.last);
+    Page *page = s->pages.first->page();
+
+    /* Single prompt on row 15, no following prompt */
+    setPrompt(page, 15, SP::prompt);
+    fillSC(page, 15, 0, 3, '$', SC::prompt);
+    fillSC(page, 15, 3, 8, 'c', SC::input);
+
+    /* Highlighting should include prompt and input up to column 7 */
+    const PageList::HighlightUntracked hl = hlAt(*s, 0, 15, SC::prompt).value;
+    ASSERT_TRUE(screenAt(*s, hl.start, 0, 15));
+    ASSERT_TRUE(screenAt(*s, hl.end, 7, 15));
+}
+
+TEST(page_list, PageList_highlightSemanticContent_input_basic) {
+    ListHolder s(opts(10, 20, (size_t)0));
+    ASSERT_TRUE(s->pages.first == s->pages.last);
+    Page *page = s->pages.first->page();
+
+    /* Prompt on row 5 */
+    setPrompt(page, 5, SP::prompt);
+    /* First 3 cols are prompt */
+    fillSC(page, 5, 0, 3, '$', SC::prompt);
+    /* Next 5 are input */
+    fillSC(page, 5, 3, 8, 'l', SC::input);
+    /* Prompt on row 10 */
+    setPrompt(page, 10, SP::prompt);
+
+    /* Highlighting input should only include input cells */
+    const PageList::HighlightUntracked hl = hlAt(*s, 0, 5, SC::input).value;
+    ASSERT_TRUE(screenAt(*s, hl.start, 3, 5));
+    ASSERT_TRUE(screenAt(*s, hl.end, 7, 5));
+}
+
+TEST(page_list, PageList_highlightSemanticContent_input_with_output) {
+    ListHolder s(opts(10, 20, (size_t)0));
+    ASSERT_TRUE(s->pages.first == s->pages.last);
+    Page *page = s->pages.first->page();
+
+    /* Prompt on row 5 */
+    setPrompt(page, 5, SP::prompt);
+    /* First 2 cols are prompt */
+    fillSC(page, 5, 0, 2, '$', SC::prompt);
+    /* Next 3 are input */
+    fillSC(page, 5, 2, 5, 'c', SC::input);
+    /* Rest is output */
+    fillSC(page, 5, 5, 10, 'o', SC::output);
+    /* Prompt on row 10 */
+    setPrompt(page, 10, SP::prompt);
+
+    /* Highlighting input should stop at output */
+    const PageList::HighlightUntracked hl = hlAt(*s, 0, 5, SC::input).value;
+    ASSERT_TRUE(screenAt(*s, hl.start, 2, 5));
+    ASSERT_TRUE(screenAt(*s, hl.end, 4, 5));
+}
+
+TEST(page_list, PageList_highlightSemanticContent_input_multiline_with_continuation) {
+    ListHolder s(opts(10, 20, (size_t)0));
+    ASSERT_TRUE(s->pages.first == s->pages.last);
+    Page *page = s->pages.first->page();
+
+    /* Prompt on row 5 */
+    setPrompt(page, 5, SP::prompt);
+    /* First 2 cols are prompt */
+    fillSC(page, 5, 0, 2, '$', SC::prompt);
+    /* Rest is input */
+    fillSC(page, 5, 2, 10, 'c', SC::input);
+    /* Row 6 has continuation prompt then more input */
+    fillSC(page, 6, 0, 2, '>', SC::prompt);
+    fillSC(page, 6, 2, 6, 'd', SC::input);
+    /* Prompt on row 10 */
+    setPrompt(page, 10, SP::prompt);
+
+    /* Highlighting input should span both rows, skipping continuation prompts */
+    const PageList::HighlightUntracked hl = hlAt(*s, 0, 5, SC::input).value;
+    ASSERT_TRUE(screenAt(*s, hl.start, 2, 5));
+    ASSERT_TRUE(screenAt(*s, hl.end, 5, 6));
+}
+
+TEST(page_list, PageList_highlightSemanticContent_input_no_input_returns_null) {
+    ListHolder s(opts(10, 20, (size_t)0));
+    ASSERT_TRUE(s->pages.first == s->pages.last);
+    Page *page = s->pages.first->page();
+
+    /* Prompt on row 5 with only prompt, then immediately output */
+    setPrompt(page, 5, SP::prompt);
+    /* First 3 cols are prompt */
+    fillSC(page, 5, 0, 3, '$', SC::prompt);
+    /* Rest is output (no input!) */
+    fillSC(page, 5, 3, 10, 'o', SC::output);
+    /* Prompt on row 10 */
+    setPrompt(page, 10, SP::prompt);
+
+    /* Highlighting input should return null when there's no input */
+    ASSERT_FALSE(hlAt(*s, 0, 5, SC::input).has);
+}
+
+TEST(page_list, PageList_highlightSemanticContent_input_to_end_of_screen) {
+    ListHolder s(opts(10, 20, (size_t)0));
+    ASSERT_TRUE(s->pages.first == s->pages.last);
+    Page *page = s->pages.first->page();
+
+    /* Single prompt on row 15, no following prompt */
+    setPrompt(page, 15, SP::prompt);
+    fillSC(page, 15, 0, 2, '$', SC::prompt);
+    fillSC(page, 15, 2, 7, 'c', SC::input);
+
+    /* Highlighting input with no following prompt */
+    const PageList::HighlightUntracked hl = hlAt(*s, 0, 15, SC::input).value;
+    ASSERT_TRUE(screenAt(*s, hl.start, 2, 15));
+    ASSERT_TRUE(screenAt(*s, hl.end, 6, 15));
+}
+
+TEST(page_list, PageList_highlightSemanticContent_input_prompt_only_returns_null) {
+    ListHolder s(opts(10, 20, (size_t)0));
+    ASSERT_TRUE(s->pages.first == s->pages.last);
+    Page *page = s->pages.first->page();
+
+    /* Prompt on row 5 with only prompt content, no input or output */
+    setPrompt(page, 5, SP::prompt);
+    /* All cells are prompt */
+    fillSC(page, 5, 0, 10, '$', SC::prompt);
+    /* Mark rows 6-9 as prompt to ensure no input before next prompt */
+    for (size_t y = 6; y < 10; y++) markSC(page, y, 0, 10, SC::prompt);
+    /* Prompt on row 10 */
+    setPrompt(page, 10, SP::prompt);
+
+    /* Highlighting input should return null when there's only prompts */
+    ASSERT_FALSE(hlAt(*s, 0, 5, SC::input).has);
+}
+
+TEST(page_list, PageList_highlightSemanticContent_output_basic) {
+    ListHolder s(opts(10, 20, (size_t)0));
+    ASSERT_TRUE(s->pages.first == s->pages.last);
+    Page *page = s->pages.first->page();
+
+    /* Prompt on row 5 */
+    setPrompt(page, 5, SP::prompt);
+    /* First 2 cols are prompt */
+    fillSC(page, 5, 0, 2, '$', SC::prompt);
+    /* Next 3 are input */
+    fillSC(page, 5, 2, 5, 'l', SC::input);
+    /* Cols 5-7 are output */
+    fillSC(page, 5, 5, 8, 'o', SC::output);
+    /* Mark remaining cells as prompt to bound the output */
+    markSC(page, 5, 8, 10, SC::prompt);
+    /* Prompt on row 10 */
+    setPrompt(page, 10, SP::prompt);
+
+    /* Highlighting output should only include output cells */
+    const PageList::HighlightUntracked hl = hlAt(*s, 0, 5, SC::output).value;
+    ASSERT_TRUE(screenAt(*s, hl.start, 5, 5));
+    ASSERT_TRUE(screenAt(*s, hl.end, 7, 5));
+}
+
+TEST(page_list, PageList_highlightSemanticContent_output_multiline) {
+    ListHolder s(opts(10, 20, (size_t)0));
+    ASSERT_TRUE(s->pages.first == s->pages.last);
+    Page *page = s->pages.first->page();
+
+    /* Prompt on row 5 */
+    setPrompt(page, 5, SP::prompt);
+    /* First 2 cols are prompt */
+    fillSC(page, 5, 0, 2, '$', SC::prompt);
+    /* Next 2 are input */
+    fillSC(page, 5, 2, 4, 'l', SC::input);
+    /* Rest of row 5 is output */
+    fillSC(page, 5, 4, 10, 'o', SC::output);
+    /* Row 6 is all output */
+    fillSC(page, 6, 0, 10, 'o', SC::output);
+    /* Row 7 has partial output then input to bound it */
+    fillSC(page, 7, 0, 5, 'o', SC::output);
+    markSC(page, 7, 5, 10, SC::input);
+    /* Prompt on row 10 */
+    setPrompt(page, 10, SP::prompt);
+
+    /* Highlighting output should span multiple rows */
+    const PageList::HighlightUntracked hl = hlAt(*s, 0, 5, SC::output).value;
+    ASSERT_TRUE(screenAt(*s, hl.start, 4, 5));
+    ASSERT_TRUE(screenAt(*s, hl.end, 4, 7));
+}
+
+TEST(page_list, PageList_highlightSemanticContent_output_stops_at_next_prompt) {
+    ListHolder s(opts(10, 20, (size_t)0));
+    ASSERT_TRUE(s->pages.first == s->pages.last);
+    Page *page = s->pages.first->page();
+
+    /* Prompt on row 5 */
+    setPrompt(page, 5, SP::prompt);
+    /* First 2 cols are prompt */
+    fillSC(page, 5, 0, 2, '$', SC::prompt);
+    /* Next 2 are input */
+    fillSC(page, 5, 2, 4, 'l', SC::input);
+    /* Rest is output */
+    fillSC(page, 5, 4, 10, 'o', SC::output);
+    /* Row 6 has output then prompt starts */
+    fillSC(page, 6, 0, 3, 'o', SC::output);
+    /* Next prompt marker on same row */
+    fillSC(page, 6, 3, 6, '$', SC::prompt);
+    /* Prompt on row 10 */
+    setPrompt(page, 10, SP::prompt);
+
+    /* Highlighting output should stop before prompt/input */
+    const PageList::HighlightUntracked hl = hlAt(*s, 0, 5, SC::output).value;
+    ASSERT_TRUE(screenAt(*s, hl.start, 4, 5));
+    ASSERT_TRUE(screenAt(*s, hl.end, 2, 6));
+}
+
+TEST(page_list, PageList_highlightSemanticContent_output_to_end_of_screen) {
+    ListHolder s(opts(10, 20, (size_t)0));
+    ASSERT_TRUE(s->pages.first == s->pages.last);
+    Page *page = s->pages.first->page();
+
+    /* Single prompt on row 15, no following prompt */
+    setPrompt(page, 15, SP::prompt);
+    fillSC(page, 15, 0, 2, '$', SC::prompt);
+    fillSC(page, 15, 2, 4, 'c', SC::input);
+    fillSC(page, 15, 4, 10, 'o', SC::output);
+    /* Row 16 has output then prompt to bound it */
+    fillSC(page, 16, 0, 8, 'o', SC::output);
+    markSC(page, 16, 8, 10, SC::prompt);
+
+    /* Highlighting output with no following prompt */
+    const PageList::HighlightUntracked hl = hlAt(*s, 0, 15, SC::output).value;
+    ASSERT_TRUE(screenAt(*s, hl.start, 4, 15));
+    ASSERT_TRUE(screenAt(*s, hl.end, 7, 16));
+}
+
+TEST(page_list, PageList_highlightSemanticContent_output_no_output_returns_null) {
+    ListHolder s(opts(10, 20, (size_t)0));
+    ASSERT_TRUE(s->pages.first == s->pages.last);
+    Page *page = s->pages.first->page();
+
+    /* Prompt on row 5 with only prompt and input, no output */
+    setPrompt(page, 5, SP::prompt);
+    /* First 3 cols are prompt */
+    fillSC(page, 5, 0, 3, '$', SC::prompt);
+    /* Rest is input (must explicitly mark all cells to avoid default .output) */
+    fillSC(page, 5, 3, 10, 'c', SC::input);
+    /* Mark rows 6-9 as input to ensure no output between prompts */
+    for (size_t y = 6; y < 10; y++) markSC(page, y, 0, 10, SC::input);
+    /* Prompt on row 10 (no output between prompts) */
+    setPrompt(page, 10, SP::prompt);
+
+    /* Highlighting output should return null when there's no output */
+    ASSERT_FALSE(hlAt(*s, 0, 5, SC::output).has);
+}
+
+TEST(page_list, PageList_highlightSemanticContent_output_skips_empty_cells) {
+    /* Tests that empty cells with default .output semantic content are
+     * not selected as output. This can happen when a prompt/input line
+     * doesn't fill the entire row - trailing cells have default .output. */
+    ListHolder s(opts(10, 20, (size_t)0));
+    ASSERT_TRUE(s->pages.first == s->pages.last);
+    Page *page = s->pages.first->page();
+
+    /* Prompt on row 5 - only fills first 3 cells, rest are empty with default .output */
+    setPrompt(page, 5, SP::prompt);
+    /* First 3 cols are prompt with text */
+    fillSC(page, 5, 0, 3, '$', SC::prompt);
+    /* Cells 3-9 are empty (codepoint = 0) with default .output semantic content
+     * This simulates what happens when a short prompt is written */
+
+    /* Row 6 has input (short, doesn't fill line) */
+    fillSC(page, 6, 0, 4, 'l', SC::input);
+    /* Cells 4-9 are empty with default .output */
+
+    /* Row 7-8 have actual output with text */
+    for (size_t y = 7; y < 9; y++) fillSC(page, y, 0, 5, 'o', SC::output);
+
+    /* Prompt on row 10 */
+    setPrompt(page, 10, SP::prompt);
+
+    /* Highlighting output should skip empty cells on rows 5-6 and find
+     * the actual output starting at row 7 */
+    const PageList::HighlightUntracked hl = hlAt(*s, 0, 5, SC::output).value;
+    /* Output should start at row 7, not row 5 (where empty cells have default .output) */
+    ASSERT_TRUE(screenAt(*s, hl.start, 0, 7));
+    ASSERT_TRUE(screenAt(*s, hl.end, 4, 8));
+}
+
 /* @@TESTS@@ */
 
 /* Wisp: std.testing.allocator's leak check. Runs last (registration order). */
