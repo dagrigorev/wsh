@@ -1057,43 +1057,67 @@ struct PageList {
      * Wisp: std.AutoArrayHashMapUnmanaged(*Pin, void) — insertion-ordered
      * keys with swapRemove. */
     struct PinSet {
-        std::vector<Pin *> entries;
-        std::unordered_map<Pin *, size_t> index;
+        /* Wisp: the entries array is allocated from `alloc` (grown like
+         * ArrayList) so allocation failures surface as upstream's do; key
+         * lookup is a linear scan. */
+        zigstd::Allocator alloc;
+        Pin **entries;
+        size_t len;
+        size_t capacity;
 
-        Pin *const *keys() const { return entries.data(); }
-        Pin **keysMut() { return entries.data(); }
-        size_t count() const { return entries.size(); }
-        bool contains(Pin *p) const { return index.find(p) != index.end(); }
-        bool setCapacity(size_t n) {
-            entries.reserve(n);
+        PinSet() : alloc(zigstd::c_allocator()), entries(nullptr), len(0), capacity(0) {}
+
+        Pin *const *keys() const { return entries; }
+        size_t count() const { return len; }
+        bool contains(const Pin *p) const {
+            for (size_t i = 0; i < len; i++)
+                if (entries[i] == p) return true;
+            return false;
+        }
+        bool setCapacity(zigstd::Allocator a, size_t n) {
+            alloc = a;
+            return ensureTotalCapacityPrecise(n);
+        }
+        bool ensureTotalCapacityPrecise(size_t n) {
+            if (capacity >= n) return true;
+            Pin **e = alloc.allocT<Pin *>(n);
+            if (!e) return false;
+            if (len) memcpy(e, entries, len * sizeof(Pin *));
+            if (capacity) alloc.freeT<Pin *>(entries, capacity);
+            entries = e;
+            capacity = n;
             return true;
         }
         void putAssumeCapacityNoClobber(Pin *p) {
             assert(!contains(p));
-            index[p] = entries.size();
-            entries.push_back(p);
+            assert(len < capacity);
+            entries[len++] = p;
         }
+        /* Wisp: false is OutOfMemory. */
         bool putNoClobber(Pin *p) {
+            if (len == capacity) {
+                size_t n = capacity;
+                do {
+                    n += n / 2 + 8;
+                } while (n <= len);
+                if (!ensureTotalCapacityPrecise(n)) return false;
+            }
             putAssumeCapacityNoClobber(p);
             return true;
         }
-        bool swapRemove(Pin *p) {
-            auto it = index.find(p);
-            if (it == index.end()) return false;
-            const size_t i = it->second;
-            index.erase(it);
-            const size_t last = entries.size() - 1;
-            if (i != last) {
-                entries[i] = entries[last];
-                index[entries[i]] = i;
+        bool swapRemove(const Pin *p) {
+            for (size_t i = 0; i < len; i++) {
+                if (entries[i] != p) continue;
+                entries[i] = entries[len - 1];
+                len -= 1;
+                return true;
             }
-            entries.pop_back();
-            return true;
+            return false;
         }
         void deinit() {
-            entries.clear();
-            entries.shrink_to_fit();
-            index.clear();
+            if (capacity) alloc.freeT<Pin *>(entries, capacity);
+            entries = nullptr;
+            len = capacity = 0;
         }
     };
 
@@ -1565,7 +1589,7 @@ struct PageList {
     };
 
     static bool init(zigstd::Allocator alloc, const Options &opts, PageList *out);
-    static bool initTrackedPins(Pin *viewport_pin, PinSet *out);
+    static bool initTrackedPins(zigstd::Allocator alloc, Pin *viewport_pin, PinSet *out);
 
     enum class InitPagesTw { page_node, page_buf_std, page_buf_non_std };
     typedef tripwire::Module<InitPagesTw, AllocTw, 3> initPages_tw;
@@ -5456,7 +5480,10 @@ struct PageList {
         *tracked = p;
 
         /* Add it to the tracked list */
-        tracked_pins.putNoClobber(tracked);
+        if (!tracked_pins.putNoClobber(tracked)) {
+            pool.pins.destroy(tracked);
+            return nullptr;
+        }
 
         return tracked;
     }
@@ -5999,7 +6026,7 @@ struct PageList {
 
             /* Setup our one viewport tracked pin */
             PinSet tracked_pins_;
-            if (!initTrackedPins(viewport_pin_, &tracked_pins_)) {
+            if (!initTrackedPins(pool.alloc, viewport_pin_, &tracked_pins_)) {
                 pool.pins.destroy(viewport_pin_);
                 return FinishError::OutOfMemory;
             }
@@ -6114,7 +6141,7 @@ inline bool PageList::init(zigstd::Allocator alloc, const Options &opts, PageLis
     *viewport_pin = Pin(page_list.first);
 
     PinSet tracked_pins;
-    if (tw::check(InitTw::viewport_pin_track) != AllocTw::none || !initTrackedPins(viewport_pin, &tracked_pins)) {
+    if (tw::check(InitTw::viewport_pin_track) != AllocTw::none || !initTrackedPins(pool.alloc, viewport_pin, &tracked_pins)) {
         releasePages(&pool, page_list);
         pool.deinit();
         return false;
@@ -6144,9 +6171,9 @@ inline bool PageList::init(zigstd::Allocator alloc, const Options &opts, PageLis
 /* Create the tracked pin set for a new PageList with the viewport pin
  * already tracked. The set is sized for exactly the viewport pin and the
  * cursor pin that every Screen tracks. */
-inline bool PageList::initTrackedPins(Pin *viewport_pin, PinSet *out) {
+inline bool PageList::initTrackedPins(zigstd::Allocator alloc, Pin *viewport_pin, PinSet *out) {
     PinSet set;
-    if (!set.setCapacity(pin_preheat)) return false;
+    if (!set.setCapacity(alloc, pin_preheat)) return false;
     set.putAssumeCapacityNoClobber(viewport_pin);
     *out = set;
     return true;
@@ -6563,7 +6590,7 @@ inline page::PageError PageList::clone(zigstd::Allocator alloc, const Clone &opt
      * to the top. */
     Pin *viewport_pin_ = pool_.pins.create();
     PinSet tracked_pins_;
-    if (!viewport_pin_ || !initTrackedPins(viewport_pin_, &tracked_pins_)) {
+    if (!viewport_pin_ || !initTrackedPins(pool_.alloc, viewport_pin_, &tracked_pins_)) {
         pool_.deinit();
         return page::PageError::OutOfMemory;
     }
@@ -6630,7 +6657,7 @@ inline page::PageError PageList::clone(zigstd::Allocator alloc, const Clone &opt
                 new_p->y -= (size::CellCountInt)chunk.start;
                 assert(remap->find(p) == remap->end());
                 (*remap)[p] = new_p;
-                tracked_pins_.putNoClobber(new_p);
+                if (!tracked_pins_.putNoClobber(new_p)) return fail.fail(page::PageError::OutOfMemory);
             }
         }
     }
