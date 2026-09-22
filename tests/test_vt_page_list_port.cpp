@@ -4531,6 +4531,410 @@ TEST(page_list, PageList_clone_partial_trimmed_left) {
     s2.deinit();
 }
 
+static page::Cell bgRed() {
+    page::Cell c;
+    c.setContentTag(page::Cell::ContentTag::bg_color_rgb);
+    page::Cell::RGB rgb;
+    rgb.r = 0xFF;
+    rgb.g = 0;
+    rgb.b = 0;
+    c.setContentColorRgb(rgb);
+    return c;
+}
+
+static bool activeAt(PageList &s, const Pin *p, uint32_t x, uint32_t y) {
+    return pointEq(s.pointFromPin(point::Tag::active, *p), Point::active((size::CellCountInt)x, y));
+}
+
+static bool activeScreenIs(PageList &s, uint32_t y) {
+    return cellScreenPoint(s, Point::active()).eql(Point::screen(0, y));
+}
+
+static PageList::Clone cloneOpts(const Point &top, Maybe<Point> bot = Maybe<Point>(),
+                                 PageList::Clone::TrackedPinsRemap *remap = nullptr) {
+    return PageList::Clone(top, bot, remap);
+}
+
+TEST(page_list, PageList_clone_partial_trimmed_left_reclaims_styles) {
+    ListHolder s(opts(80, 20));
+    ASSERT_TRUE((size_t)s->rows == s->totalRows());
+    ASSERT_TRUE(s->growRows(30));
+
+    /* Style the rows we're trimming */
+    {
+        ASSERT_TRUE(s->pages.first == s->pages.last);
+        Page *page = s->pages.first->page();
+
+        style::Style st;
+        st.flags.bold = true;
+        style::Id style_id;
+        ASSERT_TRUE(page->styles.add((const void *)page->memory, st, &style_id) == ref_counted_set::AddError::none);
+
+        PageList::RowIterator it = s->rowIterator(Dir::left_up, Point::screen(), Point::screen(0, 9));
+        Pin p;
+        while (it.next(&p)) {
+            const Page::RowAndCell rac = p.rowAndCell();
+            rac.row->setStyled(true);
+            page::Cell c = page::Cell::init('A');
+            c.setStyleId(style_id);
+            *rac.cell = c;
+            page->styles.use((const void *)page->memory, style_id);
+        }
+
+        /* We're over-counted by 1 because `add` implies `use`. */
+        page->styles.release((const void *)page->memory, style_id);
+
+        /* Expect to have one style */
+        ASSERT_TRUE(1 == page->styles.count());
+    }
+
+    PageList s2;
+    ASSERT_TRUE(s->clone(talloc(), cloneOpts(Point::screen(0, 10)), &s2) == page::PageError::none);
+    ASSERT_TRUE(40 == s2.totalRows());
+
+    {
+        ASSERT_TRUE(s2.pages.first == s2.pages.last);
+        Page *page = s2.pages.first->page();
+        ASSERT_TRUE(0 == page->styles.count());
+    }
+    s2.deinit();
+}
+
+TEST(page_list, PageList_clone_partial_trimmed_both) {
+    ListHolder s(opts(80, 20));
+    ASSERT_TRUE((size_t)s->rows == s->totalRows());
+    ASSERT_TRUE(s->growRows(30));
+
+    PageList s2;
+    ASSERT_TRUE(s->clone(talloc(), cloneOpts(Point::screen(0, 10), Point::screen(0, 35)), &s2) ==
+                page::PageError::none);
+    ASSERT_TRUE(26 == s2.totalRows());
+    s2.deinit();
+}
+
+TEST(page_list, PageList_clone_less_than_active) {
+    ListHolder s(opts(80, 24));
+    ASSERT_TRUE((size_t)s->rows == s->totalRows());
+
+    PageList s2;
+    ASSERT_TRUE(s->clone(talloc(), cloneOpts(Point::active(0, 5)), &s2) == page::PageError::none);
+    ASSERT_TRUE((size_t)s->rows == s2.totalRows());
+    s2.deinit();
+}
+
+TEST(page_list, PageList_clone_remap_tracked_pin) {
+    ListHolder s(opts(80, 24));
+    ASSERT_TRUE((size_t)s->rows == s->totalRows());
+
+    /* Put a tracked pin in the screen */
+    Pin *p = s->trackPin(s->pin(Point::active(0, 6)).value);
+
+    PageList::Clone::TrackedPinsRemap pin_remap;
+    PageList s2;
+    ASSERT_TRUE(s->clone(talloc(), cloneOpts(Point::active(0, 5), Maybe<Point>(), &pin_remap), &s2) ==
+                page::PageError::none);
+
+    /* We should be able to find our tracked pin */
+    ASSERT_TRUE(pin_remap.count(p) == 1);
+    Pin *p2 = pin_remap[p];
+    ASSERT_TRUE(pointEq(s2.pointFromPin(point::Tag::active, *p2), Point::active(0, 1)));
+    s2.deinit();
+    s->untrackPin(p);
+}
+
+TEST(page_list, PageList_clone_remap_tracked_pin_not_in_cloned_area) {
+    ListHolder s(opts(80, 24));
+    ASSERT_TRUE((size_t)s->rows == s->totalRows());
+
+    /* Put a tracked pin in the screen */
+    Pin *p = s->trackPin(s->pin(Point::active(0, 3)).value);
+
+    PageList::Clone::TrackedPinsRemap pin_remap;
+    PageList s2;
+    ASSERT_TRUE(s->clone(talloc(), cloneOpts(Point::active(0, 5), Maybe<Point>(), &pin_remap), &s2) ==
+                page::PageError::none);
+
+    /* We should be able to find our tracked pin */
+    ASSERT_TRUE(pin_remap.count(p) == 0);
+    s2.deinit();
+    s->untrackPin(p);
+}
+
+TEST(page_list, PageList_clone_full_dirty) {
+    ListHolder s(opts(80, 24));
+    ASSERT_TRUE((size_t)s->rows == s->totalRows());
+
+    /* Mark a row as dirty */
+    s->markDirty(Point::active(0, 0));
+    s->markDirty(Point::active(0, 12));
+    s->markDirty(Point::active(0, 23));
+
+    PageList s2;
+    ASSERT_TRUE(s->clone(talloc(), cloneOpts(Point::screen()), &s2) == page::PageError::none);
+    ASSERT_TRUE((size_t)s->rows == s2.totalRows());
+
+    /* Should still be dirty */
+    ASSERT_TRUE(s2.isDirty(Point::active(0, 0)));
+    ASSERT_FALSE(s2.isDirty(Point::active(0, 1)));
+    ASSERT_TRUE(s2.isDirty(Point::active(0, 12)));
+    ASSERT_FALSE(s2.isDirty(Point::active(0, 14)));
+    ASSERT_TRUE(s2.isDirty(Point::active(0, 23)));
+    s2.deinit();
+}
+
+TEST(page_list, PageList_resize_no_reflow_more_rows) {
+    ListHolder s(opts(10, 3, (size_t)0));
+    ASSERT_TRUE(3 == s->totalRows());
+
+    /* Put a tracked pin in the history */
+    Pin *p = s->trackPin(s->pin(Point::active(0, 2)).value);
+
+    /* Resize */
+    ASSERT_TRUE(s->resize(rz(-1, 10, false)));
+    ASSERT_TRUE(10 == s->rows);
+    ASSERT_TRUE(10 == s->totalRows());
+
+    /* Our cursor should not move because we have no scrollback so
+     * we just grew. */
+    ASSERT_TRUE(activeAt(*s, p, 0, 2));
+
+    ASSERT_TRUE(activeScreenIs(*s, 0));
+    s->untrackPin(p);
+}
+
+TEST(page_list, PageList_resize_no_reflow_more_rows_with_history) {
+    ListHolder s(opts(10, 3));
+    ASSERT_TRUE(s->growRows(50));
+    ASSERT_TRUE(activeScreenIs(*s, 50));
+
+    /* Put a tracked pin in the history */
+    Pin *p = s->trackPin(s->pin(Point::active(0, 2)).value);
+
+    /* Resize */
+    ASSERT_TRUE(s->resize(rz(-1, 5, false)));
+    ASSERT_TRUE(5 == s->rows);
+    ASSERT_TRUE(53 == s->totalRows());
+
+    /* Our cursor should move since it's in the scrollback */
+    ASSERT_TRUE(activeAt(*s, p, 0, 4));
+
+    ASSERT_TRUE(activeScreenIs(*s, 48));
+    s->untrackPin(p);
+}
+
+static void writeRowsA(PageList &s, Page *page) {
+    /* Write into all rows so we don't get trim behavior */
+    for (size_t y = 0; y < s.rows; y++) *page->getRowAndCell(0, y).cell = page::Cell::init('A');
+}
+
+static void writeRowsY(PageList &s, Page *page) {
+    for (size_t y = 0; y < s.rows; y++) *page->getRowAndCell(0, y).cell = page::Cell::init((uint32_t)y);
+}
+
+static uint32_t cpAtPin(PageList &s, const Pin *p) {
+    const Point cursor = s.pointFromPin(point::Tag::active, *p).value;
+    return s.getCell(Point::active(cursor.c.x, cursor.c.y)).value.cell->contentCodepoint();
+}
+
+TEST(page_list, PageList_resize_no_reflow_less_rows) {
+    ListHolder s(opts(10, 10, (size_t)0));
+    ASSERT_TRUE(10 == s->totalRows());
+
+    /* This is required for our writing below to work */
+    ASSERT_TRUE(s->pages.first == s->pages.last);
+    writeRowsA(*s, s->pages.first->page());
+
+    /* Resize */
+    ASSERT_TRUE(s->resize(rz(-1, 5, false)));
+    ASSERT_TRUE(5 == s->rows);
+    ASSERT_TRUE(10 == s->totalRows());
+    ASSERT_TRUE(activeScreenIs(*s, 5));
+}
+
+TEST(page_list, PageList_resize_no_reflow_one_rows) {
+    ListHolder s(opts(10, 10, (size_t)0));
+    ASSERT_TRUE(10 == s->totalRows());
+
+    /* This is required for our writing below to work */
+    ASSERT_TRUE(s->pages.first == s->pages.last);
+    writeRowsA(*s, s->pages.first->page());
+
+    /* Resize */
+    ASSERT_TRUE(s->resize(rz(-1, 1, false)));
+    ASSERT_TRUE(1 == s->rows);
+    ASSERT_TRUE(10 == s->totalRows());
+    ASSERT_TRUE(activeScreenIs(*s, 9));
+}
+
+TEST(page_list, PageList_resize_no_reflow_less_rows_cursor_on_bottom) {
+    ListHolder s(opts(10, 10, (size_t)0));
+    ASSERT_TRUE(10 == s->totalRows());
+
+    /* This is required for our writing below to work */
+    ASSERT_TRUE(s->pages.first == s->pages.last);
+    writeRowsY(*s, s->pages.first->page());
+
+    /* Put a tracked pin in the history */
+    Pin *p = s->trackPin(s->pin(Point::active(0, 9)).value);
+    ASSERT_TRUE(9 == cpAtPin(*s, p));
+
+    /* Resize */
+    ASSERT_TRUE(s->resize(rz(-1, 5, false)));
+    ASSERT_TRUE(5 == s->rows);
+    ASSERT_TRUE(10 == s->totalRows());
+
+    /* Our cursor should move since it's in the scrollback */
+    ASSERT_TRUE(activeAt(*s, p, 0, 4));
+
+    ASSERT_TRUE(activeScreenIs(*s, 5));
+    s->untrackPin(p);
+}
+
+TEST(page_list, PageList_resize_no_reflow_less_rows_cursor_in_scrollback) {
+    ListHolder s(opts(10, 10, (size_t)0));
+    ASSERT_TRUE(10 == s->totalRows());
+
+    /* This is required for our writing below to work */
+    ASSERT_TRUE(s->pages.first == s->pages.last);
+    writeRowsY(*s, s->pages.first->page());
+
+    /* Put a tracked pin in the history */
+    Pin *p = s->trackPin(s->pin(Point::active(0, 2)).value);
+    ASSERT_TRUE(2 == cpAtPin(*s, p));
+
+    /* Resize */
+    ASSERT_TRUE(s->resize(rz(-1, 5, false)));
+    ASSERT_TRUE(5 == s->rows);
+    ASSERT_TRUE(10 == s->totalRows());
+
+    /* Our cursor should move since it's in the scrollback */
+    ASSERT_FALSE(s->pointFromPin(point::Tag::active, *p).has);
+    ASSERT_TRUE(pointEq(s->pointFromPin(point::Tag::screen, *p), Point::screen(0, 2)));
+
+    ASSERT_TRUE(activeScreenIs(*s, 5));
+    s->untrackPin(p);
+}
+
+TEST(page_list, PageList_resize_no_reflow_less_rows_trims_blank_lines) {
+    ListHolder s(opts(10, 5, (size_t)0));
+    ASSERT_TRUE(s->pages.first == s->pages.last);
+    Page *page = s->pages.first->page();
+
+    /* Write codepoint into first line */
+    *page->getRowAndCell(0, 0).cell = page::Cell::init('A');
+
+    /* Fill remaining lines with a background color */
+    for (size_t y = 1; y < s->rows; y++) *page->getRowAndCell(0, y).cell = bgRed();
+
+    /* Put a tracked pin in the history */
+    Pin *p = s->trackPin(s->pin(Point::active(0, 0)).value);
+    ASSERT_TRUE('A' == cpAtPin(*s, p));
+
+    /* Resize */
+    ASSERT_TRUE(s->resize(rz(-1, 2, false)));
+    ASSERT_TRUE(2 == s->rows);
+    ASSERT_TRUE(2 == s->totalRows());
+
+    /* Our cursor should not move since we trimmed */
+    ASSERT_TRUE(activeAt(*s, p, 0, 0));
+
+    ASSERT_TRUE(activeScreenIs(*s, 0));
+    s->untrackPin(p);
+}
+
+TEST(page_list, PageList_resize_no_reflow_less_rows_trims_blank_lines_cursor_in_blank_line) {
+    ListHolder s(opts(10, 5, (size_t)0));
+    ASSERT_TRUE(s->pages.first == s->pages.last);
+    Page *page = s->pages.first->page();
+
+    /* Write codepoint into first line */
+    *page->getRowAndCell(0, 0).cell = page::Cell::init('A');
+
+    /* Fill remaining lines with a background color */
+    for (size_t y = 1; y < s->rows; y++) *page->getRowAndCell(0, y).cell = bgRed();
+
+    /* Put a tracked pin in a blank line */
+    Pin *p = s->trackPin(s->pin(Point::active(0, 3)).value);
+
+    /* Resize */
+    ASSERT_TRUE(s->resize(rz(-1, 2, false)));
+    ASSERT_TRUE(2 == s->rows);
+    ASSERT_TRUE(4 == s->totalRows());
+
+    /* Our cursor should not move since we trimmed */
+    ASSERT_TRUE(activeAt(*s, p, 0, 1));
+    s->untrackPin(p);
+}
+
+TEST(page_list, PageList_resize_no_reflow_less_rows_trims_blank_lines_erases_pages) {
+    ListHolder s(opts(100, 5, (size_t)0));
+    ASSERT_TRUE(s->pages.first == s->pages.last);
+    Page *page = s->pages.first->page();
+
+    /* Resize to take up two pages */
+    {
+        const int rows = page->capacity.rows + 10;
+        ASSERT_TRUE(s->resize(rz(-1, rows, false)));
+        ASSERT_TRUE(2 == s->totalPages());
+    }
+
+    /* Write codepoint into first line */
+    *page->getRowAndCell(0, 0).cell = page::Cell::init('A');
+
+    /* Resize down. Every row except the first is blank so we
+     * should erase the second page. */
+    ASSERT_TRUE(s->resize(rz(-1, 5, false)));
+    ASSERT_TRUE(5 == s->rows);
+    ASSERT_TRUE(5 == s->totalRows());
+    ASSERT_TRUE(1 == s->totalPages());
+}
+
+TEST(page_list, PageList_resize_no_reflow_more_rows_extends_blank_lines) {
+    ListHolder s(opts(10, 3, (size_t)0));
+    ASSERT_TRUE(s->pages.first == s->pages.last);
+    Page *page = s->pages.first->page();
+
+    /* Write codepoint into first line */
+    *page->getRowAndCell(0, 0).cell = page::Cell::init('A');
+
+    /* Fill remaining lines with a background color */
+    for (size_t y = 1; y < s->rows; y++) *page->getRowAndCell(0, y).cell = bgRed();
+
+    /* Resize */
+    ASSERT_TRUE(s->resize(rz(-1, 7, false)));
+    ASSERT_TRUE(7 == s->rows);
+    ASSERT_TRUE(7 == s->totalRows());
+    ASSERT_TRUE(activeScreenIs(*s, 0));
+}
+
+TEST(page_list, PageList_resize_no_reflow_more_rows_contains_viewport) {
+    /* When the rows are increased we need to make sure that the viewport
+     * doesn't end up below the active area if it's currently in pin mode. */
+
+    ListHolder s(opts(5, 5, (size_t)1));
+    ASSERT_TRUE(s->pages.first == s->pages.last);
+
+    /* Make it so we have scrollback */
+    (void)growNode(&*s);
+
+    ASSERT_TRUE(5 == s->rows);
+    ASSERT_TRUE(6 == s->totalRows());
+
+    /* Set viewport above active by scrolling up one. */
+    s->scroll(Scroll::deltaRow(-1));
+    /* The viewport should be a pin now. */
+    ASSERT_TRUE(Viewport::top == s->viewport);
+
+    /* Resize */
+    ASSERT_TRUE(s->resize(rz(-1, 7, false)));
+    ASSERT_TRUE(7 == s->rows);
+    ASSERT_TRUE(7 == s->totalRows());
+
+    /* Question: maybe the viewport should actually be in the active
+     * here and not pinned to the top. */
+    ASSERT_TRUE(Viewport::top == s->viewport);
+}
+
 /* @@TESTS@@ */
 
 /* Wisp: std.testing.allocator's leak check. Runs last (registration order). */
