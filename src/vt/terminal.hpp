@@ -497,6 +497,27 @@ struct Terminal {
     /* Insert amount spaces at the current cursor position. */
     void insertBlanks(size_t count);
 
+    /* Print the previous printed character a repeated amount of times. */
+    bool printRepeat(size_t count_req);
+
+    /* Print multiple codepoints to the terminal at once. */
+    bool printSlice(const uint32_t *cps, size_t cps_len);
+
+    /* The width class of a printSlice batch. Each batch contains only
+     * codepoints of a single width class because they fill cells
+     * differently: wide codepoints occupy a (wide, spacer_tail) cell
+     * pair while narrow codepoints occupy a single cell. */
+    enum class PrintSliceWidth : uint8_t { narrow, wide };
+
+    bool printSliceFast(const uint32_t *cps, size_t cps_len, bool grapheme_cluster, bool allow_unicode,
+                        size_t *out);
+    static bool printSliceEligible(uint32_t cp, PrintSliceWidth width);
+    static void printSliceStoreRun(Cell *cells, const uint32_t *cps, size_t from, size_t to,
+                                   uint64_t template_bits);
+    static uint64_t printSliceCheckExpected(style::Id style_id);
+    bool printSliceFill(PrintSliceWidth width, const uint32_t *cps, size_t cps_len, bool grapheme_cluster,
+                        bool allow_unicode, size_t *out);
+
     /* Set the pwd for the terminal. Wisp: false is OutOfMemory. */
     bool setPwd(const char *pwd_new, size_t len);
     bool setPwd(const char *pwd_new) { return setPwd(pwd_new, strlen(pwd_new)); }

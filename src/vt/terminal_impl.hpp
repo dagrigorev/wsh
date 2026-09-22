@@ -2907,6 +2907,566 @@ inline bool Terminal::isDirty(const point::Point &pt) const {
 /* Clear all dirty bits. Testing only. */
 inline void Terminal::clearDirty() { screens.active->pages.clearDirty(); }
 
+/* Print the previous printed character a repeated amount of times. */
+inline bool Terminal::printRepeat(size_t count_req) {
+    if (!previous_char.has) return true;
+    const uint32_t c = previous_char.value;
+    size_t remaining = count_req > 1 ? count_req : 1;
+
+    /* Print the repeated codepoint in slices so that eligible runs
+     * take the batched printSlice fast path. printSlice is semantically
+     * identical to calling print per codepoint: ineligible characters
+     * or terminal states (insert mode, grapheme clustering, hyperlinks,
+     * etc.) fall back to the per-codepoint print() path internally.
+     *
+     * The buffer is filled with a runtime-bounded loop rather than
+     * `= @splat(c)`: a comptime-known 4096-element splat gets fully
+     * unrolled into ~33KB of consecutive stores (LLVM won't re-roll
+     * or vectorize it, see quirks_memset.zig), and it would fill the
+     * whole buffer even for the typical small repeat counts. */
+    static const size_t buf_len = 4096;
+    uint32_t *buf = (uint32_t *)malloc(buf_len * sizeof(uint32_t));
+    if (!buf) return false;
+    for (size_t i = 0, n = remaining < buf_len ? remaining : buf_len; i < n; i++) buf[i] = c;
+    while (remaining > 0) {
+        const size_t n = remaining < buf_len ? remaining : buf_len;
+        if (!printSlice(buf, n)) {
+            free(buf);
+            return false;
+        }
+        remaining -= n;
+    }
+    free(buf);
+    return true;
+}
+
+/* Print multiple codepoints to the terminal at once. This is
+ * semantically identical to calling `print` for each codepoint in
+ * order, but is much faster because it can batch cell writes and
+ * hoist per-codepoint checks out of the hot loop.
+ *
+ * The codepoints must all be printable: it is illegal for any
+ * codepoint in this slice to be a C0 control character. Therefore,
+ * this should only be called as a result of a proper VT parser
+ * (like our own).
+ *
+ * This is optimized for the common case: ASCII, soft-wrap, etc.
+ * Sequences of codepoints that require special handling (e.g. wide characters,
+ * grapheme clustering) are handled correctly but fall back to the
+ * slower per-codepoint path. They're less common and this is optimized
+ * for the aforementioned cases. */
+inline bool Terminal::printSlice(const uint32_t *cps, size_t cps_len) {
+    typedef terminal::modes::Mode Mode;
+
+    /* Check if we can do the fast path up front. If we can't
+     * we need to go back to scalar `print`. */
+    bool fast;
+    do {
+        fast = false;
+
+        /* Only the main display is supported. */
+        if (status_display != terminal::ansi::StatusDisplay::main) break;
+
+        /* Modes that require per-codepoint handling in print().
+         * Wraparound is required (its the default) so that our
+         * row-fill logic below can assume soft-wrap semantics. Insert
+         * mode shifts cells per print. */
+        if (modes.get(Mode::insert)) break;
+        if (!modes.get(Mode::wraparound)) break;
+
+        /* Charset must map ASCII as-is (true unless a DEC special
+         * charset is actively invoked, which is rare). */
+        const Screen *screen = screens.active;
+        if (screen->charset.single_shift.has) break;
+        {
+            const terminal::charsets::Charset set = screen->charset.charsets.get(screen->charset.gl);
+            if (set != terminal::charsets::Charset::utf8 && set != terminal::charsets::Charset::ascii) break;
+        }
+
+        /* Hyperlinks require per-cell map bookkeeping. */
+        if (screen->cursor.hyperlink_id != 0) break;
+
+        fast = true;
+    } while (false);
+    if (!fast) {
+        for (size_t i = 0; i < cps_len; i++) {
+            if (!print(cps[i])) return false;
+        }
+        return true;
+    }
+
+    const bool grapheme_cluster = modes.get(Mode::grapheme_cluster);
+
+    /* When grapheme clustering is enabled and a left margin is set,
+     * print() consults the cell left of the margin after wrapping,
+     * which we can't reason about here. Restrict the fast path to
+     * the [0x10, 0xFF] range in that case (those never cluster). */
+    const bool allow_unicode = !grapheme_cluster || scrolling_region.left == 0;
+
+    size_t i = 0;
+    while (i < cps_len) {
+        /* Try the fast-path print first. This will return the number of
+         * codepoints it consumed. */
+        size_t consumed = 0;
+        if (!printSliceFast(cps + i, cps_len - i, grapheme_cluster, allow_unicode, &consumed)) return false;
+        if (consumed > 0) {
+            i += consumed;
+            continue;
+        }
+
+        /* Consuming zero bytes means that the fast path can't handle
+         * the next codepoint or the terminal is in a state we can't
+         * fast-path. Fall back to the slow cp-by-cp print then try
+         * fast paths again. */
+        if (!print(cps[i])) return false;
+        i += 1;
+    }
+    return true;
+}
+
+/* Attempt to print a prefix of `cps` using a batched fast path that
+ * writes cells directly. Returns the number of codepoints consumed.
+ * A return value of zero means the caller must print the first
+ * codepoint via the normal `print` path.
+ *
+ * The fast path handles runs of narrow (width 1) and wide (width 2)
+ * codepoints being written to simple cells. Everything else (zero
+ * width codepoints, grapheme cluster continuations, complex cells,
+ * etc.) is rejected so `print` can handle it with full generality. */
+inline bool Terminal::printSliceFast(const uint32_t *cps, size_t cps_len, bool grapheme_cluster, bool allow_unicode,
+                                     size_t *out) {
+    Screen *screen = screens.active;
+    *out = 0;
+
+    /* Codepoints in [0x10, 0xFF] are always narrow (width 1, matching
+     * the c <= 0xFF fast path in print) and can never interact with
+     * grapheme clustering (which requires a codepoint > 0xFF).
+     *
+     * Codepoints above 0xFF are batchable if their width is 1 or 2
+     * (excluding zero-width characters such as combining marks, ZWJ,
+     * and variation selectors) and, when grapheme clustering (mode
+     * 2027) is enabled, if they are a grapheme break from the
+     * previously printed codepoint (so print would never attach them
+     * to the previous cell).
+     *
+     * Codepoints in [0x10, 0xFF] are always narrow: print()
+     * hardcodes width 1 for c <= 0xFF (no width table lookup).
+     * They also can never interact with grapheme clustering,
+     * which print() only performs for c > 0xFF, so they're
+     * immediately eligible for the narrow fill with no further
+     * checks. */
+    const uint32_t cp0 = cps[0];
+    if (cp0 <= 0xFF) {
+        /* C0 control characters (0x00-0x0F) aren't printable. The
+         * stream never sends these (they're routed to execute), but
+         * printSlice is a public API so defer to print() for safety. */
+        if (cp0 < 0x10) return true;
+        return printSliceFill(PrintSliceWidth::narrow, cps, cps_len, grapheme_cluster, allow_unicode, out);
+    }
+
+    if (!allow_unicode) return true;
+
+    /* The first codepoint requires care when grapheme clustering is
+     * enabled: print() may attach it to the previous *cell* instead
+     * of writing a new one. Take the first codepoint only when we can
+     * determine — computing exactly what print() would — that it
+     * starts a new cluster. At column zero with no pending wrap,
+     * print() skips clustering entirely. Otherwise resolve the
+     * previous cell the way print() does and check for a break.
+     *
+     * Note the pending-wrap rejection: print() may attach to the
+     * pending cell *instead of wrapping*, which we can't model here. */
+    if (grapheme_cluster && screen->cursor.x != 0) {
+        do { /* gate */
+            if (screen->cursor.pending_wrap) return true;
+
+            /* Resolve the content cell to our left exactly like print():
+             * if the immediate left cell is a wide spacer tail, the
+             * content lives one further left. (A spacer tail can never
+             * be at column zero — its wide half would have to be in the
+             * previous row — so the second cursorCellLeft is in bounds.) */
+            const Cell *immediate = screen->cursorCellLeft(1);
+            const Cell *prev =
+                immediate->wide() == Cell::Wide::spacer_tail ? screen->cursorCellLeft(2) : immediate;
+
+            /* An empty previous cell is necessarily a grapheme break. */
+            if (prev->codepoint() == 0) break;
+
+            /* Grapheme data on the previous cell requires the full
+             * cluster state machine replay; only print() can do that. */
+            if (prev->hasGrapheme()) return true;
+
+            /* A simple single-codepoint previous cell: print() would run
+             * exactly this break check from the default state. */
+            unicode::BreakState state;
+            if (!unicode::graphemeBreak(prev->contentCodepoint(), cp0, &state)) return true;
+        } while (false);
+    } else if (grapheme_cluster) {
+        if (screen->cursor.pending_wrap) return true;
+    }
+
+    /* The width lookup is a runtime value while printSliceFill is
+     * specialized at comptime by width class, so this switch selects
+     * between the two instantiations rather than passing the width
+     * through as an argument. */
+    switch (unicode::Table::get(cp0).width()) {
+    case 1: return printSliceFill(PrintSliceWidth::narrow, cps, cps_len, grapheme_cluster, allow_unicode, out);
+    case 2: return printSliceFill(PrintSliceWidth::wide, cps, cps_len, grapheme_cluster, allow_unicode, out);
+    default: return true;
+    }
+}
+
+/* Whether a codepoint above 0xFF is eligible for the batched print
+ * fast path with the given width class. */
+inline bool Terminal::printSliceEligible(uint32_t cp, PrintSliceWidth width) {
+    assert(cp > 0xFF);
+    return unicode::Table::get(cp).width() == (width == PrintSliceWidth::narrow ? 1 : 2);
+}
+
+/* Store a run of narrow codepoint cells built from a bit template:
+ * for each `idx` in `[from, to)`, `cells[idx]` is assigned the bits
+ * `template_bits | (cps[idx] << cp_shift)`.
+ *
+ * The template is a complete Cell (content tag, style, wide state,
+ * etc. already baked in by the caller) whose codepoint content bits
+ * are zero. Since Cell is a packed struct(u64), OR-ing a codepoint
+ * into the content field's bit position yields a finished cell as a
+ * single integer, keeping the loop pure data movement: no per-cell
+ * field assignments and no branches.
+ *
+ * Wisp: upstream manually vectorizes this loop; this is its scalar
+ * tail, which upstream also uses on targets without SIMD. */
+inline void Terminal::printSliceStoreRun(Cell *cells, const uint32_t *cps, size_t from, size_t to,
+                                         uint64_t template_bits) {
+    /* The bit position of the `content` field within the packed
+     * Cell. A codepoint occupies the low bits of `content`, so
+     * shifting a codepoint left by this amount places it exactly
+     * where `.content = .{ .codepoint = .{ .data = cp } }` would. */
+    const unsigned cp_shift = Cell::content_off;
+
+    /* Since codepoints are OR'd into the content field rather than
+     * assigned, any nonzero content bits in the template would
+     * corrupt the stored codepoints. */
+    assert((template_bits & page::fields::cell_content()) == 0);
+
+    for (size_t idx = from; idx < to; idx++) {
+        cells[idx].bits = template_bits | ((uint64_t)cps[idx] << cp_shift);
+    }
+}
+
+/* The expected value of a simple cell (per SimpleMask in
+ * printSliceFill) that already has the given style (so no
+ * ref-counting is needed). */
+inline uint64_t Terminal::printSliceCheckExpected(style::Id style_id) {
+    Cell e;
+    e.bits = 0;
+    e.setStyleId(style_id);
+    return e.bits;
+}
+
+/* The row-filling portion of the printSlice fast path, specialized by
+ * width class. The first codepoint must already be validated by the
+ * caller (printSliceFast). */
+inline bool Terminal::printSliceFill(PrintSliceWidth width, const uint32_t *cps, size_t cps_len,
+                                     bool grapheme_cluster, bool allow_unicode, size_t *out) {
+    Screen *screen = screens.active;
+    *out = 0;
+
+    /* Our fast path can only handle "simple" cells. A simple cell is
+     * a codepoint cell (no grapheme data or bg-color tag), narrow, and
+     * not a hyperlink. The mask covers every field that must match
+     * the expected value (see printSliceCheckExpected) exactly. */
+    typedef page::Mask<Cell, 4> SimpleMaskT;
+    const SimpleMaskT SimpleMask(page::fields::cell_content_tag() | page::fields::cell_style_id() |
+                                 page::fields::cell_wide() | page::fields::cell_hyperlink());
+
+    /* The bit offset of the codepoint content within a Cell, used to
+     * construct cell values from a template without field assignments. */
+    const unsigned cp_shift = Cell::content_off;
+
+    /* Determine the run of codepoints in the same width class that we
+     * can batch. For codepoints after the first, the previous codepoint
+     * in the run is always written as a fresh, single-codepoint cell,
+     * so the grapheme break check against it is exact. */
+    size_t run_len = cps_len;
+    {
+        size_t idx = 1;
+        for (; idx < cps_len; idx++) {
+            const uint32_t cp = cps[idx];
+            if (width == PrintSliceWidth::narrow) {
+                if (cp >= 0x10 && cp <= 0xFF) continue;
+            }
+            if (cp > 0xFF && allow_unicode && printSliceEligible(cp, width)) {
+                if (!grapheme_cluster) continue;
+                unicode::BreakState state;
+                if (unicode::graphemeBreak(cps[idx - 1], cp, &state)) continue;
+            }
+            break;
+        }
+        run_len = idx < cps_len ? idx : cps_len;
+    }
+    assert(run_len > 0);
+
+    /* After doing any printing, wrapping, scrolling, etc. we want to
+     * ensure that our screen remains in a consistent state. */
+    struct Guard {
+        Screen *s;
+        ~Guard() { s->assertIntegrity(); }
+    } guard = {screen};
+    (void)guard;
+
+    /* The number of cells each codepoint occupies. */
+    const size_t cells_per_cp = width == PrintSliceWidth::narrow ? 1 : 2;
+
+    size_t printed = 0;
+    while (printed < run_len) { /* outer */
+        /* If we're soft-wrapping, handle that first so that our cursor
+         * is in the row/column that will receive the next codepoint. */
+        if (screen->cursor.pending_wrap) {
+            if (!printWrap()) return false;
+        }
+
+        /* Our right margin depends on where our cursor is now,
+         * matching the logic in print(). */
+        const size_t right_limit =
+            screen->cursor.x > scrolling_region.right ? (size_t)cols : (size_t)(scrolling_region.right + 1);
+
+        /* A degenerate 1-wide region can't hold a wide char; print()
+         * has special handling so fall back to it. */
+        if (width == PrintSliceWidth::wide) {
+            if (right_limit - scrolling_region.left <= 1) break;
+        }
+
+        Screen::Cursor *cursor_ = &screen->cursor;
+        const size_t avail = right_limit - cursor_->x;
+        assert(avail > 0);
+
+        /* The cursor caches live row and cell pointers into this mapping, so
+         * its page cannot be compressed while this print path is active. */
+        Page *page = cursor_->page_pin->node->pageAssumeResident();
+        Cell *cells = cursor_->page_cell;
+        const style::Id style_id = cursor_->style_id;
+        Cell template_cell;
+        {
+            Cell t = Cell::init(0);
+            t.setStyleId(style_id);
+            t.setWide(Cell::Wide::narrow);
+            t.setProtected(cursor_->protected_);
+            t.setSemanticContent(cursor_->semantic_content);
+            template_cell = t;
+        }
+        const uint64_t template_bits = template_cell.bits;
+        const uint64_t check_expected = printSliceCheckExpected(style_id);
+
+        if (width == PrintSliceWidth::wide) {
+            if (avail == 1) {
+                /* Only one cell left in the row: print() writes a
+                 * spacer head (or a blank narrow cell if we're inside
+                 * a right margin) and wraps. We require a simple cell,
+                 * otherwise fall back to print() for the cleanup. */
+                if (!SimpleMask.eqlScalar(cells[0], check_expected)) break;
+
+                Cell spacer = template_cell;
+                if (right_limit == (size_t)cols) {
+                    cursor_->page_row->setWrap(true);
+                    spacer.setWide(Cell::Wide::spacer_head);
+                }
+                cursor_->page_row->setDirty(true);
+                if (style_id != style::default_id) cursor_->page_row->setStyled(true);
+                cells[0] = spacer;
+                if (!printWrap()) return false;
+                continue;
+            }
+        }
+
+        /* Number of codepoints and cells we're writing to this row. */
+        const size_t avail_cps = avail / cells_per_cp;
+        const size_t count = avail_cps < (run_len - printed) ? avail_cps : (run_len - printed);
+        assert(count > 0);
+        const size_t cell_count = count * cells_per_cp;
+
+        /* Wide cells always come in (wide, spacer_tail) pairs. */
+        uint64_t spacer_bits = 0;
+        uint64_t wide_bits = 0;
+        if (width == PrintSliceWidth::wide) {
+            Cell spacer = template_cell;
+            spacer.setWide(Cell::Wide::spacer_tail);
+            spacer_bits = spacer.bits;
+            Cell w = template_cell;
+            w.setWide(Cell::Wide::wide);
+            wide_bits = w.bits;
+        }
+
+        size_t k = 0; /* cells written */
+        while (k < cell_count) { /* fill */
+            /* Find the run of simple cells so the store loop below is
+             * branch-free (and vectorizable). This is an early-exit
+             * search loop that LLVM won't auto-vectorize, and reused
+             * rows typically match the whole way through, so scan
+             * several cells at a time manually. */
+            size_t simple = k;
+            {
+                bool done = false;
+                while (simple + SimpleMaskT::group_len <= cell_count) {
+                    const size_t p = SimpleMask.eqlPrefix(cells, simple, check_expected);
+                    simple += p;
+                    if (p != SimpleMaskT::group_len) {
+                        done = true;
+                        break;
+                    }
+                }
+                if (!done) {
+                    for (; simple < cell_count; simple++) {
+                        if (!SimpleMask.eqlScalar(cells[simple], check_expected)) break;
+                    }
+                }
+            }
+
+            if (width == PrintSliceWidth::wide) {
+                /* We can only write whole (wide, spacer) pairs. */
+                const size_t pair_end = k + (simple - k) / 2 * 2;
+                for (size_t idx = k; idx < pair_end; idx += 2) {
+                    cells[idx].bits = wide_bits | ((uint64_t)cps[printed + idx / 2] << cp_shift);
+                    cells[idx + 1].bits = spacer_bits;
+                }
+
+                /* If the simple run ended mid-pair we stop at the pair
+                 * boundary and handle the offending cell below. */
+                k = pair_end;
+                if (simple != pair_end) {
+                    /* The first cell of the next pair is simple but the
+                     * second isn't; handle both via the general path. */
+                    simple = pair_end;
+                }
+            } else {
+                printSliceStoreRun(cells, cps + printed, k, simple, template_bits);
+                k = simple;
+            }
+            if (k >= cell_count) break;
+
+            /* Bulk path for runs of cells that differ from the
+             * expected simple cell only by their style: this is the
+             * common case when styled text overwrites previously
+             * styled (or default-styled) rows, e.g. TUI redraws.
+             * These runs are handled wholesale: one scan to find the
+             * run of identical old styles, two ref-count updates,
+             * and a branch-free fill. */
+            if (width == PrintSliceWidth::narrow) {
+                bool bulk_done = false;
+                do { /* bulk */
+                    const uint64_t first = SimpleMask.pattern(cells[k]);
+
+                    /* The old cell must be a plain narrow codepoint cell
+                     * with no hyperlink whose only difference is the
+                     * style id (see printSliceCheckExpected: every other
+                     * masked field must be zero). */
+                    const style::Id old_style = (style::Id)((first >> Cell::style_id_off) & 0xFFFF);
+                    if (first != printSliceCheckExpected(old_style)) break;
+                    assert(old_style != style_id); /* it failed the simple check */
+
+                    /* Find the run of cells with identical masked bits. */
+                    size_t m = k + 1;
+                    {
+                        bool scan_done = false;
+                        while (m + SimpleMaskT::group_len <= cell_count) {
+                            const size_t p = SimpleMask.eqlPrefix(cells, m, first);
+                            m += p;
+                            if (p != SimpleMaskT::group_len) {
+                                scan_done = true;
+                                break;
+                            }
+                        }
+                        if (!scan_done) {
+                            for (; m < cell_count; m++) {
+                                if (!SimpleMask.eqlScalar(cells[m], first)) break;
+                            }
+                        }
+                    }
+
+                    /* Fix up the style ref counts for the whole run at
+                     * once. Each of the old cells held a reference to
+                     * old_style so the release is safe by construction. */
+                    const size_t n = m - k;
+                    if (old_style != style::default_id) {
+                        page->styles.releaseMultiple((const void *)page->memory, old_style, (style::Id)n);
+                    }
+                    if (style_id != style::default_id) {
+                        page->styles.useMultiple((const void *)page->memory, style_id,
+                                                 (ref_counted_set::RefCountInt)n);
+                    }
+
+                    printSliceStoreRun(cells, cps + printed, k, m, template_bits);
+                    k = m;
+                    bulk_done = true;
+                } while (false);
+                if (bulk_done) continue;
+            }
+
+            /* General path for cells that failed the masked check:
+             * style-only mismatches are handled inline; anything that
+             * needs cleanup (wide chars and their spacers, grapheme
+             * data, hyperlinks) falls back to print(). */
+            const size_t general_count = cells_per_cp;
+            {
+                bool fallback = false;
+                for (size_t offset = 0; offset < general_count; offset++) {
+                    const Cell *cell = &cells[k + offset];
+                    if (cell->wide() != Cell::Wide::narrow || cell->hasGrapheme() || cell->hyperlink()) {
+                        fallback = true;
+                        break;
+                    }
+                }
+                if (fallback) break;
+            }
+            for (size_t offset = 0; offset < general_count; offset++) {
+                Cell *cell = &cells[k + offset];
+                if (cell->style_id() != style_id) {
+                    if (cell->style_id() != style::default_id) {
+                        page->styles.release((const void *)page->memory, cell->style_id());
+                    }
+                    if (style_id != style::default_id) {
+                        page->styles.use((const void *)page->memory, style_id);
+                    }
+                }
+            }
+            if (width == PrintSliceWidth::wide) {
+                cells[k].bits = wide_bits | ((uint64_t)cps[printed + k / 2] << cp_shift);
+                cells[k + 1].bits = spacer_bits;
+            } else {
+                cells[k].bits = template_bits | ((uint64_t)cps[printed + k] << cp_shift);
+            }
+            k += cells_per_cp;
+        }
+
+        if (k > 0) {
+            assert(k % cells_per_cp == 0);
+            cursor_->page_row->setDirty(true);
+            if (style_id != style::default_id) cursor_->page_row->setStyled(true);
+            previous_char = cps[printed + k / cells_per_cp - 1];
+            printed += k / cells_per_cp;
+
+            /* Advance the cursor. If we filled through the right limit
+             * then the cursor stays on the last cell with the pending
+             * wrap flag set, matching print(). */
+            if (cursor_->x + k >= right_limit) {
+                assert(cursor_->x + k == right_limit);
+                screen->cursorRight((size::CellCountInt)(k - 1));
+                cursor_->pending_wrap = true;
+            } else {
+                screen->cursorRight((size::CellCountInt)k);
+            }
+        }
+
+        /* We hit a cell that requires the slow path. The cursor is
+         * exactly at that cell so return and let the caller print the
+         * next codepoint via print(). */
+        if (k < cell_count) break;
+    }
+
+    *out = printed;
+    return true;
+}
+
 } /* namespace vt */
 } /* namespace wisp */
 
