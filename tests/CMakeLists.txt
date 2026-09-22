@@ -13,6 +13,9 @@ function(add_wisp_test name src)
         ${CMAKE_SOURCE_DIR}/src/terminal
     )
     target_link_libraries(${name} PRIVATE wisp_core wisp_platform wisp_terminal)
+    # Ghostty's builtin.is_test and build_options.slow_runtime_safety, which
+    # upstream's tests run with; src/vt reads these.
+    target_compile_definitions(${name} PRIVATE WISP_IS_TEST=1 WISP_SLOW_RUNTIME_SAFETY=1)
     if(MSVC)
         # Console subsystem — tests use main(), not WinMain
         set_target_properties(${name} PROPERTIES
@@ -60,5 +63,6 @@ add_wisp_test(test_zigstd_port test_zigstd_port.cpp)
 add_wisp_test(test_vt_hash_map_port test_vt_hash_map_port.cpp)
 add_wisp_test(test_vt_ref_counted_set_port test_vt_ref_counted_set_port.cpp)
 add_wisp_test(test_vt_style_port test_vt_style_port.cpp)
+add_wisp_test(test_vt_page_port test_vt_page_port.cpp)
 add_wisp_test(test_segmented_list test_segmented_list.cpp)
 add_wisp_test(test_stream_port test_stream_port.cpp)

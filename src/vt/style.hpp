@@ -48,17 +48,18 @@ static const Id default_id = 0;
 
 /* The style attributes for a cell. */
 struct Style {
-    /* Wisp: packed struct(u16); bit layout in bits(). */
+    /* Wisp: packed struct(u16); bitfields keep it two bytes as upstream,
+     * and bits() gives the exact packed layout. */
     struct Flags {
-        bool bold;
-        bool italic;
-        bool faint;
-        bool blink;
-        bool inverse;
-        bool invisible;
-        bool strikethrough;
-        bool overline;
-        ::wisp::terminal::sgr::Attribute::Underline underline;
+        bool bold : 1;
+        bool italic : 1;
+        bool faint : 1;
+        bool blink : 1;
+        bool inverse : 1;
+        bool invisible : 1;
+        bool strikethrough : 1;
+        bool overline : 1;
+        ::wisp::terminal::sgr::Attribute::Underline underline : 3;
 
         Flags()
             : bold(false), italic(false), faint(false), blink(false), inverse(false),
@@ -80,8 +81,12 @@ struct Style {
 
     /* The color for an SGR attribute. A color can come from multiple
      * sources so we use this to track the source plus color value so that
-     * we can properly react to things like palette changes. */
-    struct Color {
+     * we can properly react to things like palette changes.
+     *
+     * Wisp: union(Tag) with an RGB packed struct(u24) payload is 8 bytes
+     * with 4-byte alignment in Zig; alignas(4) keeps sizeof(Style), and so
+     * the page layout, the same. */
+    struct alignas(4) Color {
         enum class Tag : uint8_t {
             none,
             palette,
