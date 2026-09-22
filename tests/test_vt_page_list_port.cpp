@@ -5722,6 +5722,393 @@ TEST(page_list, PageList_resize_reflow_more_cols_cursor_in_wrapped_row) {
     s->untrackPin(p);
 }
 
+static hyperlink::Hyperlink explicitLink(const std::string &uri, const std::string &id) {
+    hyperlink::Hyperlink l;
+    l.uri = (const uint8_t *)uri.data();
+    l.uri_len = uri.size();
+    l.id = hyperlink::Hyperlink::Id::makeExplicit((const uint8_t *)id.data(), id.size());
+    return l;
+}
+static hyperlink::Hyperlink implicitLinkS(const std::string &uri, uint32_t implicit) {
+    hyperlink::Hyperlink l;
+    l.uri = (const uint8_t *)uri.data();
+    l.uri_len = uri.size();
+    l.id = hyperlink::Hyperlink::Id::makeImplicit(implicit);
+    return l;
+}
+
+TEST(page_list, PageList_resize_reflow_more_cols_cursor_in_not_wrapped_row) {
+    ListHolder s(opts(2, 4, (size_t)0));
+    ASSERT_TRUE(s->pages.first == s->pages.last);
+    Page *page = s->pages.first->page();
+    rowX(*s, page, 0, true, false);
+    rowX(*s, page, 1, false, true);
+
+    /* Put a tracked pin in the history */
+    Pin *p = s->trackPin(s->pin(Point::active(1, 0)).value);
+
+    /* Resize */
+    ASSERT_TRUE(s->resize(rz(4, -1, true)));
+    ASSERT_TRUE(4 == s->cols);
+    ASSERT_TRUE(4 == s->totalRows());
+
+    /* Our cursor should move to the first row */
+    ASSERT_TRUE(activeAt(*s, p, 1, 0));
+    s->untrackPin(p);
+}
+
+TEST(page_list, PageList_resize_reflow_more_cols_cursor_in_wrapped_row_that_isnt_unwrapped) {
+    ListHolder s(opts(2, 4, (size_t)0));
+    ASSERT_TRUE(s->pages.first == s->pages.last);
+    Page *page = s->pages.first->page();
+    rowX(*s, page, 0, true, false);
+    rowX(*s, page, 1, true, true);
+    rowX(*s, page, 2, false, true);
+
+    /* Put a tracked pin in the history */
+    Pin *p = s->trackPin(s->pin(Point::active(1, 2)).value);
+
+    /* Resize */
+    ASSERT_TRUE(s->resize(rz(4, -1, true)));
+    ASSERT_TRUE(4 == s->cols);
+    ASSERT_TRUE(4 == s->totalRows());
+
+    /* Our cursor should move to the first row */
+    ASSERT_TRUE(activeAt(*s, p, 1, 1));
+    s->untrackPin(p);
+}
+
+TEST(page_list, PageList_resize_reflow_more_cols_no_reflow_preserves_semantic_prompt) {
+    ListHolder s(opts(2, 4, (size_t)0));
+    {
+        ASSERT_TRUE(s->pages.first == s->pages.last);
+        setPrompt(s->pages.first->page(), 1, SP::prompt);
+    }
+
+    /* Resize */
+    ASSERT_TRUE(s->resize(rz(4, -1, true)));
+    ASSERT_TRUE(4 == s->cols);
+    ASSERT_TRUE(4 == s->totalRows());
+
+    {
+        ASSERT_TRUE(s->pages.first == s->pages.last);
+        Page *page = s->pages.first->page();
+        ASSERT_TRUE(page->getRowAndCell(0, 1).row->semantic_prompt() == SP::prompt);
+    }
+}
+
+/* Wisp: "Grow to the capacity of the first page and add one more row so
+ * that we have two pages total." */
+static bool twoPages(PageList &s) {
+    if (!growFirstPageThen(s, 1)) return false;
+    return s.pages.first != s.pages.last && s.pages.last == s.pages.first->next;
+}
+
+TEST(page_list, PageList_resize_reflow_exceeds_hyperlink_memory_forcing_capacity_increase) {
+    ListHolder s(opts(2, 10, (size_t)0));
+    ASSERT_TRUE(1 == s->totalPages());
+
+    /* Grow to the capacity of the first page and add
+     * one more row so that we have two pages total. */
+    ASSERT_TRUE(twoPages(*s));
+
+    /* We use almost all string alloc capacity with a hyperlink in the final
+     * row of the first page, and do the same on the first row of the second
+     * page. We also mark the row as wrapped so that when we resize with more
+     * cols the row unwraps and we have a single row that requires almost two
+     * times the base string alloc capacity.
+     *
+     * This forces the reflow to increase capacity. */
+    const std::string big(page::string_bytes_default - 1, 'a');
+    const std::string small(26, 'A');
+
+    /* Almost hit string alloc cap in bottom right of first page.
+     * Mark the final row as wrapped. */
+    {
+        Page *page = s->pages.first->page();
+        hyperlink::Id id;
+        ASSERT_TRUE(page->insertHyperlink(implicitLinkS(big, 0), &id) == page::PageError::none);
+        const Page::RowAndCell rac = page->getRowAndCell(page->size.cols - 1, page->size.rows - 1);
+        rac.row->setWrap(true);
+        *rac.cell = page::Cell::init('X');
+        ASSERT_TRUE(page->setHyperlink(rac.row, rac.cell, id) == page::PageError::none);
+        hyperlink::Id id2;
+        ASSERT_TRUE(page->insertHyperlink(implicitLinkS(small, 1), &id2) == page::PageError::StringsOutOfMemory);
+    }
+
+    /* Almost hit string alloc cap in top left of second page.
+     * Mark the first row as a wrap continuation. */
+    {
+        Page *page = s->pages.last->page();
+        hyperlink::Id id;
+        ASSERT_TRUE(page->insertHyperlink(implicitLinkS(big, 1), &id) == page::PageError::none);
+        const Page::RowAndCell rac = page->getRowAndCell(0, 0);
+        rac.row->setWrapContinuation(true);
+        *rac.cell = page::Cell::init('X');
+        ASSERT_TRUE(page->setHyperlink(rac.row, rac.cell, id) == page::PageError::none);
+        hyperlink::Id id2;
+        ASSERT_TRUE(page->insertHyperlink(implicitLinkS(small, 2), &id2) == page::PageError::StringsOutOfMemory);
+    }
+
+    /* Resize to 1 column wider, unwrapping the row. */
+    ASSERT_TRUE(s->resize(rz(s->cols + 1, -1, true)));
+}
+
+TEST(page_list, PageList_resize_reflow_hyperlink_dupe_string_alloc_chunk_rounding) {
+    ListHolder s(opts(2, 10, (size_t)0));
+    ASSERT_TRUE(1 == s->totalPages());
+
+    /* Grow to the capacity of the first page and add
+     * one more row so that we have two pages total. */
+    ASSERT_TRUE(twoPages(*s));
+
+    /* The string allocator hands out 32-byte chunks and every allocation
+     * is rounded up to the chunk size independently. Duping a hyperlink
+     * during reflow allocates the URI and the explicit ID separately, so
+     * two separate allocations can require one more chunk than a single
+     * combined allocation of the same total byte length.
+     *
+     * We arrange for the reflow target page to have exactly two free
+     * chunks (64 bytes) remaining when a hyperlink with a 33-byte URI
+     * (2 chunks) and a 31-byte explicit ID (1 chunk) is reflowed into
+     * it. The combined byte length (64 bytes -> 2 chunks) fits, but the
+     * separate allocations (3 chunks) do not, so the reflow must grow
+     * the string capacity rather than panic or drop the hyperlink.
+     *
+     * The two hyperlinked cells are joined as a single wrapped row so
+     * that they are always reflowed into the same target page. */
+
+    const std::string uri_a(page::string_bytes_default - 64, 'a');
+    const std::string uri_b(33, 'b');
+    const std::string id_b(31, 'i');
+
+    /* Hyperlink A in the bottom right of the first page. Mark the final
+     * row as wrapped. */
+    {
+        Page *page = s->pages.first->page();
+        hyperlink::Id id;
+        ASSERT_TRUE(page->insertHyperlink(implicitLinkS(uri_a, 0), &id) == page::PageError::none);
+        const Page::RowAndCell rac = page->getRowAndCell(page->size.cols - 1, page->size.rows - 1);
+        rac.row->setWrap(true);
+        *rac.cell = page::Cell::init('A');
+        ASSERT_TRUE(page->setHyperlink(rac.row, rac.cell, id) == page::PageError::none);
+
+        /* Sanity check the chunk math: the remaining 64 bytes fit as a
+         * single allocation but not as the two separate allocations that
+         * inserting (or duping) hyperlink B performs. */
+        uint8_t *buf;
+        ASSERT_TRUE(page->string_alloc.alloc<uint8_t>((const void *)page->memory, 64, &buf));
+        page->string_alloc.free((const void *)page->memory, buf, 64);
+        hyperlink::Id id2;
+        ASSERT_TRUE(page->insertHyperlink(explicitLink(uri_b, id_b), &id2) == page::PageError::StringsOutOfMemory);
+    }
+
+    /* Hyperlink B in the top left of the second page. Mark the first
+     * row as a wrap continuation. */
+    {
+        Page *page = s->pages.last->page();
+        hyperlink::Id id;
+        ASSERT_TRUE(page->insertHyperlink(explicitLink(uri_b, id_b), &id) == page::PageError::none);
+        const Page::RowAndCell rac = page->getRowAndCell(0, 0);
+        rac.row->setWrapContinuation(true);
+        *rac.cell = page::Cell::init('B');
+        ASSERT_TRUE(page->setHyperlink(rac.row, rac.cell, id) == page::PageError::none);
+    }
+
+    /* Resize to 1 column wider, unwrapping the row. */
+    ASSERT_TRUE(s->resize(rz(s->cols + 1, -1, true)));
+
+    /* Both hyperlinks must have survived the reflow intact. */
+    size_t found = 0;
+    for (Node *node = s->pages.first; node; node = node->next) {
+        Page *page = node->page();
+        for (size_t y = 0; y < page->size.rows; y++) {
+            for (size_t x = 0; x < page->size.cols; x++) {
+                const Page::RowAndCell rac = page->getRowAndCell(x, y);
+                if (!rac.cell->hyperlink()) continue;
+                found += 1;
+
+                hyperlink::Id link_id;
+                ASSERT_TRUE(page->lookupHyperlink(rac.cell, &link_id));
+                const hyperlink::PageEntry *entry = page->hyperlink_set.get((const void *)page->memory, link_id);
+                const std::string uri((const char *)entry->uri.slice((const void *)page->memory), entry->uri.len);
+                switch (entry->id.tag) {
+                case hyperlink::PageEntry::Id::Tag::implicit: ASSERT_TRUE(uri_a == uri); break;
+                case hyperlink::PageEntry::Id::Tag::explicit_: {
+                    ASSERT_TRUE(uri_b == uri);
+                    const std::string idv((const char *)entry->id.explicit_.slice((const void *)page->memory),
+                                          entry->id.explicit_.len);
+                    ASSERT_TRUE(id_b == idv);
+                    break;
+                }
+                }
+            }
+        }
+    }
+    ASSERT_TRUE(2 == found);
+}
+
+TEST(page_list, PageList_resize_reflow_exceeds_grapheme_memory_forcing_capacity_increase) {
+    ListHolder s(opts(4, 10, (size_t)0));
+    ASSERT_TRUE(1 == s->totalPages());
+
+    /* Grow to the capacity of the first page and add
+     * one more row so that we have two pages total. */
+    ASSERT_TRUE(twoPages(*s));
+
+    /* We use all grapheme alloc capacity with four maximum-sized graphemes on
+     * each page. The two rows form one wrapped logical line across the page
+     * boundary, so resizing wider moves all eight graphemes into one page and
+     * requires almost two times the base grapheme alloc capacity.
+     *
+     * This forces the reflow to increase capacity. */
+
+    uint32_t suffixes[page::grapheme_max_len];
+    for (size_t i = 0; i < page::grapheme_max_len; i++) suffixes[i] = 'a';
+
+    /* Fill the final row of the first page and mark it as wrapped. */
+    {
+        Page *page = s->pages.first->page();
+        const size_t y = page->size.rows - 1;
+        page->getRow(y)->setWrap(true);
+
+        for (size_t x = 0; x < page->size.cols; x++) {
+            const Page::RowAndCell rac = page->getRowAndCell(x, y);
+            *rac.cell = page::Cell::init('X');
+            ASSERT_TRUE(page->setGraphemes(rac.row, rac.cell, suffixes, page::grapheme_max_len) ==
+                        page::PageError::none);
+        }
+        ASSERT_TRUE(page->grapheme_alloc.capacityBytes() == page->grapheme_alloc.usedBytes((const void *)page->memory));
+        uint32_t *tmp;
+        ASSERT_FALSE(page->grapheme_alloc.alloc<uint32_t>((const void *)page->memory, 16, &tmp));
+    }
+
+    /* Fill the first row of the second page and mark it as a continuation. */
+    {
+        Page *page = s->pages.last->page();
+        page->getRow(0)->setWrapContinuation(true);
+
+        for (size_t x = 0; x < page->size.cols; x++) {
+            const Page::RowAndCell rac = page->getRowAndCell(x, 0);
+            *rac.cell = page::Cell::init('X');
+            ASSERT_TRUE(page->setGraphemes(rac.row, rac.cell, suffixes, page::grapheme_max_len) ==
+                        page::PageError::none);
+        }
+        uint32_t *tmp;
+        ASSERT_FALSE(page->grapheme_alloc.alloc<uint32_t>((const void *)page->memory, 16, &tmp));
+    }
+
+    /* Resize to 1 column wider, unwrapping the row. */
+    ASSERT_TRUE(s->resize(rz(s->cols + 1, -1, true)));
+}
+
+TEST(page_list, PageList_resize_reflow_exceeds_style_memory_forcing_capacity_increase) {
+    ListHolder s(opts((size::CellCountInt)(page::std_capacity().styles - 1), 10, (size_t)0));
+    ASSERT_TRUE(1 == s->totalPages());
+
+    /* Grow to the capacity of the first page and add
+     * one more row so that we have two pages total. */
+    ASSERT_TRUE(twoPages(*s));
+
+    /* Give each cell in the final row of the first page a unique style.
+     * Mark the final row as wrapped. */
+    {
+        Page *page = s->pages.first->page();
+        for (size_t x = 0; x < s->cols; x++) {
+            style::Style st;
+            style::RGB rgb;
+            rgb.r = (uint8_t)x;
+            rgb.g = (uint8_t)(x >> 8);
+            rgb.b = (uint8_t)(x >> 16);
+            st.bg_color = style::Style::Color::makeRgb(rgb);
+            style::Id id;
+            if (page->styles.add((const void *)page->memory, st, &id) != ref_counted_set::AddError::none) break;
+
+            const Page::RowAndCell rac = page->getRowAndCell(x, page->size.rows - 1);
+            rac.row->setWrap(true);
+            rac.row->setStyled(true);
+            page::Cell c = page::Cell::init('X');
+            c.setStyleId(id);
+            *rac.cell = c;
+        }
+    }
+
+    /* Do the same for the first row of the second page.
+     * Mark the first row as a wrap continuation. */
+    {
+        Page *page = s->pages.last->page();
+        for (size_t x = 0; x < s->cols; x++) {
+            style::Style st;
+            style::RGB rgb;
+            rgb.r = (uint8_t)x;
+            rgb.g = (uint8_t)(x >> 8);
+            rgb.b = (uint8_t)(x >> 16);
+            st.fg_color = style::Style::Color::makeRgb(rgb);
+            style::Id id;
+            if (page->styles.add((const void *)page->memory, st, &id) != ref_counted_set::AddError::none) break;
+
+            const Page::RowAndCell rac = page->getRowAndCell(x, 0);
+            rac.row->setWrapContinuation(true);
+            rac.row->setStyled(true);
+            page::Cell c = page::Cell::init('X');
+            c.setStyleId(id);
+            *rac.cell = c;
+        }
+    }
+
+    /* Resize to twice as wide, fully unwrapping the row. */
+    ASSERT_TRUE(s->resize(rz(s->cols * 2, -1, true)));
+}
+
+TEST(page_list, PageList_resize_reflow_more_cols_unwrap_wide_spacer_head) {
+    typedef page::Cell::Wide Wide;
+    ListHolder s(opts(2, 2, (size_t)0));
+    {
+        ASSERT_TRUE(s->pages.first == s->pages.last);
+        Page *page = s->pages.first->page();
+
+        {
+            const Page::RowAndCell rac = page->getRowAndCell(0, 0);
+            rac.row->setWrap(true);
+            *rac.cell = page::Cell::init('x');
+        }
+        *page->getRowAndCell(1, 0).cell = wideCell(0, Wide::spacer_head);
+        {
+            const Page::RowAndCell rac = page->getRowAndCell(0, 1);
+            rac.row->setWrapContinuation(true);
+            *rac.cell = wideCell(0x1F600, Wide::wide);
+        }
+        *page->getRowAndCell(1, 1).cell = wideCell(0, Wide::spacer_tail);
+    }
+
+    /* Resize */
+    ASSERT_TRUE(s->resize(rz(4, -1, true)));
+    ASSERT_TRUE(4 == s->cols);
+    ASSERT_TRUE(2 == s->totalRows());
+
+    {
+        ASSERT_TRUE(s->pages.first == s->pages.last);
+        Page *page = s->pages.first->page();
+
+        {
+            const Page::RowAndCell rac = page->getRowAndCell(0, 0);
+            ASSERT_TRUE('x' == rac.cell->contentCodepoint());
+            ASSERT_TRUE(Wide::narrow == rac.cell->wide());
+            ASSERT_FALSE(rac.row->wrap());
+        }
+        {
+            const Page::RowAndCell rac = page->getRowAndCell(1, 0);
+            ASSERT_TRUE(0x1F600 == rac.cell->contentCodepoint());
+            ASSERT_TRUE(Wide::wide == rac.cell->wide());
+        }
+        {
+            const Page::RowAndCell rac = page->getRowAndCell(2, 0);
+            ASSERT_TRUE(0 == rac.cell->contentCodepoint());
+            ASSERT_TRUE(Wide::spacer_tail == rac.cell->wide());
+        }
+    }
+}
+
 /* @@TESTS@@ */
 
 /* Wisp: std.testing.allocator's leak check. Runs last (registration order). */
