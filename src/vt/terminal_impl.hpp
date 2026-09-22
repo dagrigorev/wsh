@@ -940,6 +940,346 @@ inline bool Terminal::printWrap() {
     return true;
 }
 
+/* Perform a semantic prompt command.
+ *
+ * If there is an error, we do our best to get the terminal into
+ * some coherent state, since callers typically can't handle errors
+ * (since they're sending sequences via the pty). */
+inline bool Terminal::semanticPrompt(const terminal::osc::semantic_prompt::Command &cmd) {
+    typedef terminal::osc::semantic_prompt::Command Command;
+    typedef terminal::osc::semantic_prompt::Option Option;
+    typedef terminal::osc::semantic_prompt::PromptKind PromptKind;
+    typedef Screen::SemanticContentSet SCS;
+
+    switch (cmd.action) {
+    case Command::Action::fresh_line:
+        if (!semanticPromptFreshLine()) return false;
+        break;
+
+    case Command::Action::fresh_line_new_prompt: {
+        /* "First do a fresh-line." */
+        if (!semanticPromptFreshLine()) return false;
+
+        Screen *screen = screens.active;
+
+        /* "Subsequent text (until a OSC "133;B" or OSC "133;I" command)
+         * is a prompt string (as if followed by OSC 133;P;k=i\007)." */
+        {
+            PromptKind kind;
+            if (!cmd.readOption(Option::prompt_kind, &kind)) kind = PromptKind::initial;
+            screen->cursorSetSemanticContent(SCS::makePrompt(kind));
+        }
+
+        /* This is a kitty-specific flag that notes that the shell
+         * is NOT capable of redraw. Redraw defaults to true so this
+         * usually just disables it, but either is possible. */
+        {
+            terminal::osc::semantic_prompt::Redraw v;
+            if (cmd.readOption(Option::redraw, &v)) {
+                flags.shell_redraws_prompt = v;
+            }
+        }
+
+        do { /* click */
+            /* Handle click_events as a priority over cl. click_events
+             * is another Kitty-specific extension that converts clicks
+             * within a prompt area to SGR mouse events and defers to the
+             * shell to handle them. */
+            terminal::osc::semantic_prompt::ClickEvents ev;
+            if (cmd.readOption(Option::click_events, &ev)) {
+                screen->semantic_prompt.click.tag = Screen::SemanticPrompt::SemanticClick::Kind::click_events;
+                screen->semantic_prompt.click.click_events = ev;
+                break;
+            }
+
+            /* If click_events was not set or disabled, fallback to `cl`. */
+            terminal::osc::semantic_prompt::Click cl;
+            if (cmd.readOption(Option::cl, &cl)) {
+                screen->semantic_prompt.click.tag = Screen::SemanticPrompt::SemanticClick::Kind::cl;
+                screen->semantic_prompt.click.cl = cl;
+            }
+        } while (false);
+
+        /* The "aid" and "cl" options are also valid for this
+         * command but we don't yet handle these in any meaningful way. */
+        break;
+    }
+
+    case Command::Action::new_command: {
+        /* Spec:
+         * Same as OSC "133;A" but may first implicitly terminate a
+         * previous command: if the options specify an aid and there
+         * is an active (open) command with matching aid, finish the
+         * innermost such command (as well as any other commands
+         * nested more deeply). If no aid is specified, treat as an
+         * aid whose value is the empty string.
+         *
+         * Ghostty:
+         * We don't currently do explicit command tracking in any way
+         * so there is no need to terminate prior commands. We just
+         * perform the `A` action. */
+        Command next = Command::init(Command::Action::fresh_line_new_prompt);
+        next.options_unvalidated = cmd.options_unvalidated;
+        return semanticPrompt(next);
+    }
+
+    case Command::Action::prompt_start: {
+        /* Explicit start of prompt. Optional after an A or N command.
+         * The k (kind) option specifies the type of prompt:
+         * regular primary prompt (k=i or default),
+         * right-side prompts (k=r), or prompts for continuation lines (k=c or k=s). */
+        PromptKind kind;
+        if (!cmd.readOption(Option::prompt_kind, &kind)) kind = PromptKind::initial;
+        screens.active->cursorSetSemanticContent(SCS::makePrompt(kind));
+        break;
+    }
+
+    case Command::Action::end_prompt_start_input:
+        /* End of prompt and start of user input, terminated by a OSC
+         * "133;C" or another prompt (OSC "133;P"). */
+        screens.active->cursorSetSemanticContent(SCS::makeInput(SCS::InputClear::clear_explicit));
+        break;
+
+    case Command::Action::end_prompt_start_input_terminate_eol:
+        /* End of prompt and start of user input, terminated by end-of-line. */
+        screens.active->cursorSetSemanticContent(SCS::makeInput(SCS::InputClear::clear_eol));
+        break;
+
+    case Command::Action::end_input_start_output:
+        /* "End of input, and start of output." */
+        screens.active->cursorSetSemanticContent(SCS::makeOutput());
+
+        /* If our current row is marked as a prompt and we're
+         * at column zero then we assume we're un-prompting. This
+         * is a heuristic to deal with fish, mostly. The issue that
+         * fish brings up is that it has no PS2 equivalent and its
+         * builtin OSC133 marking doesn't output continuation lines
+         * as k=s. So, we assume when we get a newline with a prompt
+         * cursor that the new line is also a prompt. But fish changes
+         * to output on the newline. So if we're at col 0 we just assume
+         * we're overwriting the prompt. */
+        if (screens.active->cursor.page_row->semantic_prompt() != Row::SemanticPrompt::none &&
+            screens.active->cursor.x == 0) {
+            screens.active->cursor.page_row->setSemanticPrompt(Row::SemanticPrompt::none);
+        }
+        break;
+
+    case Command::Action::end_command:
+        /* From a terminal state perspective, this doesn't really do
+         * anything. Other terminals appear to do nothing here. I think
+         * its reasonable at this point to reset our semantic content
+         * state but the spec doesn't really say what to do. */
+        screens.active->cursorSetSemanticContent(SCS::makeOutput());
+        break;
+    }
+    return true;
+}
+
+/* OSC 133;L */
+inline bool Terminal::semanticPromptFreshLine() {
+    const size::CellCountInt left_margin =
+        screens.active->cursor.x < scrolling_region.left ? (size::CellCountInt)0 : scrolling_region.left;
+
+    /* Spec: "If the cursor is the initial column (left, assuming
+     * left-to-right writing), do nothing" This specification is very under
+     * specified. We are taking the liberty to assume that in a left/right
+     * margin context, if the cursor is outside of the left margin, we treat
+     * it as being at the left margin for the purposes of this command.
+     * This is arbitrary. If someone has a better reasonable idea we can
+     * apply it. */
+    if (screens.active->cursor.x == left_margin) return true;
+
+    carriageReturn();
+    return index();
+}
+
+/* Returns true if the cursor is currently at a prompt. Another way to look
+ * at this is it returns false if the shell is currently outputting something.
+ * This requires shell integration (semantic prompt integration).
+ *
+ * If the shell integration doesn't exist, this will always return false. */
+inline bool Terminal::cursorIsAtPrompt() {
+    /* If we're on the secondary screen, we're never at a prompt. */
+    if (screens.active_key == ScreenSet::Key::alternate) return false;
+
+    /* If our page row is a prompt then we're always at a prompt */
+    const Screen::Cursor *cursor_ = &screens.active->cursor;
+    if (cursor_->page_row->semantic_prompt() != Row::SemanticPrompt::none) return true;
+
+    /* Otherwise, determine our cursor state */
+    switch (cursor_->semantic_content) {
+    case Cell::SemanticContent::input:
+    case Cell::SemanticContent::prompt: return true;
+    default: return false;
+    }
+}
+
+/* Horizontal tab moves the cursor to the next tabstop, clearing
+ * the screen to the left the tabstop. */
+inline void Terminal::horizontalTab() {
+    while (screens.active->cursor.x < scrolling_region.right) {
+        /* Move the cursor right */
+        screens.active->cursorRight(1);
+
+        /* If the last cursor position was a tabstop we return. We do
+         * "last cursor position" because we want a space to be written
+         * at the tabstop unless we're at the end (the while condition). */
+        if (tabstops.get(screens.active->cursor.x)) return;
+    }
+}
+
+/* Same as horizontalTab but moves to the previous tabstop instead of the next. */
+inline void Terminal::horizontalTabBack() {
+    /* With origin mode enabled, our leftmost limit is the left margin. */
+    const size::CellCountInt left_limit =
+        modes.get(terminal::modes::Mode::origin) ? scrolling_region.left : (size::CellCountInt)0;
+
+    for (;;) {
+        /* If we're already at the edge of the screen, then we're done. */
+        if (screens.active->cursor.x <= left_limit) return;
+
+        /* Move the cursor left */
+        screens.active->cursorLeft(1);
+        if (tabstops.get(screens.active->cursor.x)) return;
+    }
+}
+
+/* Clear tab stops. */
+inline void Terminal::tabClear(terminal::csi::TabClear cmd) {
+    switch (cmd) {
+    case terminal::csi::TabClear::current: tabstops.unset(screens.active->cursor.x); break;
+    case terminal::csi::TabClear::all: tabstops.reset(0); break;
+    default: /* log.warn("invalid or unknown tab clear setting: {}") */ break;
+    }
+}
+
+/* Set a tab stop on the current cursor.
+ * TODO: test */
+inline void Terminal::tabSet() { tabstops.set(screens.active->cursor.x); }
+
+/* TODO: test */
+inline void Terminal::tabReset() { tabstops.reset(TABSTOP_INTERVAL); }
+
+/* Move the cursor to the next line in the scrolling region, possibly scrolling.
+ *
+ * If the cursor is outside of the scrolling region: move the cursor one line
+ * down if it is not on the bottom-most line of the screen.
+ *
+ * If the cursor is inside the scrolling region:
+ *   If the cursor is on the bottom-most line of the scrolling region:
+ *     invoke scroll up with amount=1
+ *   If the cursor is not on the bottom-most line of the scrolling region:
+ *     move the cursor one line down
+ *
+ * This unsets the pending wrap state without wrapping. */
+inline bool Terminal::index() {
+    Screen *screen = screens.active;
+
+    /* Unset pending wrap state */
+    screen->cursor.pending_wrap = false;
+
+    /* We handle our cursor semantic prompt state AFTER doing the
+     * scrolling, because we may need to apply to new rows. */
+    struct SemanticGuard {
+        Screen *screen;
+        ~SemanticGuard() {
+            if (screen->cursor.semantic_content != Cell::SemanticContent::output) {
+                /* Always reset any semantic content clear-eol state.
+                 *
+                 * The specification is not clear what "end-of-line" means. If we
+                 * discover that there are more scenarios we should be unsetting
+                 * this we should document and test it. */
+                if (screen->cursor.semantic_content_clear_eol) {
+                    screen->cursor.semantic_content = Cell::SemanticContent::output;
+                    screen->cursor.semantic_content_clear_eol = false;
+                } else {
+                    /* If we aren't clearing our state at EOL and we're not output,
+                     * then we mark the new row as a prompt continuation. This is
+                     * to work around shells that don't send OSC 133 k=s sequences
+                     * for continuations.
+                     *
+                     * This can be a false positive if the shell changes content
+                     * type later and outputs something. We handle that in the
+                     * semanticPrompt function. */
+                    screen->cursor.page_row->setSemanticPrompt(Row::SemanticPrompt::prompt_continuation);
+                }
+            } else {
+                /* This should never be set in the output mode. */
+                assert(!screen->cursor.semantic_content_clear_eol);
+            }
+        }
+    } semantic_guard = {screen};
+    (void)semantic_guard;
+
+    /* Outside of the scroll region we move the cursor one line down. */
+    if (screen->cursor.y < scrolling_region.top || screen->cursor.y > scrolling_region.bottom) {
+        /* We only move down if we're not already at the bottom of
+         * the screen. */
+        if (screen->cursor.y < rows - 1) {
+            screen->cursorDown(1);
+        }
+
+        return true;
+    }
+
+    /* If the cursor is inside the scrolling region and on the bottom-most
+     * line, then we scroll up. If our scrolling region is the full screen
+     * we create scrollback. */
+    if (screen->cursor.y == scrolling_region.bottom && screen->cursor.x >= scrolling_region.left &&
+        screen->cursor.x <= scrolling_region.right) {
+        /* If our scrolling region is at the top, we create scrollback,
+         * but only if our screen retains scrollback. If our screen
+         * doesn't retain scrollback (e.g. the alternate screen) then
+         * creating scrollback is pure overhead: the rows are never
+         * visible and are simply pruned later. In that case we use the
+         * in-place region scroll below, unless the region is a single
+         * row (a one row screen) which cursorScrollRegionUp can't
+         * handle (and cursorDownScroll special-cases). */
+        if (scrolling_region.top == 0 && scrolling_region.left == 0 && scrolling_region.right == cols - 1 &&
+            (!screen->no_scrollback || scrolling_region.bottom == 0)) {
+            return screen->cursorScrollAbove();
+        }
+
+        /* Slow path for left and right scrolling region margins.
+         * scrollUp handles the kitty image adjustment itself. */
+        if (scrolling_region.left != 0 || scrolling_region.right != cols - 1) {
+            return scrollUp(1);
+        }
+
+        /* Otherwise use a fast path function to efficiently scroll
+         * the contents of the scrolling region. */
+        return screen->cursorScrollRegionUp((size_t)(scrolling_region.bottom - scrolling_region.top));
+    }
+
+    /* Increase cursor by 1, maximum to bottom of scroll region */
+    if (screen->cursor.y < scrolling_region.bottom) {
+        screen->cursorDown(1);
+    }
+    return true;
+}
+
+/* Move the cursor to the previous line in the scrolling region, possibly
+ * scrolling.
+ *
+ * If the cursor is outside of the scrolling region, move the cursor one
+ * line up if it is not on the top-most line of the screen.
+ *
+ * If the cursor is inside the scrolling region:
+ *
+ *   * If the cursor is on the top-most line of the scrolling region:
+ *     invoke scroll down with amount=1
+ *   * If the cursor is not on the top-most line of the scrolling region:
+ *     move the cursor one line up */
+inline void Terminal::reverseIndex() {
+    if (screens.active->cursor.y != scrolling_region.top || screens.active->cursor.x < scrolling_region.left ||
+        screens.active->cursor.x > scrolling_region.right) {
+        cursorUp(1);
+        return;
+    }
+
+    scrollDown(1);
+}
+
 } /* namespace vt */
 } /* namespace wisp */
 

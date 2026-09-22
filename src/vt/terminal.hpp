@@ -496,6 +496,27 @@ struct Terminal {
 
     /* Insert amount spaces at the current cursor position. */
     void insertBlanks(size_t count);
+
+    /* Perform a semantic prompt command. Wisp: false is OutOfMemory. */
+    bool semanticPrompt(const terminal::osc::semantic_prompt::Command &cmd);
+    bool semanticPromptFreshLine();
+
+    /* Returns true if the cursor is currently at a prompt. */
+    bool cursorIsAtPrompt();
+
+    void horizontalTab();
+    void horizontalTabBack();
+    void tabClear(terminal::csi::TabClear cmd);
+    void tabSet();
+    void tabReset();
+
+    void reverseIndex();
+
+    /* Scroll the text up by one row. Wisp: false is OutOfMemory. */
+    bool scrollUp(size_t count);
+
+    /* Scroll the text down by one row. */
+    void scrollDown(size_t count);
 };
 
 } /* namespace vt */
