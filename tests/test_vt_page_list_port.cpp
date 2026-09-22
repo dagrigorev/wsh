@@ -1478,6 +1478,385 @@ TEST(page_list, PageList_deinit_discards_malformed_compressed_data) {
     s.deinit();
 }
 
+typedef PageList::Scrollbar Scrollbar;
+
+static bool sbEq(const Scrollbar &a, size_t total, size_t offset, size_t len) {
+    return a.total == total && a.offset == offset && a.len == len;
+}
+
+/* expectEqual on Pin compares every field. */
+static bool pinEq(const Pin &a, const Pin &b) { return a.eql(b) && a.garbage == b.garbage; }
+
+static size::CellCountInt stdMaxCols() {
+    size::CellCountInt c;
+    const bool ok = page::std_capacity().maxCols(&c);
+    assert(ok);
+    (void)ok;
+    return c;
+}
+
+static Capacity stdAdjust(size::CellCountInt cols) {
+    Capacity c;
+    const bool ok = page::std_capacity().adjust(Capacity::Adjustment::withCols(cols), &c);
+    assert(ok);
+    (void)ok;
+    return c;
+}
+
+static Point cellScreenPoint(PageList &s, const Point &pt) { return s.getCell(pt).value.screenPoint(); }
+
+TEST(page_list, PageList_prune_reuses_malformed_compressed_page_memory) {
+    ListHolder s(opts(80, 24, 2 * PageList::PagePool::item_size));
+
+    /* Allocate the second page so the first one can be pruned and reused. */
+    while (s->pages.first == s->pages.last) (void)growNode(&*s);
+    Node *first = s->pages.first;
+    ASSERT_TRUE(s->compressPage(first));
+    memset(first->data.compressed.encoded, 0xFF, first->data.compressed.encoded_len);
+
+    bool reused = false;
+    const size_t growth_limit = (size_t)s->pages.last->capacity().rows + 1;
+    for (size_t i = 0; i < growth_limit; i++) {
+        if (Node *new_node = growNode(&*s)) {
+            if (new_node == first) {
+                reused = true;
+                break;
+            }
+        }
+    }
+
+    ASSERT_TRUE(reused);
+    ASSERT_TRUE(first == s->pages.last);
+    ASSERT_FALSE(first->isCompressed());
+    ASSERT_TRUE(1 == first->rows());
+    first->page()->assertIntegrity();
+}
+
+TEST(page_list, PageList) {
+    ListHolder s(opts(80, 24));
+    ASSERT_TRUE(s->viewport == Viewport::active);
+    ASSERT_TRUE(s->pages.first != nullptr);
+    ASSERT_TRUE((size_t)s->rows == s->totalRows());
+
+    /* Initial total rows should be our row count */
+    ASSERT_TRUE(s->rows == s->total_rows);
+
+    /* Our viewport pin must be defined. It isn't used until the
+     * viewport is a pin but it prevents undefined access on clone. */
+    ASSERT_TRUE(s->viewport_pin->node == s->pages.first);
+
+    /* Active area should be the top */
+    ASSERT_TRUE(pinEq(Pin(s->pages.first, 0, 0), s->getTopLeft(point::Tag::active)));
+
+    /* Scrollbar should be where we expect it */
+    ASSERT_TRUE(sbEq(s->scrollbar(), s->rows, 0, s->rows));
+}
+
+TEST(page_list, PageList_init_error) {
+    /* Test every failure point in `init` and ensure that we don't
+     * leak memory (testing.allocator verifies) since we're exiting early. */
+    const PageList::InitTw init_tags[] = {PageList::InitTw::init_memory_pool, PageList::InitTw::init_pages,
+                                          PageList::InitTw::viewport_pin, PageList::InitTw::viewport_pin_track};
+    for (PageList::InitTw tag : init_tags) {
+        typedef PageList::init_tw tw;
+        tw::errorAlways(tag, AllocTw::OutOfMemory);
+        PageList s;
+        ASSERT_FALSE(PageList::init(talloc(), opts(80, 24), &s));
+        (void)tw::end(tripwire::ResetMode::reset);
+    }
+
+    /* init calls initPages transitively, so let's check that if
+     * any failures happen in initPages, we also don't leak memory. */
+    const PageList::InitPagesTw page_tags[] = {PageList::InitPagesTw::page_node, PageList::InitPagesTw::page_buf_std,
+                                               PageList::InitPagesTw::page_buf_non_std};
+    for (PageList::InitPagesTw tag : page_tags) {
+        typedef PageList::initPages_tw tw;
+        tw::errorAlways(tag, AllocTw::OutOfMemory);
+
+        const size::CellCountInt cols =
+            tag == PageList::InitPagesTw::page_buf_std ? 80 : (size::CellCountInt)(stdMaxCols() + 1);
+        PageList s;
+        ASSERT_FALSE(PageList::init(talloc(), opts(cols, 24), &s));
+        (void)tw::end(tripwire::ResetMode::reset);
+    }
+
+    /* Try non-standard pages since they don't go in our pool. */
+    {
+        typedef PageList::initPages_tw tw;
+        tw::errorAfter(PageList::InitPagesTw::page_buf_non_std, AllocTw::OutOfMemory, 1);
+        PageList s;
+        ASSERT_FALSE(PageList::init(talloc(),
+                                    opts((size::CellCountInt)(stdMaxCols() + 1),
+                                         (size::CellCountInt)(page::std_capacity().rows + 1)),
+                                    &s));
+        (void)tw::end(tripwire::ResetMode::reset);
+    }
+}
+
+TEST(page_list, PageList_init_rows_across_two_pages) {
+    /* Find a cap that makes it so that rows don't fit on one page. */
+    const size::CellCountInt rows = 100;
+    Capacity cap = stdAdjust(50);
+    while (cap.rows >= rows) cap = stdAdjust((size::CellCountInt)(cap.cols + 50));
+
+    /* Init */
+    ListHolder s(opts(cap.cols, rows));
+    ASSERT_TRUE(s->viewport == Viewport::active);
+    ASSERT_TRUE(s->pages.first != nullptr);
+    ASSERT_TRUE((size_t)s->rows == s->totalRows());
+
+    /* Initial total rows should be our row count */
+    ASSERT_TRUE(s->rows == s->total_rows);
+
+    /* Scrollbar should be where we expect it */
+    ASSERT_TRUE(sbEq(s->scrollbar(), s->rows, 0, s->rows));
+}
+
+TEST(page_list, PageList_init_more_than_max_cols) {
+    /* Initialize with more columns than we can fit in our standard
+     * capacity. This is going to force us to go to a non-standard page
+     * immediately. */
+    ListHolder s(opts((size::CellCountInt)(stdMaxCols() + 1), 80));
+    ASSERT_TRUE(s->viewport == Viewport::active);
+    ASSERT_TRUE((size_t)s->rows == s->totalRows());
+
+    /* We expect a single, non-standard page */
+    ASSERT_TRUE(s->pages.first != nullptr);
+    ASSERT_TRUE(s->pages.first->page()->memory_len > PageList::std_size);
+
+    /* Initial total rows should be our row count */
+    ASSERT_TRUE(s->rows == s->total_rows);
+
+    /* Scrollbar should be where we expect it */
+    ASSERT_TRUE(sbEq(s->scrollbar(), s->rows, 0, s->rows));
+}
+
+TEST(page_list, PageList_pointFromPin_active_no_history) {
+    ListHolder s(opts(80, 24));
+
+    ASSERT_TRUE(pointEq(s->pointFromPin(point::Tag::active, Pin(s->pages.first, 0, 0)), Point::active(0, 0)));
+    ASSERT_TRUE(pointEq(s->pointFromPin(point::Tag::active, Pin(s->pages.first, 2, 4)), Point::active(4, 2)));
+}
+
+TEST(page_list, PageList_pointFromPin_active_with_history) {
+    ListHolder s(opts(80, 24));
+    ASSERT_TRUE(s->growRows(30));
+
+    ASSERT_TRUE(pointEq(s->pointFromPin(point::Tag::active, Pin(s->pages.first, 30, 2)), Point::active(2, 0)));
+
+    /* In history, invalid */
+    ASSERT_FALSE(s->pointFromPin(point::Tag::active, Pin(s->pages.first, 21, 2)).has);
+}
+
+static void growPagesPaused(PageList &s, size_t n) {
+    Node *cur_page = s.pages.last;
+    cur_page->page()->pauseIntegrityChecks(true);
+    for (size_t i = 0; i < n; i++) {
+        if (Node *new_page = growNode(&s)) {
+            cur_page->page()->pauseIntegrityChecks(false);
+            cur_page = new_page;
+            cur_page->page()->pauseIntegrityChecks(true);
+        }
+    }
+    cur_page->page()->pauseIntegrityChecks(false);
+}
+
+TEST(page_list, PageList_pointFromPin_active_from_prior_page) {
+    ListHolder s(opts(80, 24));
+    /* Grow so we take up at least 5 pages. */
+    Page *page = s->pages.last->page();
+    growPagesPaused(*s, (size_t)page->capacity.rows * 5);
+
+    ASSERT_TRUE(pointEq(s->pointFromPin(point::Tag::active, Pin(s->pages.last, 0, 2)), Point::active(2, 0)));
+
+    /* Prior page */
+    ASSERT_FALSE(s->pointFromPin(point::Tag::active, Pin(s->pages.first, 0, 0)).has);
+}
+
+TEST(page_list, PageList_pointFromPin_traverse_pages) {
+    ListHolder s(opts(80, 24));
+
+    /* Grow so we take up at least 2 pages. */
+    Page *page = s->pages.last->page();
+    const size_t page_cap = page->capacity.rows;
+    growPagesPaused(*s, page_cap * 2);
+
+    {
+        const size_t pages = s->totalPages();
+        const size_t expected_y = page_cap * (pages - 2) + 5;
+
+        ASSERT_TRUE(pointEq(s->pointFromPin(point::Tag::screen, Pin(s->pages.last->prev, 5, 2)),
+                            Point::screen(2, (uint32_t)expected_y)));
+    }
+
+    /* Prior page */
+    ASSERT_FALSE(s->pointFromPin(point::Tag::active, Pin(s->pages.first, 0, 0)).has);
+}
+
+TEST(page_list, PageList_pointFromPin_rejects_overflowing_screen_coordinate) {
+    /* Use maximum-height metadata-only pages to model a valid scrollback just
+     * beyond the u32 coordinate range without allocating their backing cells. */
+    const size_t page_count = 65539;
+    const size::CellCountInt rows_per_page = 0xFFFF;
+    Node *nodes = (Node *)calloc(page_count, sizeof(Node));
+
+    for (size_t i = 0; i < page_count; i++) {
+        Node *node = &nodes[i];
+        node->prev = i > 0 ? &nodes[i - 1] : nullptr;
+        node->next = i + 1 < page_count ? &nodes[i + 1] : nullptr;
+        node->data.tag = Node::Data::Tag::resident;
+        node->serial = i;
+        node->owned = Node::Owned::heap;
+        node->data.resident().size.cols = 1;
+        node->data.resident().size.rows = rows_per_page;
+    }
+
+    PageList s;
+    s.pages.first = &nodes[0];
+    s.pages.last = &nodes[page_count - 1];
+
+    ASSERT_FALSE(s.pointFromPin(point::Tag::screen, Pin(&nodes[page_count - 1], 0, 0)).has);
+    free(nodes);
+}
+
+TEST(page_list, PageList_active_after_grow) {
+    ListHolder s(opts(80, 24));
+    ASSERT_TRUE((size_t)s->rows == s->totalRows());
+
+    ASSERT_TRUE(s->growRows(10));
+    ASSERT_TRUE((size_t)s->rows + 10 == s->totalRows());
+
+    /* Make sure all points make sense */
+    ASSERT_TRUE(cellScreenPoint(*s, Point::viewport()).eql(Point::screen(0, 10)));
+    ASSERT_TRUE(cellScreenPoint(*s, Point::screen()).eql(Point::screen(0, 0)));
+    ASSERT_TRUE(cellScreenPoint(*s, Point::active()).eql(Point::screen(0, 10)));
+
+    /* Scrollbar should be in the active area */
+    ASSERT_TRUE(sbEq(s->scrollbar(), s->totalRows(), 10, s->rows));
+}
+
+TEST(page_list, PageList_grow_allows_exceeding_max_size_for_active_area) {
+    /* Setup our initial page so that we fully take up one page. */
+    const Capacity cap = stdAdjust(5);
+    ListHolder s(opts(5, cap.rows, (size_t)0));
+    ASSERT_TRUE((size_t)s->rows == s->totalRows());
+
+    /* Grow once because we guarantee at least two pages of
+     * capacity so we want to get to that. */
+    (void)growNode(&*s);
+    const size_t start_pages = s->totalPages();
+    ASSERT_TRUE(start_pages >= 2);
+
+    /* Surgically modify our pages so that they have a smaller size. */
+    {
+        for (Node *page = s->pages.first; page; page = page->next) {
+            page->page()->size.rows = 1;
+            page->page()->capacity.rows = 1;
+        }
+
+        /* Avoid integrity check failures */
+        s->total_rows = s->totalRows();
+    }
+
+    /* Grow our row and ensure we don't prune pages because we need
+     * enough for the active area. */
+    (void)growNode(&*s);
+    ASSERT_TRUE(start_pages + 1 == s->totalPages());
+}
+
+TEST(page_list, PageList_grow_prune_required_with_a_single_page) {
+    /* Need scrollback > 0 to have a scrollbar to test */
+    ListHolder s(opts(80, 24));
+
+    /* This block is all test setup. There is nothing required about this
+     * behavior during a refactor. This is setting up a scenario that is
+     * possible to trigger a bug (#2280). */
+    {
+        /* Increase our capacity until our page is larger than the standard size.
+         * This is important because it triggers a scenario where our calculated
+         * minSize() which is supposed to accommodate 2 pages is no longer true. */
+        for (;;) {
+            const Page::Layout layout = Page::layout(s->pages.first->capacity());
+            if (layout.total_size > PageList::std_size) break;
+            Node *n;
+            ASSERT_TRUE(s->increaseCapacity(s->pages.first, PageList::IncreaseCapacity::grapheme_bytes, &n) ==
+                        PageList::IncreaseCapacityError::none);
+        }
+        ASSERT_TRUE(s->pages.first != nullptr);
+        ASSERT_TRUE(s->pages.first == s->pages.last);
+    }
+
+    /* Figure out the remaining number of rows. This is the amount that
+     * can be added to the current page before we need to allocate a new
+     * page. */
+    const size_t rem = (size_t)s->pages.first->capacity().rows - s->pages.first->rows();
+    for (size_t i = 0; i < rem; i++) ASSERT_TRUE(growNode(&*s) == nullptr);
+
+    /* The next one we add will trigger a new page. */
+    Node *new_ = growNode(&*s);
+    ASSERT_TRUE(new_ != nullptr);
+    ASSERT_TRUE(new_ != s->pages.first);
+
+    /* Scrollbar should be in the active area */
+    ASSERT_TRUE(sbEq(s->scrollbar(), s->totalRows(), s->total_rows - s->rows, s->rows));
+}
+
+TEST(page_list, PageList_scrollbar_with_max_size_0_after_grow) {
+    ListHolder s(opts(80, 24, (size_t)0));
+
+    /* Grow some rows (simulates normal terminal output) */
+    ASSERT_TRUE(s->growRows(10));
+
+    const Scrollbar sb = s->scrollbar();
+
+    /* With no scrollback (max_size = 0), total should equal rows */
+    ASSERT_TRUE(s->rows == sb.total);
+
+    /* With no scrollback, offset should be 0 (nowhere to scroll back to) */
+    ASSERT_TRUE(0 == sb.offset);
+}
+
+TEST(page_list, PageList_scroll_with_max_size_0_no_history) {
+    ListHolder s(opts(80, 24, (size_t)0));
+
+    ASSERT_TRUE(s->growRows(10));
+
+    /* Remember initial viewport position */
+    const Point pt_before = cellScreenPoint(*s, Point::viewport());
+
+    /* Try to scroll backwards into "history" - should be no-op */
+    s->scroll(PageList::Scroll::deltaRow(-5));
+    ASSERT_TRUE(s->viewport == Viewport::active);
+
+    /* Scroll to top - should also be no-op with no scrollback */
+    s->scroll(PageList::Scroll::top());
+    const Point pt_after = cellScreenPoint(*s, Point::viewport());
+    ASSERT_TRUE(pt_before.eql(pt_after));
+}
+
+TEST(page_list, PageList_scroll_top) {
+    ListHolder s(opts(80, 24));
+    ASSERT_TRUE(s->growRows(10));
+
+    ASSERT_TRUE(cellScreenPoint(*s, Point::viewport()).eql(Point::screen(0, 10)));
+
+    s->scroll(PageList::Scroll::top());
+
+    ASSERT_TRUE(cellScreenPoint(*s, Point::viewport()).eql(Point::screen(0, 0)));
+
+    ASSERT_TRUE(sbEq(s->scrollbar(), s->totalRows(), 0, s->rows));
+
+    ASSERT_TRUE(s->growRows(10));
+    ASSERT_TRUE(cellScreenPoint(*s, Point::viewport()).eql(Point::screen(0, 0)));
+
+    ASSERT_TRUE(sbEq(s->scrollbar(), s->totalRows(), 0, s->rows));
+
+    s->scroll(PageList::Scroll::active());
+    ASSERT_TRUE(cellScreenPoint(*s, Point::viewport()).eql(Point::screen(0, 20)));
+
+    ASSERT_TRUE(sbEq(s->scrollbar(), s->totalRows(), s->total_rows - s->rows, s->rows));
+}
+
 /* @@TESTS@@ */
 
 /* Wisp: std.testing.allocator's leak check. Runs last (registration order). */
