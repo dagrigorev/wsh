@@ -4663,6 +4663,654 @@ TEST(screen, Screen_setAttribute_splits_page_on_OutOfSpace_at_max_styles) {
     ASSERT_TRUE(page_was_split);
 }
 
+TEST(screen, Screen__promptClickMove_line_right_basic) {
+
+    SCREEN(s, 20, 5, (size_t)0);
+
+    /* Enable line click mode */
+    s.semantic_prompt.click.tag = Screen::SemanticPrompt::SemanticClick::Kind::cl;
+    s.semantic_prompt.click.cl = terminal::osc::semantic_prompt::Click::line;
+
+    /* Write a prompt and input */
+    s.cursorSetSemanticContent(SCS::makePrompt(PromptKind::initial));
+    WRITE(s, "> ");
+    s.cursorSetSemanticContent(SCS::makeInput(SCS::InputClear::clear_explicit));
+    WRITE(s, "hello");
+
+    /* Move cursor back to start of input (column 2, the 'h') */
+    s.cursorAbsolute(2, 0);
+
+    /* Click on first 'l' (column 4), should require 2 right movements (h->e->l) */
+    const Pin click_pin = pinAt(s, Point::active(4, 0));
+    const Screen::PromptClickMove result = s.promptClickMove(click_pin);
+
+    ASSERT_TRUE(2 == result.right);
+    ASSERT_TRUE(0 == result.left);
+}
+
+TEST(screen, Screen__promptClickMove_line_right_cursor_not_on_input) {
+
+    SCREEN(s, 20, 5, (size_t)0);
+
+    /* Enable line click mode */
+    s.semantic_prompt.click.tag = Screen::SemanticPrompt::SemanticClick::Kind::cl;
+    s.semantic_prompt.click.cl = terminal::osc::semantic_prompt::Click::line;
+
+    /* Write a prompt and input */
+    s.cursorSetSemanticContent(SCS::makePrompt(PromptKind::initial));
+    WRITE(s, "> ");
+    s.cursorSetSemanticContent(SCS::makeInput(SCS::InputClear::clear_explicit));
+    WRITE(s, "hello");
+    s.cursorSetSemanticContent(SCS::makeOutput());
+
+    /* Move cursor back to prompt area (column 0, the '>') */
+    s.cursorAbsolute(0, 0);
+
+    /* Cursor is on prompt, not input - should return zero */
+    const Pin click_pin = pinAt(s, Point::active(4, 0));
+    const Screen::PromptClickMove result = s.promptClickMove(click_pin);
+
+    ASSERT_TRUE(result.left == 0 && result.right == 0);
+}
+
+TEST(screen, Screen__promptClickMove_line_right_click_on_same_position) {
+
+    SCREEN(s, 20, 5, (size_t)0);
+
+    /* Enable line click mode */
+    s.semantic_prompt.click.tag = Screen::SemanticPrompt::SemanticClick::Kind::cl;
+    s.semantic_prompt.click.cl = terminal::osc::semantic_prompt::Click::line;
+
+    /* Write a prompt and input */
+    s.cursorSetSemanticContent(SCS::makePrompt(PromptKind::initial));
+    WRITE(s, "> ");
+    s.cursorSetSemanticContent(SCS::makeInput(SCS::InputClear::clear_explicit));
+    WRITE(s, "hello");
+
+    /* Move cursor to column 4 */
+    s.cursorAbsolute(4, 0);
+
+    /* Click on same position - no movement needed */
+    const Pin click_pin = pinAt(s, Point::active(4, 0));
+    const Screen::PromptClickMove result = s.promptClickMove(click_pin);
+
+    ASSERT_TRUE(result.left == 0 && result.right == 0);
+}
+
+TEST(screen, Screen__promptClickMove_line_right_skips_non_input_cells) {
+
+    SCREEN(s, 20, 5, (size_t)0);
+
+    /* Enable line click mode */
+    s.semantic_prompt.click.tag = Screen::SemanticPrompt::SemanticClick::Kind::cl;
+    s.semantic_prompt.click.cl = terminal::osc::semantic_prompt::Click::line;
+
+    /* Write: "> h" then output "X" then input "llo" */
+    s.cursorSetSemanticContent(SCS::makePrompt(PromptKind::initial));
+    WRITE(s, "> ");
+    s.cursorSetSemanticContent(SCS::makeInput(SCS::InputClear::clear_explicit));
+    WRITE(s, "h");
+    s.cursorSetSemanticContent(SCS::makeOutput());
+    WRITE(s, "X");
+    s.cursorSetSemanticContent(SCS::makeInput(SCS::InputClear::clear_explicit));
+    WRITE(s, "llo");
+
+    /* Move cursor to column 2 (the 'h') */
+    s.cursorAbsolute(2, 0);
+
+    /* Click on 'l' at column 5 - should skip the 'X' output cell
+     * Movement: h (start) -> l (col 4) -> l (col 5) = 2 right movements */
+    const Pin click_pin = pinAt(s, Point::active(5, 0));
+    const Screen::PromptClickMove result = s.promptClickMove(click_pin);
+
+    ASSERT_TRUE(2 == result.right);
+    ASSERT_TRUE(0 == result.left);
+}
+
+TEST(screen, Screen__promptClickMove_line_right_soft_wrapped_line) {
+
+    SCREEN(s, 10, 5, (size_t)0);
+
+    /* Enable line click mode */
+    s.semantic_prompt.click.tag = Screen::SemanticPrompt::SemanticClick::Kind::cl;
+    s.semantic_prompt.click.cl = terminal::osc::semantic_prompt::Click::line;
+
+    /* Write a prompt and input that wraps */
+    s.cursorSetSemanticContent(SCS::makePrompt(PromptKind::initial));
+    WRITE(s, "> ");
+    s.cursorSetSemanticContent(SCS::makeInput(SCS::InputClear::clear_explicit));
+    /* Write 8 chars of input, first row has 2 for prompt + 8 input = 10 cols */
+    WRITE(s, "abcdefgh");
+    /* Continue on next row (soft-wrapped) */
+    WRITE(s, "ij");
+
+    /* Verify soft wrap occurred */
+    EXPECT_DUMP(s, viewport, "> abcdefgh\nij");
+
+    /* Move cursor to column 2 (the 'a') */
+    s.cursorAbsolute(2, 0);
+
+    /* Click on 'j' at column 1, row 1 - should count all input cells
+     * Movement: a->b->c->d->e->f->g->h->i->j = 9 right movements */
+    const Pin click_pin = pinAt(s, Point::active(1, 1));
+    const Screen::PromptClickMove result = s.promptClickMove(click_pin);
+
+    ASSERT_TRUE(9 == result.right);
+    ASSERT_TRUE(0 == result.left);
+}
+
+TEST(screen, Screen__promptClickMove_disabled_when_click_is_none) {
+
+    SCREEN(s, 20, 5, (size_t)0);
+
+    /* Click mode is .none by default (disabled) */
+    ASSERT_TRUE(Screen::SemanticPrompt::SemanticClick::Kind::none == s.semantic_prompt.click.tag);
+
+    /* Write a prompt and input */
+    s.cursorSetSemanticContent(SCS::makePrompt(PromptKind::initial));
+    WRITE(s, "> ");
+    s.cursorSetSemanticContent(SCS::makeInput(SCS::InputClear::clear_explicit));
+    WRITE(s, "hello");
+
+    /* Move cursor to start of input */
+    s.cursorAbsolute(2, 0);
+
+    /* Click should return zero since click mode is disabled */
+    const Pin click_pin = pinAt(s, Point::active(4, 0));
+    const Screen::PromptClickMove result = s.promptClickMove(click_pin);
+
+    ASSERT_TRUE(result.left == 0 && result.right == 0);
+}
+
+TEST(screen, Screen__promptClickMove_line_right_stops_at_hard_wrap) {
+
+    SCREEN(s, 20, 5, (size_t)0);
+
+    /* Enable line click mode */
+    s.semantic_prompt.click.tag = Screen::SemanticPrompt::SemanticClick::Kind::cl;
+    s.semantic_prompt.click.cl = terminal::osc::semantic_prompt::Click::line;
+
+    /* Write prompt and input on first line */
+    s.cursorSetSemanticContent(SCS::makePrompt(PromptKind::initial));
+    WRITE(s, "> ");
+    s.cursorSetSemanticContent(SCS::makeInput(SCS::InputClear::clear_explicit));
+    WRITE(s, "hello");
+    /* Hard wrap (newline) */
+    WRITE(s, "\n");
+    WRITE(s, "world");
+
+    /* Move cursor to column 2 (the 'h') */
+    s.cursorAbsolute(2, 0);
+
+    /* Click on 'w' at column 0, row 1 - but line mode stops at hard wrap
+     * Should only move to end of first line: h->e->l->l->o = 4 movements */
+    const Pin click_pin = pinAt(s, Point::active(0, 1));
+    const Screen::PromptClickMove result = s.promptClickMove(click_pin);
+
+    /* Should stop at end of first line, not cross hard wrap */
+    ASSERT_TRUE(5 == result.right);
+    ASSERT_TRUE(0 == result.left);
+}
+
+TEST(screen, Screen__promptClickMove_line_right_stops_at_non_continuation_row) {
+
+    SCREEN(s, 20, 5, (size_t)0);
+
+    /* Enable line click mode */
+    s.semantic_prompt.click.tag = Screen::SemanticPrompt::SemanticClick::Kind::cl;
+    s.semantic_prompt.click.cl = terminal::osc::semantic_prompt::Click::line;
+
+    /* Row 0: PROMPT "> hello" */
+    s.cursorSetSemanticContent(SCS::makePrompt(PromptKind::initial));
+    WRITE(s, "> ");
+    s.cursorSetSemanticContent(SCS::makeInput(SCS::InputClear::clear_explicit));
+    WRITE(s, "hello\n");
+
+    /* Row 1: CONTINUATION "world" */
+    s.cursorSetSemanticContent(SCS::makePrompt(PromptKind::continuation));
+    s.cursorSetSemanticContent(SCS::makeInput(SCS::InputClear::clear_explicit));
+    WRITE(s, "world\n");
+
+    /* Row 2: NEW PROMPT "> again" */
+    s.cursorSetSemanticContent(SCS::makePrompt(PromptKind::initial));
+    WRITE(s, "> ");
+    s.cursorSetSemanticContent(SCS::makeInput(SCS::InputClear::clear_explicit));
+    WRITE(s, "again");
+
+    /* Verify content */
+    EXPECT_DUMP(s, viewport, "> hello\nworld\n> again");
+
+    /* Move cursor to 'w' at column 0, row 1 */
+    s.cursorAbsolute(0, 1);
+
+    /* Click on 'a' at column 2, row 2 - but row 2 is a new prompt
+     * Should stop at end of "world": w->o->r->l->d = 4 movements */
+    const Pin click_pin = pinAt(s, Point::active(2, 2));
+    const Screen::PromptClickMove result = s.promptClickMove(click_pin);
+
+    /* Should stop at 'd' (end of world), not cross to new prompt */
+    ASSERT_TRUE(5 == result.right);
+    ASSERT_TRUE(0 == result.left);
+}
+
+TEST(screen, Screen__promptClickMove_line_left_basic) {
+
+    SCREEN(s, 20, 5, (size_t)0);
+
+    /* Enable line click mode */
+    s.semantic_prompt.click.tag = Screen::SemanticPrompt::SemanticClick::Kind::cl;
+    s.semantic_prompt.click.cl = terminal::osc::semantic_prompt::Click::line;
+
+    /* Write a prompt and input */
+    s.cursorSetSemanticContent(SCS::makePrompt(PromptKind::initial));
+    WRITE(s, "> ");
+    s.cursorSetSemanticContent(SCS::makeInput(SCS::InputClear::clear_explicit));
+    WRITE(s, "hello");
+
+    /* Cursor is at column 7 (after 'o'), move it to column 6 (the 'o') */
+    s.cursorAbsolute(6, 0);
+
+    /* Click on 'h' (column 2), should require 4 left movements (o->l->l->e->h) */
+    const Pin click_pin = pinAt(s, Point::active(2, 0));
+    const Screen::PromptClickMove result = s.promptClickMove(click_pin);
+
+    ASSERT_TRUE(4 == result.left);
+    ASSERT_TRUE(0 == result.right);
+}
+
+TEST(screen, Screen__promptClickMove_line_left_skips_non_input_cells) {
+
+    SCREEN(s, 20, 5, (size_t)0);
+
+    /* Enable line click mode */
+    s.semantic_prompt.click.tag = Screen::SemanticPrompt::SemanticClick::Kind::cl;
+    s.semantic_prompt.click.cl = terminal::osc::semantic_prompt::Click::line;
+
+    /* Write: "> h" then output "X" then input "llo" */
+    s.cursorSetSemanticContent(SCS::makePrompt(PromptKind::initial));
+    WRITE(s, "> ");
+    s.cursorSetSemanticContent(SCS::makeInput(SCS::InputClear::clear_explicit));
+    WRITE(s, "h");
+    s.cursorSetSemanticContent(SCS::makeOutput());
+    WRITE(s, "X");
+    s.cursorSetSemanticContent(SCS::makeInput(SCS::InputClear::clear_explicit));
+    WRITE(s, "llo");
+
+    /* Move cursor to column 6 (the 'o') */
+    s.cursorAbsolute(6, 0);
+
+    /* Click on 'h' at column 2 - should skip the 'X' output cell
+     * Movement: o->l->l->h = 3 left movements (skipping X) */
+    const Pin click_pin = pinAt(s, Point::active(2, 0));
+    const Screen::PromptClickMove result = s.promptClickMove(click_pin);
+
+    ASSERT_TRUE(3 == result.left);
+    ASSERT_TRUE(0 == result.right);
+}
+
+TEST(screen, Screen__promptClickMove_line_left_soft_wrapped_line) {
+
+    SCREEN(s, 10, 5, (size_t)0);
+
+    /* Enable line click mode */
+    s.semantic_prompt.click.tag = Screen::SemanticPrompt::SemanticClick::Kind::cl;
+    s.semantic_prompt.click.cl = terminal::osc::semantic_prompt::Click::line;
+
+    /* Write a prompt and input that wraps */
+    s.cursorSetSemanticContent(SCS::makePrompt(PromptKind::initial));
+    WRITE(s, "> ");
+    s.cursorSetSemanticContent(SCS::makeInput(SCS::InputClear::clear_explicit));
+    /* Write 8 chars of input, first row has 2 for prompt + 8 input = 10 cols */
+    WRITE(s, "abcdefgh");
+    /* Continue on next row (soft-wrapped) */
+    WRITE(s, "ij");
+
+    /* Verify soft wrap occurred */
+    EXPECT_DUMP(s, viewport, "> abcdefgh\nij");
+
+    /* Cursor is at column 2, row 1 (after 'j'). Move to 'j' at column 1. */
+    s.cursorAbsolute(1, 1);
+
+    /* Click on 'a' at column 2, row 0 - should count all input cells backwards
+     * Movement: j->i->h->g->f->e->d->c->b->a = 9 left movements */
+    const Pin click_pin = pinAt(s, Point::active(2, 0));
+    const Screen::PromptClickMove result = s.promptClickMove(click_pin);
+
+    ASSERT_TRUE(9 == result.left);
+    ASSERT_TRUE(0 == result.right);
+}
+
+TEST(screen, Screen__promptClickMove_line_left_stops_at_hard_wrap) {
+
+    SCREEN(s, 20, 5, (size_t)0);
+
+    /* Enable line click mode */
+    s.semantic_prompt.click.tag = Screen::SemanticPrompt::SemanticClick::Kind::cl;
+    s.semantic_prompt.click.cl = terminal::osc::semantic_prompt::Click::line;
+
+    /* Write prompt and input on first line, then hard wrap */
+    s.cursorSetSemanticContent(SCS::makePrompt(PromptKind::initial));
+    WRITE(s, "> ");
+    s.cursorSetSemanticContent(SCS::makeInput(SCS::InputClear::clear_explicit));
+    WRITE(s, "hello");
+    /* Hard wrap (newline) */
+    WRITE(s, "\n");
+    WRITE(s, "world");
+
+    /* Move cursor to 'd' at column 4, row 1 (an actual input cell) */
+    s.cursorAbsolute(4, 1);
+
+    /* Click on 'h' at column 2, row 0 - but line mode stops at hard wrap
+     * Should only move to start of second line, not cross to row 0 */
+    const Pin click_pin = pinAt(s, Point::active(2, 0));
+    const Screen::PromptClickMove result = s.promptClickMove(click_pin);
+
+    /* Should stop at start of second line: d->l->r->o->w = 4 movements */
+    ASSERT_TRUE(4 == result.left);
+    ASSERT_TRUE(0 == result.right);
+}
+
+TEST(screen, Screen__promptClickMove_click_right_of_input_same_line) {
+
+    /* Set up: "> hello" where "> " is prompt and "hello" is input
+     * Clicking to the right of the 'o' should move cursor past the input */
+
+    SCREEN(s, 20, 5, (size_t)0);
+
+    /* Enable line click mode */
+    s.semantic_prompt.click.tag = Screen::SemanticPrompt::SemanticClick::Kind::cl;
+    s.semantic_prompt.click.cl = terminal::osc::semantic_prompt::Click::line;
+
+    /* Write a prompt and input */
+    s.cursorSetSemanticContent(SCS::makePrompt(PromptKind::initial));
+    WRITE(s, "> ");
+    s.cursorSetSemanticContent(SCS::makeInput(SCS::InputClear::clear_explicit));
+    WRITE(s, "hello");
+
+    /* Move cursor to start of input (column 2, the 'h') */
+    s.cursorAbsolute(2, 0);
+
+    /* Click beyond the input (column 15) - should move to one past the 'o' */
+    const Pin click_pin = pinAt(s, Point::active(15, 0));
+    const Screen::PromptClickMove result = s.promptClickMove(click_pin);
+
+    ASSERT_TRUE(5 == result.right);
+    ASSERT_TRUE(0 == result.left);
+}
+
+TEST(screen, Screen__promptClickMove_click_right_of_input_cursor_at_end) {
+
+    SCREEN(s, 20, 5, (size_t)0);
+
+    /* Enable line click mode */
+    s.semantic_prompt.click.tag = Screen::SemanticPrompt::SemanticClick::Kind::cl;
+    s.semantic_prompt.click.cl = terminal::osc::semantic_prompt::Click::line;
+
+    /* Write a prompt and input */
+    s.cursorSetSemanticContent(SCS::makePrompt(PromptKind::initial));
+    WRITE(s, "> ");
+    s.cursorSetSemanticContent(SCS::makeInput(SCS::InputClear::clear_explicit));
+    WRITE(s, "hello");
+
+    /* Cursor is already at column 7 (one past 'o') after writing
+     * Click beyond the input (column 15) - no movement needed since
+     * cursor is already at the end position */
+    const Pin click_pin = pinAt(s, Point::active(15, 0));
+    const Screen::PromptClickMove result = s.promptClickMove(click_pin);
+
+    ASSERT_TRUE(0 == result.right);
+    ASSERT_TRUE(0 == result.left);
+}
+
+TEST(screen, Screen__promptClickMove_click_right_of_input_on_lower_line) {
+
+    SCREEN(s, 20, 5, (size_t)0);
+
+    /* Enable line click mode */
+    s.semantic_prompt.click.tag = Screen::SemanticPrompt::SemanticClick::Kind::cl;
+    s.semantic_prompt.click.cl = terminal::osc::semantic_prompt::Click::line;
+
+    /* Write a prompt and input */
+    s.cursorSetSemanticContent(SCS::makePrompt(PromptKind::initial));
+    WRITE(s, "> ");
+    s.cursorSetSemanticContent(SCS::makeInput(SCS::InputClear::clear_explicit));
+    WRITE(s, "hello");
+
+    /* Move cursor to start of input (column 2, the 'h') */
+    s.cursorAbsolute(2, 0);
+
+    /* Click on a lower line (row 1) - should move to end of input
+     * This is outside the prompt area so should clamp to end */
+    const Pin click_pin = pinAt(s, Point::active(5, 1));
+    const Screen::PromptClickMove result = s.promptClickMove(click_pin);
+
+    /* From 'h', we need to pass e, l, l, o (4 cells) + 1 past end = 5 */
+    ASSERT_TRUE(5 == result.right);
+    ASSERT_TRUE(0 == result.left);
+}
+
+TEST(screen, Screen__promptClickMove_click_right_of_input_cursor_at_end_lower_line) {
+
+    SCREEN(s, 20, 5, (size_t)0);
+
+    /* Enable line click mode */
+    s.semantic_prompt.click.tag = Screen::SemanticPrompt::SemanticClick::Kind::cl;
+    s.semantic_prompt.click.cl = terminal::osc::semantic_prompt::Click::line;
+
+    /* Write a prompt and input */
+    s.cursorSetSemanticContent(SCS::makePrompt(PromptKind::initial));
+    WRITE(s, "> ");
+    s.cursorSetSemanticContent(SCS::makeInput(SCS::InputClear::clear_explicit));
+    WRITE(s, "hello");
+
+    /* Cursor is at column 7 after writing (one past 'o')
+     * Click on a lower line (row 1) - cursor already at end, no movement needed */
+    const Pin click_pin = pinAt(s, Point::active(5, 1));
+    const Screen::PromptClickMove result = s.promptClickMove(click_pin);
+
+    ASSERT_TRUE(0 == result.right);
+    ASSERT_TRUE(0 == result.left);
+}
+
+TEST(screen, Screen__promptClickMove_click_right_of_input_cursor_on_last_char) {
+
+    SCREEN(s, 20, 5, (size_t)0);
+
+    /* Enable line click mode */
+    s.semantic_prompt.click.tag = Screen::SemanticPrompt::SemanticClick::Kind::cl;
+    s.semantic_prompt.click.cl = terminal::osc::semantic_prompt::Click::line;
+
+    /* Write a prompt and input */
+    s.cursorSetSemanticContent(SCS::makePrompt(PromptKind::initial));
+    WRITE(s, "> ");
+    s.cursorSetSemanticContent(SCS::makeInput(SCS::InputClear::clear_explicit));
+    WRITE(s, "hello");
+
+    /* Move cursor to last input char (column 6, the 'o') */
+    s.cursorAbsolute(6, 0);
+
+    /* Click beyond the input (column 15) */
+    const Pin click_pin = pinAt(s, Point::active(15, 0));
+    const Screen::PromptClickMove result = s.promptClickMove(click_pin);
+
+    ASSERT_TRUE(1 == result.right);
+    ASSERT_TRUE(0 == result.left);
+}
+
+TEST(screen, Screen__cursorScrollRegionUp_recycled_row_has_default_metadata) {
+
+    SCREEN(s, 5, 5, (size_t)0);
+    WRITE(s, "1ABCD\n2EFGH\n3IJKL\n4MNOP\n5QRST");
+
+    /* Simulate the top region row being part of a soft-wrapped,
+     * prompt-marked line. Its Row storage is recycled as the new
+     * blank cursor row and must not retain the metadata. */
+    {
+        const PageList::Cell rac = s.pages.getCell(Point::active()).value;
+        rac.row->setWrap(true);
+        rac.row->setWrapContinuation(true);
+        rac.row->setSemanticPrompt(Row::SemanticPrompt::prompt);
+    }
+
+    s.cursorAbsolute(1, 2);
+    ASSERT_TRUE(s.cursorScrollRegionUp(2));
+
+    {
+        const PageList::Cell rac = s.pages.getCell(Point::active(0, 2)).value;
+        ASSERT_TRUE(!rac.row->wrap());
+        ASSERT_TRUE(!rac.row->wrap_continuation());
+        ASSERT_TRUE(Row::SemanticPrompt::none == rac.row->semantic_prompt());
+    }
+    EXPECT_DUMP(s, screen, "2EFGH\n3IJKL\n\n4MNOP\n5QRST");
+}
+
+TEST(screen, Screen__cursorScrollRegionUp_cross_page_recycled_row_has_default_metadata) {
+
+    SCREEN(s, 10, 5, (size_t)10);
+
+    /* We need to get the active area to span two pages so that the
+     * scroll region does too, exercising the slow path (eraseRowBounded). */
+    const size_t first_page_size = s.pages.pages.first->capacity().rows;
+    s.pages.pages.first->page()->pauseIntegrityChecks(true);
+    for (size_t i_ = 0, n_ = (size_t)(first_page_size - 3); i_ < n_; i_++) WRITE(s, "\n");
+    s.pages.pages.first->page()->pauseIntegrityChecks(false);
+    WRITE(s, "1A\n2B\n3C\n4D\n5E");
+
+    /* The first row of the last page is the Row storage that ends up
+     * recycled as the blank region-bottom row: the erased row's
+     * storage stays on the first page (receiving this row's content
+     * via clone) while this storage is cleared for the blank row. */
+    {
+        const PageList::Cell rac = s.pages.getCell(Point::active(0, 3)).value;
+        rac.row->setWrap(true);
+        rac.row->setWrapContinuation(true);
+        rac.row->setSemanticPrompt(Row::SemanticPrompt::prompt);
+    }
+
+    /* Region rows 1-3 with the cursor on the region bottom, which is
+     * on the second page while the region top is on the first page. */
+    s.cursorAbsolute(0, 3);
+    ASSERT_TRUE(s.cursorScrollRegionUp(2));
+
+    {
+        const PageList::Cell rac = s.pages.getCell(Point::active(0, 3)).value;
+        ASSERT_TRUE(!rac.row->wrap());
+        ASSERT_TRUE(!rac.row->wrap_continuation());
+        ASSERT_TRUE(Row::SemanticPrompt::none == rac.row->semantic_prompt());
+    }
+    EXPECT_DUMP(s, viewport, "1A\n3C\n4D\n\n5E");
+}
+
+TEST(screen, Screen__cursorScrollAbove_cross_page_recycled_row_has_default_metadata) {
+
+    SCREEN(s, 10, 5, (size_t)10);
+
+    /* Get the cursor page and the last page to differ so that
+     * cursorScrollAbove takes the cross-page rotate path. */
+    const size_t first_page_size = s.pages.pages.first->capacity().rows;
+    s.pages.pages.first->page()->pauseIntegrityChecks(true);
+    for (size_t i_ = 0, n_ = (size_t)(first_page_size - 3); i_ < n_; i_++) WRITE(s, "\n");
+    s.pages.pages.first->page()->pauseIntegrityChecks(false);
+    WRITE(s, "1A\n2B\n3C\n4D\n5E");
+    s.cursorAbsolute(0, 1);
+    ASSERT_TRUE(s.cursor.page_pin->node == s.pages.pages.first);
+    ASSERT_TRUE(s.pages.pages.first->next != nullptr);
+
+    /* The last row of the cursor page is the Row storage that gets
+     * recycled as the new blank row below the cursor after its content
+     * is moved down to the next page. */
+    {
+        const PageList::Cell rac = s.pages.getCell(Point::active(0, 2)).value;
+        rac.row->setWrap(true);
+        rac.row->setWrapContinuation(true);
+        rac.row->setSemanticPrompt(Row::SemanticPrompt::prompt);
+    }
+
+    ASSERT_TRUE(s.cursorScrollAbove());
+
+    /* One row scrolled into history, so the blank row is at active
+     * y=1 (just below the cursor's original row). */
+    {
+        const PageList::Cell rac = s.pages.getCell(Point::active(0, 1)).value;
+        ASSERT_TRUE(!rac.row->wrap());
+        ASSERT_TRUE(!rac.row->wrap_continuation());
+        ASSERT_TRUE(Row::SemanticPrompt::none == rac.row->semantic_prompt());
+    }
+    EXPECT_DUMP(s, viewport, "2B\n\n3C\n4D\n5E");
+}
+
+TEST(screen, Screen__cursorDownScroll_no_scrollback_recycled_row_has_default_metadata) {
+
+    SCREEN(s, 5, 3, (size_t)0);
+    WRITE(s, "1ABCD\n2EFGH\n3IJKL");
+
+    {
+        const PageList::Cell rac = s.pages.getCell(Point::active()).value;
+        rac.row->setWrap(true);
+        rac.row->setWrapContinuation(true);
+        rac.row->setSemanticPrompt(Row::SemanticPrompt::prompt);
+    }
+
+    s.cursorAbsolute(0, 2);
+    ASSERT_TRUE(s.cursorDownScroll());
+
+    {
+        const PageList::Cell rac = s.pages.getCell(Point::active(0, 2)).value;
+        ASSERT_TRUE(!rac.row->wrap());
+        ASSERT_TRUE(!rac.row->wrap_continuation());
+        ASSERT_TRUE(Row::SemanticPrompt::none == rac.row->semantic_prompt());
+    }
+}
+
+TEST(screen, Screen__cursorDownScroll_single_row_no_scrollback_resets_metadata) {
+
+    SCREEN(s, 5, 1, (size_t)0);
+    WRITE(s, "1ABCD");
+
+    {
+        const PageList::Cell rac = s.pages.getCell(Point::active()).value;
+        rac.row->setWrap(true);
+        rac.row->setWrapContinuation(true);
+        rac.row->setSemanticPrompt(Row::SemanticPrompt::prompt);
+    }
+
+    ASSERT_TRUE(s.cursorDownScroll());
+
+    {
+        const PageList::Cell rac = s.pages.getCell(Point::active()).value;
+        ASSERT_TRUE(!rac.row->wrap());
+        ASSERT_TRUE(!rac.row->wrap_continuation());
+        ASSERT_TRUE(Row::SemanticPrompt::none == rac.row->semantic_prompt());
+    }
+}
+
+TEST(screen, Screen__selectLine_does_not_join_lines_across_a_recycled_row) {
+
+    SCREEN(s, 6, 5, (size_t)0);
+
+    /* A soft-wrapped line across rows 0 and 1: row 0 gets wrap=true. */
+    WRITE(s, "AAAAAAA");
+
+    /* Scroll a region of rows 0-2 up by one: row 0 is discarded and
+     * its Row storage recycled as the blank row 2. */
+    s.cursorAbsolute(0, 2);
+    ASSERT_TRUE(s.cursorScrollRegionUp(2));
+
+    /* Write unrelated single-line words on the recycled row and below. */
+    s.cursorAbsolute(0, 2);
+    WRITE(s, "world");
+    s.cursorAbsolute(0, 3);
+    WRITE(s, "hello");
+
+    /* Selecting the line "world" must not extend into "hello": these
+     * are separate hard lines. A stale wrap flag on the recycled row
+     * would join them. */
+    {
+        SEL(sel, s, s.selectLine(selLine(pinAt(s, Point::active(0, 2)))));
+        EXPECT_STR("world", s.selectionString(Screen::SelectionString(sel, false)));
+    }
+}
+
 /* @@TESTS@@ */
 
 /* Wisp: std.testing.allocator's leak check. Runs last (registration order). */
