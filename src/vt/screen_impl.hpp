@@ -2245,8 +2245,7 @@ inline bool Screen::testWriteString(const char *text) {
             continue;
         }
 
-        const int w = c <= 0xFF ? 1 : wisp_utf8_codepoint_width(c);
-        const size_t width = w < 0 ? 0 : (size_t)w;
+        const size_t width = c <= 0xFF ? 1 : (size_t)unicode::Table::get(c).width();
         if (width == 0) {
             Cell *cell = cursorCellLeft(1);
             switch (cell->wide()) {

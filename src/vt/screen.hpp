@@ -32,11 +32,11 @@
 #include "../terminal/osc.hpp"
 #include "../terminal/sgr.hpp"
 #include "fastmem.hpp"
+#include "unicode/grapheme.hpp"
 #include "page_list.hpp"
 #include "selection.hpp"
 #include "tripwire.hpp"
 
-extern "C" int wisp_utf8_codepoint_width(uint32_t cp);
 
 namespace wisp {
 namespace vt {
