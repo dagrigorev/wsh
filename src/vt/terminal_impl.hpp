@@ -2344,6 +2344,569 @@ inline bool Terminal::decaln() {
     return true;
 }
 
+inline PageList::IncreaseCapacityError Terminal::setAttribute(const terminal::sgr::Attribute &attr) {
+    return screens.active->setAttribute(attr);
+}
+
+/* Print the active attributes as a string. This is used to respond to DECRQSS
+ * requests.
+ *
+ * Boolean attributes are printed first, followed by foreground color, then
+ * background color. Each attribute is separated by a semicolon.
+ *
+ * Wisp: std.Io.Writer.fixed(buf) is a std::string we return. */
+inline std::string Terminal::printAttributes() const {
+    std::string writer;
+    char buf[64];
+
+    /* The SGR response always starts with a 0. See https://vt100.net/docs/vt510-rm/DECRPSS */
+    writer += '0';
+
+    const style::Style pen = screens.active->cursor.style;
+    uint8_t attrs[9];
+    memset(attrs, 0, sizeof attrs);
+    size_t i = 0;
+
+    if (pen.flags.bold) {
+        attrs[i] = 1;
+        i += 1;
+    }
+
+    if (pen.flags.faint) {
+        attrs[i] = 2;
+        i += 1;
+    }
+
+    if (pen.flags.italic) {
+        attrs[i] = 3;
+        i += 1;
+    }
+
+    if (pen.flags.underline != terminal::sgr::Attribute::Underline::none) {
+        attrs[i] = 4;
+        i += 1;
+    }
+
+    if (pen.flags.overline) {
+        attrs[i] = 53;
+        i += 1;
+    }
+
+    if (pen.flags.blink) {
+        attrs[i] = 5;
+        i += 1;
+    }
+
+    if (pen.flags.inverse) {
+        attrs[i] = 7;
+        i += 1;
+    }
+
+    if (pen.flags.invisible) {
+        attrs[i] = 8;
+        i += 1;
+    }
+
+    if (pen.flags.strikethrough) {
+        attrs[i] = 9;
+        i += 1;
+    }
+
+    for (size_t k = 0; k < i; k++) {
+        const uint8_t attr = attrs[k];
+        /* Preserve underline styles. Kind of a hack to special case 4
+         * here but its easier than changing how we do all attributes. */
+        if (attr == 4 && pen.flags.underline != terminal::sgr::Attribute::Underline::single) {
+            snprintf(buf, sizeof buf, ";4:%u", (unsigned)pen.flags.underline);
+            writer += buf;
+            continue;
+        }
+
+        snprintf(buf, sizeof buf, ";%u", (unsigned)attr);
+        writer += buf;
+    }
+
+    switch (pen.fg_color.tag) {
+    case style::Style::Color::Tag::none: break;
+    case style::Style::Color::Tag::palette: {
+        const uint8_t idx = pen.fg_color.palette;
+        if (idx >= 16) {
+            snprintf(buf, sizeof buf, ";38:5:%u", (unsigned)idx);
+        } else if (idx >= 8) {
+            snprintf(buf, sizeof buf, ";9%u", (unsigned)(idx - 8));
+        } else {
+            snprintf(buf, sizeof buf, ";3%u", (unsigned)idx);
+        }
+        writer += buf;
+        break;
+    }
+    case style::Style::Color::Tag::rgb:
+        snprintf(buf, sizeof buf, ";38:2::%u:%u:%u", (unsigned)pen.fg_color.rgb.r, (unsigned)pen.fg_color.rgb.g,
+                 (unsigned)pen.fg_color.rgb.b);
+        writer += buf;
+        break;
+    }
+
+    switch (pen.bg_color.tag) {
+    case style::Style::Color::Tag::none: break;
+    case style::Style::Color::Tag::palette: {
+        const uint8_t idx = pen.bg_color.palette;
+        if (idx >= 16) {
+            snprintf(buf, sizeof buf, ";48:5:%u", (unsigned)idx);
+        } else if (idx >= 8) {
+            snprintf(buf, sizeof buf, ";10%u", (unsigned)(idx - 8));
+        } else {
+            snprintf(buf, sizeof buf, ";4%u", (unsigned)idx);
+        }
+        writer += buf;
+        break;
+    }
+    case style::Style::Color::Tag::rgb:
+        snprintf(buf, sizeof buf, ";48:2::%u:%u:%u", (unsigned)pen.bg_color.rgb.r, (unsigned)pen.bg_color.rgb.g,
+                 (unsigned)pen.bg_color.rgb.b);
+        writer += buf;
+        break;
+    }
+
+    return writer;
+}
+
+/* DECCOLM changes the terminal width between 80 and 132 columns. This
+ * function call will do NOTHING unless `setDeccolmSupported` has been
+ * called with "true".
+ *
+ * This breaks the expectation around modern terminals that they resize
+ * with the window. This will fix the grid at either 80 or 132 columns.
+ * The rows will continue to be variable. */
+inline Terminal::ResizeError Terminal::deccolm(zigstd::Allocator alloc, DeccolmMode mode) {
+    typedef terminal::modes::Mode Mode;
+
+    /* If DEC mode 40 isn't enabled, then this is ignored. We also make
+     * sure that we don't have deccolm set because we want to fully ignore
+     * set mode. */
+    if (!modes.get(Mode::enable_mode_3)) {
+        modes.set(Mode::_132_column, false);
+        return ResizeError::none;
+    }
+
+    /* Enable it */
+    modes.set(Mode::_132_column, mode == DeccolmMode::cols_132);
+
+    /* Resize to the requested size */
+    {
+        Resize r;
+        r.cols = mode == DeccolmMode::cols_132 ? (size::CellCountInt)132 : (size::CellCountInt)80;
+        r.rows = rows;
+        const ResizeError e = resize(alloc, r);
+        if (e != ResizeError::none) return e;
+    }
+
+    /* Erase our display and move our cursor. */
+    eraseDisplay(terminal::csi::EraseDisplay::complete, false);
+    setCursorPos(1, 1);
+    return ResizeError::none;
+}
+
+/* Resize the underlying terminal.
+ *
+ * This has follow-on impacts:
+ *
+ *   - If the column count changes, tabstops are reset.
+ *   - The scroll region is always reset
+ *   - Synchronized output mode is reset for every successful resize.
+ *
+ * This handles errors gracefully and recovers the terminal back to
+ * a clean usable state.
+ *
+ * The only error handling edge case is in the highly exceptional scenario
+ * where the primary screen can be resized but the alternate screen cannot.
+ * In this scenario, we attempt to clear the alt screen at the desired
+ * new size. If that fails, we unconditionally deallocate the alt screen
+ * and move to primary screen. This can break terminal programs but it
+ * requires a really particular scenario where memory exists for one
+ * but not the other and we do our best. */
+inline Terminal::ResizeError Terminal::resize(zigstd::Allocator alloc, const Resize &opts) {
+    typedef resize_tw tw;
+    typedef terminal::modes::Mode Mode;
+
+    /* Screen and scrolling-region invariants require non-zero dimensions.
+     * Validate before changing any terminal state. */
+    if (opts.cols == 0 || opts.rows == 0) return ResizeError::InvalidValue;
+
+    /* Pixel geometry and synchronized output are updated on every valid
+     * resize attempt, including one that doesn't change the grid dimensions.
+     * Save their old values so later allocation failures can roll them back. */
+    const uint32_t old_width_px = width_px;
+    const uint32_t old_height_px = height_px;
+    const bool old_synchronized_output = modes.get(Mode::synchronized_output);
+    struct Rollback {
+        Terminal *t;
+        uint32_t old_width_px;
+        uint32_t old_height_px;
+        bool old_synchronized_output;
+        bool armed;
+        ~Rollback() {
+            if (!armed) return;
+            t->width_px = old_width_px;
+            t->height_px = old_height_px;
+            t->modes.set(terminal::modes::Mode::synchronized_output, old_synchronized_output);
+        }
+    } rollback = {this, old_width_px, old_height_px, old_synchronized_output, true};
+
+    /* If our pixel geometry was set, then we set it even if our rows/cols
+     * didn't change. */
+    if (opts.cell_size_px.has) {
+        const uint64_t w = (uint64_t)opts.cols * (uint64_t)opts.cell_size_px.value.width;
+        const uint64_t h = (uint64_t)opts.rows * (uint64_t)opts.cell_size_px.value.height;
+        width_px = w > UINT32_MAX ? UINT32_MAX : (uint32_t)w;
+        height_px = h > UINT32_MAX ? UINT32_MAX : (uint32_t)h;
+    }
+
+    modes.set(Mode::synchronized_output, false);
+
+    /* If our cols/rows didn't change, skip grid work but still apply pixels. */
+    if (cols == opts.cols && rows == opts.rows) {
+        rollback.armed = false;
+        return ResizeError::none;
+    }
+
+    /* Build replacement tabstops without touching the current table. Keep
+     * ownership here until every fallible resize operation has succeeded. */
+    Maybe<Tabstops> new_tabstops;
+    struct TabstopsGuard {
+        zigstd::Allocator alloc;
+        Maybe<Tabstops> *v;
+        ~TabstopsGuard() {
+            if (v->has) v->value.deinit(alloc);
+        }
+    } tabstops_guard = {alloc, &new_tabstops};
+    if (cols != opts.cols) {
+        if (tw::check(ResizeTw::tabstops) != ResizeError::none) return ResizeError::OutOfMemory;
+        Tabstops t;
+        if (Tabstops::init(alloc, opts.cols, TABSTOP_INTERVAL, &t) != Tabstops::Error::none)
+            return ResizeError::OutOfMemory;
+        new_tabstops = t;
+    }
+
+    /* Resize primary screen, which supports reflow. We do this first
+     * because the cleanup situation is a lot better if this succeeds
+     * and alt fails than the reverse. */
+    if (tw::check(ResizeTw::primary_screen) != ResizeError::none) return ResizeError::OutOfMemory;
+    Screen *primary = screens.get(ScreenSet::Key::primary);
+    {
+        Screen::Resize r(opts.cols, opts.rows, modes.get(Mode::wraparound));
+        r.prompt_redraw = flags.shell_redraws_prompt;
+        r.pull_scrollback = flags.resize_pull_scrollback;
+        if (!primary->resize(r)) return ResizeError::OutOfMemory;
+    }
+
+    /* Alternate screen, if it exists, doesn't reflow. The primary resize
+     * above can't be losslessly undone, so if the alternate resize fails we
+     * replace it with an empty screen at the requested size. If that
+     * also fails, we fall back to the primary screen. */
+    if (Screen *alt = screens.get(ScreenSet::Key::alternate)) {
+        do { /* alt */
+            bool failed = false;
+            if (tw::check(ResizeTw::alternate_screen) != ResizeError::none) {
+                failed = true;
+            } else {
+                Screen::Resize r(opts.cols, opts.rows, false);
+                r.pull_scrollback = flags.resize_pull_scrollback;
+                if (!alt->resize(r)) failed = true;
+            }
+
+            /* Resize succeeded. */
+            if (!failed) break;
+
+            /* log.warn("alternate screen resize failed, replacing it err={}")
+             *
+             * If the alternate screen isn't active, then we just free it
+             * and move on. It'll be reallocated when it gets reinitialized lazily.
+             * In this case, we just lose the prior data if the terminal program
+             * expected it to be saved. */
+            if (screens.active_key != ScreenSet::Key::alternate) {
+                screens.remove(alloc, ScreenSet::Key::alternate);
+                break;
+            }
+
+            /* The alt screen is active, so we temporarily switch to primary
+             * so we can safely remove the alt and recreate it blank. This loses
+             * the data but hopefully keeps us on the alt screen. */
+            const Screen::CharsetState charset = alt->charset;
+            screens.switchTo(ScreenSet::Key::primary);
+            screens.remove(alloc, ScreenSet::Key::alternate);
+
+            /* Replace the alt screen with an empty version. If this fails
+             * we just go back to the primary screen. Not great, but best
+             * we can do. */
+            if (tw::check(ResizeTw::alternate_screen_init) != ResizeError::none) break;
+            Screen *replacement = screens.getInit(
+                alloc, ScreenSet::Key::alternate, Screen::Options(opts.cols, opts.rows, (size_t)0));
+            if (!replacement) {
+                /* log.warn("alternate screen replacement failed, falling back to primary err={}") */
+                break;
+            }
+
+            replacement->charset = charset;
+            screens.switchTo(ScreenSet::Key::alternate);
+        } while (false);
+    }
+
+    /* No more failures are allowed after this point because the screens have
+     * committed their new sizes and the remaining Terminal state must follow. */
+    rollback.armed = false;
+
+    /* All fallible work is complete. Replace the old tabstop table only now. */
+    if (new_tabstops.has) {
+        tabstops.deinit(alloc);
+        tabstops = new_tabstops.value;
+        new_tabstops = Maybe<Tabstops>::none();
+    }
+
+    /* Whenever we resize we just mark it as a screen clear */
+    flags.dirty.clear = true;
+
+    /* Set our size */
+    cols = opts.cols;
+    rows = opts.rows;
+
+    /* Reset the scrolling region */
+    scrolling_region.top = 0;
+    scrolling_region.bottom = (size::CellCountInt)(opts.rows - 1);
+    scrolling_region.left = 0;
+    scrolling_region.right = (size::CellCountInt)(opts.cols - 1);
+    return ResizeError::none;
+}
+
+/* Set the pwd for the terminal.
+ *
+ * Wisp: std.ArrayList(u8) with an explicit sentinel is a std::string; the
+ * sentinel is std::string's own terminator so the stored length is the
+ * text length, not text + 1. */
+inline bool Terminal::setPwd(const char *pwd_new, size_t len) {
+    if (len == 0) {
+        pwd.clear();
+        return true;
+    }
+
+    pwd.assign(pwd_new, len);
+    return true;
+}
+
+/* Returns the pwd for the terminal, if any. The memory is owned by the
+ * Terminal and is not copied. It is safe until a reset or setPwd. */
+inline const char *Terminal::getPwd() const {
+    if (pwd.size() == 0) return nullptr;
+    return pwd.c_str();
+}
+
+/* Set the title for the terminal, as set by escape sequences (e.g. OSC 0/2). */
+inline bool Terminal::setTitle(const char *t, size_t len) {
+    if (len == 0) {
+        title.clear();
+        return true;
+    }
+
+    title.assign(t, len);
+    return true;
+}
+
+/* Returns the title for the terminal, if any. The memory is owned by the
+ * Terminal and is not copied. It is safe until a reset or setTitle. */
+inline const char *Terminal::getTitle() const {
+    if (title.size() == 0) return nullptr;
+    return title.c_str();
+}
+
+/* Switch to the given screen. The screen will be initialized if it
+ * hasn't been already. The previous screen is returned.
+ *
+ * If the screen is already the active screen, this does nothing and
+ * returns null.
+ *
+ * Wisp: `ok` is false for OutOfMemory. */
+inline Screen *Terminal::switchScreen(ScreenSet::Key key, bool *ok) {
+    *ok = true;
+
+    /* If we're already on the requested screen we do nothing. */
+    if (screens.active_key == key) return nullptr;
+    Screen *old = screens.active;
+
+    /* We always end hyperlink state when switching screens.
+     * We need to do this on the original screen. */
+    old->endHyperlink();
+
+    /* Switch the screens/ */
+    Screen *new_ = screens.get(key);
+    if (!new_) {
+        Screen *primary = screens.get(ScreenSet::Key::primary);
+        const Maybe<size_t> max_scrollback_bytes = key == ScreenSet::Key::primary
+                                                       ? Maybe<size_t>(primary->pages.limits.bytes.explicit_)
+                                                       : Maybe<size_t>((size_t)0);
+        new_ = screens.getInit(old->alloc, key, Screen::Options(cols, rows, max_scrollback_bytes));
+        if (!new_) {
+            *ok = false;
+            return nullptr;
+        }
+    }
+
+    /* The new screen should not have any hyperlinks set */
+    assert(new_->cursor.hyperlink_id == 0);
+
+    /* Bring our charset state with us */
+    new_->charset = old->charset;
+
+    /* Clear our selection */
+    new_->clearSelection();
+
+    /* Mark our terminal as dirty to redraw the grid. */
+    flags.dirty.clear = true;
+
+    /* Finalize the switch */
+    screens.switchTo(key);
+
+    return old;
+}
+
+/* Switch screen via a mode switch (e.g. mode 47, 1047, 1049).
+ * This is a much more opinionated operation than `switchScreen`
+ * since it also handles the behaviors of the specific mode,
+ * such as clearing the screen, saving/restoring the cursor,
+ * etc.
+ *
+ * This should be used for legacy compatibility with VT protocols,
+ * but more modern usage should use `switchScreen` instead and handle
+ * details like clearing the screen, cursor saving, etc. manually. */
+inline bool Terminal::switchScreenMode(SwitchScreenMode mode, bool enabled) {
+    /* The behavior in this function is completely based on reading
+     * the xterm source, specifically "charproc.c" for
+     * `srm_ALTBUF`, `srm_OPT_ALTBUF`, and `srm_OPT_ALTBUF_CURSOR`.
+     * We shouldn't touch anything in here without adding a unit
+     * test AND verifying the behavior with xterm. */
+
+    switch (mode) {
+    case SwitchScreenMode::mode_47: break;
+
+    /* If we're disabling 1047 and we're on alt screen then
+     * we clear the screen. */
+    case SwitchScreenMode::mode_1047:
+        if (!enabled && screens.active_key == ScreenSet::Key::alternate) {
+            eraseDisplay(terminal::csi::EraseDisplay::complete, false);
+        }
+        break;
+
+    /* 1049 unconditionally saves the cursor on enabling, even
+     * if we're already on the alternate screen. */
+    case SwitchScreenMode::mode_1049:
+        if (enabled) saveCursor();
+        break;
+    }
+
+    /* Switch screens first to whatever we're going to. */
+    const ScreenSet::Key to = enabled ? ScreenSet::Key::alternate : ScreenSet::Key::primary;
+    bool ok = true;
+    Screen *old_ = switchScreen(to, &ok);
+    if (!ok) return false;
+
+    switch (mode) {
+    /* For these modes, we need to copy the cursor. We only copy
+     * the cursor if the screen actually changed, otherwise the
+     * cursor is already copied. The cursor is copied regardless
+     * of destination screen. */
+    case SwitchScreenMode::mode_47:
+    case SwitchScreenMode::mode_1047:
+        if (old_) {
+            if (screens.active->cursorCopy(old_->cursor, false) != PageList::IncreaseCapacityError::none) {
+                /* log.warn("cursor copy failed entering alt screen err={}") */
+            }
+        }
+        break;
+
+    /* Mode 1049 restores cursor on the primary screen when
+     * we disable it. */
+    case SwitchScreenMode::mode_1049:
+        if (enabled) {
+            assert(screens.active_key == ScreenSet::Key::alternate);
+            eraseDisplay(terminal::csi::EraseDisplay::complete, false);
+
+            /* When we enter alt screen with 1049, we always copy the
+             * cursor from the primary screen (if we weren't already
+             * on it). */
+            if (old_) {
+                if (screens.active->cursorCopy(old_->cursor, false) != PageList::IncreaseCapacityError::none) {
+                    /* log.warn("cursor copy failed entering alt screen err={}") */
+                }
+            }
+        } else {
+            assert(screens.active_key == ScreenSet::Key::primary);
+            restoreCursor();
+        }
+        break;
+    }
+    return true;
+}
+
+/* Return the current string value of the terminal. Newlines are
+ * encoded as "\n". This omits any formatting such as fg/bg.
+ *
+ * The caller must free the string. */
+inline std::string Terminal::plainString() const {
+    return screens.active->dumpStringAlloc(point::Point::viewport());
+}
+
+/* Same as plainString, but respects row wrap state when building the string. */
+inline std::string Terminal::plainStringUnwrapped() const {
+    return screens.active->dumpStringAllocUnwrapped(point::Point::viewport());
+}
+
+/* Full reset.
+ *
+ * This will attempt to free the existing screen memory but if that fails
+ * this will reuse the existing memory. In the latter case, memory may
+ * be wasted (since its unused) but it isn't leaked. */
+inline void Terminal::fullReset() {
+    /* Ensure we're back on primary screen */
+    screens.switchTo(ScreenSet::Key::primary);
+    screens.remove(screens.active->alloc, ScreenSet::Key::alternate);
+
+    /* Reset our screens */
+    screens.active->reset();
+
+    /* Rest our basic state */
+    const bool visible = flags.visible;
+    const bool resize_pull_scrollback = flags.resize_pull_scrollback;
+    modes.reset();
+    flags = Flags();
+    /* Visibility belongs to the view rather than terminal state, so a
+     * terminal reset must not make a hidden view potentially visible. */
+    flags.visible = visible;
+    /* This is configuration based on the pty rather than terminal
+     * state, so a terminal reset must not change it. */
+    flags.resize_pull_scrollback = resize_pull_scrollback;
+
+    tabstops.reset(TABSTOP_INTERVAL);
+    previous_char = Maybe<uint32_t>::none();
+    pwd.clear();
+    title.clear();
+    status_display = terminal::ansi::StatusDisplay::main;
+    scrolling_region.top = 0;
+    scrolling_region.bottom = (size::CellCountInt)(rows - 1);
+    scrolling_region.left = 0;
+    scrolling_region.right = (size::CellCountInt)(cols - 1);
+    setCursorStyle(AnsiCursorStyle::default_);
+
+    /* Always mark dirty so we redraw everything */
+    flags.dirty.clear = true;
+}
+
+/* Returns true if the point is dirty, used for testing. */
+inline bool Terminal::isDirty(const point::Point &pt) const {
+    return screens.active->pages.getCell(pt).value.isDirty();
+}
+
+/* Clear all dirty bits. Testing only. */
+inline void Terminal::clearDirty() { screens.active->pages.clearDirty(); }
+
 } /* namespace vt */
 } /* namespace wisp */
 

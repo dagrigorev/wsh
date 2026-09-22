@@ -497,6 +497,101 @@ struct Terminal {
     /* Insert amount spaces at the current cursor position. */
     void insertBlanks(size_t count);
 
+    /* Set the pwd for the terminal. Wisp: false is OutOfMemory. */
+    bool setPwd(const char *pwd_new, size_t len);
+    bool setPwd(const char *pwd_new) { return setPwd(pwd_new, strlen(pwd_new)); }
+
+    /* Returns the pwd for the terminal, if any. */
+    const char *getPwd() const;
+
+    /* Set the title for the terminal. Wisp: false is OutOfMemory. */
+    bool setTitle(const char *t, size_t len);
+    bool setTitle(const char *t) { return setTitle(t, strlen(t)); }
+
+    /* Returns the title for the terminal, if any. */
+    const char *getTitle() const;
+
+    /* Switch to the given screen. Wisp: ok is false for OutOfMemory. */
+    Screen *switchScreen(ScreenSet::Key key, bool *ok);
+
+    /* Modal screen changes. These map to the literal terminal
+     * modes to enable or disable alternate screen modes. They each
+     * have subtle behaviors so we define them as an enum here. */
+    enum class SwitchScreenMode : uint8_t {
+        /* Legacy alternate screen mode. This goes to the alternate
+         * screen or primary screen and only copies the cursor. The
+         * screen is not erased. */
+        mode_47,
+
+        /* Alternate screen mode where the alternate screen is cleared
+         * on exit. The primary screen is never cleared. The cursor is
+         * copied. */
+        mode_1047,
+
+        /* Save primary screen cursor, switch to alternate screen,
+         * and clear the alternate screen on entry. On exit,
+         * do not clear the screen, and restore the cursor on the
+         * primary screen. */
+        mode_1049,
+    };
+
+    /* Switch screen via a mode switch (e.g. mode 47, 1047, 1049). */
+    bool switchScreenMode(SwitchScreenMode mode, bool enabled);
+
+    /* Return the current string value of the terminal. */
+    std::string plainString() const;
+
+    /* Same as plainString, but respects row wrap state. */
+    std::string plainStringUnwrapped() const;
+
+    /* Full reset. */
+    void fullReset();
+
+    /* Returns true if the point is dirty, used for testing. */
+    bool isDirty(const point::Point &pt) const;
+
+    /* Clear all dirty bits. Testing only. */
+    void clearDirty();
+
+    PageList::IncreaseCapacityError setAttribute(const terminal::sgr::Attribute &attr);
+
+    /* Print the active attributes as a string (DECRQSS). */
+    std::string printAttributes() const;
+
+    /* The modes for DECCOLM. */
+    enum class DeccolmMode : uint8_t { cols_80 = 0, cols_132 = 1 };
+
+    /* A terminal resize expressed in cells with optional per-cell pixel
+     * geometry. */
+    struct Resize {
+        size::CellCountInt cols;
+        size::CellCountInt rows;
+        struct CellSize {
+            uint32_t width;
+            uint32_t height;
+        };
+        Maybe<CellSize> cell_size_px; /* = null */
+
+        Resize() : cols(0), rows(0), cell_size_px() {}
+        Resize(size::CellCountInt c, size::CellCountInt r) : cols(c), rows(r), cell_size_px() {}
+    };
+
+    enum class ResizeError : uint8_t {
+        none,
+        /* Resize requires allocation */
+        OutOfMemory,
+        /* Input value was invalid, such as a 0-sized dimension. */
+        InvalidValue,
+    };
+
+    enum class ResizeTw { tabstops, primary_screen, alternate_screen, alternate_screen_init };
+    typedef tripwire::Module<ResizeTw, ResizeError, 4> resize_tw;
+
+    ResizeError deccolm(zigstd::Allocator alloc, DeccolmMode mode);
+
+    /* Resize the underlying terminal. */
+    ResizeError resize(zigstd::Allocator alloc, const Resize &opts);
+
     void deleteChars(size_t count_req);
     void eraseChars(size_t count_req);
     void eraseLine(terminal::csi::EraseLine mode, bool protected_req);
