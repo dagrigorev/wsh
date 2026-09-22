@@ -4112,6 +4112,557 @@ TEST(screen, Screen__selectionString_multi_page) {
     }
 }
 
+TEST(screen, Screen__lineIterator) {
+    SCREEN(s, 5, 5, (size_t)0);
+    const char *str = "1ABCD\n2EFGH";
+    WRITE(s, str);
+
+    /* Test the line iterator */
+    Screen::LineIterator iter = s.lineIterator(pinAt(s, Point::viewport()));
+    {
+        Selection sel;
+        ASSERT_TRUE(iter.next(&sel));
+        EXPECT_STR("1ABCD", s.selectionString(Screen::SelectionString(sel, false)));
+    }
+    {
+        Selection sel;
+        ASSERT_TRUE(iter.next(&sel));
+        EXPECT_STR("2EFGH", s.selectionString(Screen::SelectionString(sel, false)));
+    }
+}
+
+TEST(screen, Screen__lineIterator_soft_wrap) {
+    SCREEN(s, 5, 5, (size_t)0);
+    const char *str = "1ABCD2EFGH\n3ABCD";
+    WRITE(s, str);
+
+    /* Test the line iterator */
+    Screen::LineIterator iter = s.lineIterator(pinAt(s, Point::viewport()));
+    {
+        Selection sel;
+        ASSERT_TRUE(iter.next(&sel));
+        EXPECT_STR("1ABCD2EFGH", s.selectionString(Screen::SelectionString(sel, false)));
+    }
+    {
+        Selection sel;
+        ASSERT_TRUE(iter.next(&sel));
+        EXPECT_STR("3ABCD", s.selectionString(Screen::SelectionString(sel, false)));
+    }
+    /* try testing.expect(iter.next() == null); */
+}
+
+TEST(screen, Screen__hyperlink_start_end) {
+    SCREEN(s, 5, 5, (size_t)0);
+
+    ASSERT_TRUE(s.cursor.hyperlink_id == 0);
+    {
+        Page *page = s.cursor.page_pin->node->page();
+        ASSERT_TRUE(0 == page->hyperlink_set.count());
+    }
+
+    NOERR(startLink(s, "http://example.com"));
+    ASSERT_TRUE(s.cursor.hyperlink_id != 0);
+    {
+        Page *page = s.cursor.page_pin->node->page();
+        ASSERT_TRUE(1 == page->hyperlink_set.count());
+    }
+
+    s.endHyperlink();
+    ASSERT_TRUE(s.cursor.hyperlink_id == 0);
+    {
+        Page *page = s.cursor.page_pin->node->page();
+        ASSERT_TRUE(0 == page->hyperlink_set.count());
+    }
+}
+
+TEST(screen, Screen__hyperlink_accepts_its_current_values) {
+    SCREEN(s, 5, 5, (size_t)0);
+
+    NOERR(startLink(s, "http://example.com", "current"));
+    const hyperlink::Hyperlink *current = s.cursor.hyperlink;
+    NOERR(s.startHyperlink(current->uri, current->uri_len, current->id.explicit_ptr, current->id.explicit_len));
+
+    EXPECT_STR("http://example.com", std::string((const char *)s.cursor.hyperlink->uri, s.cursor.hyperlink->uri_len));
+    EXPECT_STR("current", std::string((const char *)s.cursor.hyperlink->id.explicit_ptr,
+                                      s.cursor.hyperlink->id.explicit_len));
+}
+
+TEST(screen, Screen__implicit_hyperlink_ID_wraps) {
+    SCREEN(s, 5, 5, (size_t)0);
+
+    s.cursor.hyperlink_implicit_id = UINT32_MAX;
+    NOERR(startLink(s, "http://example.com"));
+
+    ASSERT_TRUE((size::OffsetInt)0 == s.cursor.hyperlink_implicit_id);
+    ASSERT_TRUE((size::OffsetInt)UINT32_MAX == s.cursor.hyperlink->id.implicit);
+
+    /* A failed allocation must roll the wrapped counter back to its
+     * original value as well. */
+    s.endHyperlink();
+    s.cursor.hyperlink_implicit_id = UINT32_MAX;
+    zigstd::FailingAllocator failing(talloc(), SIZE_MAX);
+    failing.fail_index = failing.alloc_index;
+    {
+        const zigstd::Allocator original_alloc = s.alloc;
+        s.alloc = failing.allocator();
+        const PageList::IncreaseCapacityError e = startLink(s, "http://example.com");
+        s.alloc = original_alloc;
+        ASSERT_TRUE(e == PageList::IncreaseCapacityError::OutOfMemory);
+    }
+    ASSERT_TRUE((size::OffsetInt)UINT32_MAX == s.cursor.hyperlink_implicit_id);
+}
+
+TEST(screen, Screen__hyperlink_reuse) {
+    SCREEN(s, 5, 5, (size_t)0);
+
+    ASSERT_TRUE(s.cursor.hyperlink_id == 0);
+    {
+        Page *page = s.cursor.page_pin->node->page();
+        ASSERT_TRUE(0 == page->hyperlink_set.count());
+    }
+
+    /* Use it for the first time */
+    NOERR(startLink(s, "http://example.com"));
+    ASSERT_TRUE(s.cursor.hyperlink_id != 0);
+    const hyperlink::Id id = s.cursor.hyperlink_id;
+
+    /* Reuse the same hyperlink, expect we have the same ID */
+    NOERR(startLink(s, "http://example.com"));
+    ASSERT_TRUE(id == s.cursor.hyperlink_id);
+    {
+        Page *page = s.cursor.page_pin->node->page();
+        ASSERT_TRUE(1 == page->hyperlink_set.count());
+    }
+
+    s.endHyperlink();
+    ASSERT_TRUE(s.cursor.hyperlink_id == 0);
+    {
+        Page *page = s.cursor.page_pin->node->page();
+        ASSERT_TRUE(0 == page->hyperlink_set.count());
+    }
+}
+
+TEST(screen, Screen__hyperlink_cursor_state_on_resize) {
+    /* This test depends on underlying PageList implementation so
+     * it may be invalid one day. It's here to document/verify the
+     * current behavior. */
+    SCREEN(s, 5, 10, (size_t)0);
+
+    /* Start a hyperlink */
+    NOERR(startLink(s, "http://example.com"));
+    ASSERT_TRUE(s.cursor.hyperlink_id != 0);
+    {
+        Page *page = s.cursor.page_pin->node->page();
+        ASSERT_TRUE(1 == page->hyperlink_set.count());
+    }
+
+    /* Resize. Any column growth will trigger a page to be reallocated. */
+    ASSERT_TRUE(s.resize(rsz(10, 10)));
+    ASSERT_TRUE(s.cursor.hyperlink_id != 0);
+    {
+        Page *page = s.cursor.page_pin->node->page();
+        ASSERT_TRUE(1 == page->hyperlink_set.count());
+    }
+
+    s.endHyperlink();
+    ASSERT_TRUE(s.cursor.hyperlink_id == 0);
+    {
+        Page *page = s.cursor.page_pin->node->page();
+        ASSERT_TRUE(0 == page->hyperlink_set.count());
+    }
+}
+
+TEST(screen, Screen__cursorSetHyperlink_OOM___URI_too_large_for_string_alloc) {
+    SCREEN(s, 80, 24, (size_t)0);
+
+    /* Start a hyperlink with a URI that just barely fits in the string alloc.
+     * This will ensure that additional string alloc space is needed for the
+     * redundant copy of the URI when the page is re-alloced. */
+    const std::string uri(page::std_capacity().string_bytes - 8, 'a');
+    NOERR(s.startHyperlink((const uint8_t *)uri.data(), uri.size(), nullptr, 0));
+
+    /* Figure out how many cells should can have hyperlinks in this page,
+     * and write twice that number, to guarantee the capacity needs to be
+     * increased at some point. */
+    const size_t base_capacity = s.cursor.page_pin->node->page()->hyperlinkCapacity();
+    const size_t base_string_bytes = s.cursor.page_pin->node->capacity().string_bytes;
+    for (size_t i = 0; i < base_capacity * 2; i++) {
+        NOERR(s.cursorSetHyperlink());
+        if (s.cursor.x >= s.pages.cols - 1) {
+            ASSERT_TRUE(s.cursorDownOrScroll());
+            s.cursorHorizontalAbsolute(0);
+        } else {
+            s.cursorRight(1);
+        }
+    }
+
+    /* Make sure the capacity really did increase. */
+    ASSERT_TRUE(base_capacity < s.cursor.page_pin->node->page()->hyperlinkCapacity());
+    /* And that our string_bytes increased as well. */
+    ASSERT_TRUE(base_string_bytes < s.cursor.page_pin->node->capacity().string_bytes);
+}
+
+TEST(screen, Screen__increaseCapacity_cursor_style_ref_count_preserved) {
+    SCREEN(s, 5, 5, (size_t)0);
+    NOERR(s.setAttribute(attr(A::bold)));
+    WRITE(s, "1ABCD");
+
+    /* We should have one page and it should be our cursor page */
+    ASSERT_TRUE(s.pages.pages.first == s.pages.pages.last);
+    ASSERT_TRUE(s.pages.pages.first == s.cursor.page_pin->node);
+
+    const style::Style old_style = s.cursor.style;
+
+    {
+        Page *page = s.pages.pages.last->page();
+        /* 5 chars + cursor = 6 refs */
+        ASSERT_TRUE(6 == page->styles.refCount((const void *)page->memory, s.cursor.style_id));
+    }
+
+    /* This forces the page to change via increaseCapacity. */
+    PageList::Node *new_node = nullptr;
+    NOERR(s.increaseCapacity(s.cursor.page_pin->node, PageList::IncreaseCapacity::grapheme_bytes, &new_node));
+
+    /* Cursor's page_pin should now point to the new node */
+    ASSERT_TRUE(s.cursor.page_pin->node == new_node);
+
+    /* Verify cursor's page_cell and page_row are correctly reloaded from the pin */
+    const Page::RowAndCell page_rac = s.cursor.page_pin->rowAndCell();
+    ASSERT_TRUE(s.cursor.page_row == page_rac.row);
+    ASSERT_TRUE(s.cursor.page_cell == page_rac.cell);
+
+    /* Style should be preserved */
+    ASSERT_TRUE(old_style.eql(s.cursor.style));
+    ASSERT_TRUE(s.cursor.style_id != style::default_id);
+
+    /* After increaseCapacity, the 5 chars are cloned (5 refs) and
+     * the cursor's style is re-added (1 ref) = 6 total. */
+    {
+        Page *page = s.pages.pages.last->page();
+        const size_t ref_count = page->styles.refCount((const void *)page->memory, s.cursor.style_id);
+        ASSERT_TRUE(6 == ref_count);
+    }
+}
+
+TEST(screen, Screen__increaseCapacity_cursor_hyperlink_ref_count_preserved) {
+    SCREEN(s, 5, 5, (size_t)0);
+    NOERR(startLink(s, "https://example.com/"));
+    WRITE(s, "1ABCD");
+
+    /* We should have one page and it should be our cursor page */
+    ASSERT_TRUE(s.pages.pages.first == s.pages.pages.last);
+    ASSERT_TRUE(s.pages.pages.first == s.cursor.page_pin->node);
+
+    {
+        Page *page = s.pages.pages.last->page();
+        /* Cursor has the hyperlink active = 1 count in hyperlink_set */
+        ASSERT_TRUE(1 == page->hyperlink_set.count());
+        ASSERT_TRUE(s.cursor.hyperlink_id != 0);
+        ASSERT_TRUE(s.cursor.hyperlink != nullptr);
+    }
+
+    /* This forces the page to change via increaseCapacity. */
+    PageList::Node *n = nullptr;
+    NOERR(s.increaseCapacity(s.cursor.page_pin->node, PageList::IncreaseCapacity::grapheme_bytes, &n));
+
+    /* Hyperlink should be preserved with correct URI */
+    ASSERT_TRUE(s.cursor.hyperlink != nullptr);
+    ASSERT_TRUE(s.cursor.hyperlink_id != 0);
+    EXPECT_STR("https://example.com/", std::string((const char *)s.cursor.hyperlink->uri, s.cursor.hyperlink->uri_len));
+
+    /* After increaseCapacity, the hyperlink is re-added to the new page. */
+    {
+        Page *page = s.pages.pages.last->page();
+        ASSERT_TRUE(1 == page->hyperlink_set.count());
+    }
+}
+
+TEST(screen, Screen__increaseCapacity_cursor_with_both_style_and_hyperlink_preserved) {
+    SCREEN(s, 5, 5, (size_t)0);
+
+    NOERR(s.setAttribute(attr(A::bold)));
+    NOERR(startLink(s, "https://example.com/"));
+    WRITE(s, "1ABCD");
+
+    /* We should have one page and it should be our cursor page */
+    ASSERT_TRUE(s.pages.pages.first == s.pages.pages.last);
+    ASSERT_TRUE(s.pages.pages.first == s.cursor.page_pin->node);
+
+    const style::Style old_style = s.cursor.style;
+
+    {
+        Page *page = s.pages.pages.last->page();
+        /* 5 chars + cursor = 6 refs for style */
+        ASSERT_TRUE(6 == page->styles.refCount((const void *)page->memory, s.cursor.style_id));
+        /* Cursor has the hyperlink active = 1 count in hyperlink_set */
+        ASSERT_TRUE(1 == page->hyperlink_set.count());
+        ASSERT_TRUE(s.cursor.style_id != style::default_id);
+        ASSERT_TRUE(s.cursor.hyperlink_id != 0);
+        ASSERT_TRUE(s.cursor.hyperlink != nullptr);
+    }
+
+    /* This forces the page to change via increaseCapacity. */
+    PageList::Node *n = nullptr;
+    NOERR(s.increaseCapacity(s.cursor.page_pin->node, PageList::IncreaseCapacity::grapheme_bytes, &n));
+
+    /* Style should be preserved */
+    ASSERT_TRUE(old_style.eql(s.cursor.style));
+    ASSERT_TRUE(s.cursor.style_id != style::default_id);
+
+    /* Hyperlink should be preserved */
+    ASSERT_TRUE(s.cursor.hyperlink != nullptr);
+    ASSERT_TRUE(s.cursor.hyperlink_id != 0);
+    EXPECT_STR("https://example.com/", std::string((const char *)s.cursor.hyperlink->uri, s.cursor.hyperlink->uri_len));
+
+    /* After increaseCapacity, both style and hyperlink are re-added to the new page. */
+    {
+        Page *page = s.pages.pages.last->page();
+        const size_t ref_count = page->styles.refCount((const void *)page->memory, s.cursor.style_id);
+        ASSERT_TRUE(6 == ref_count);
+        ASSERT_TRUE(1 == page->hyperlink_set.count());
+    }
+}
+
+TEST(screen, Screen__increaseCapacity_non_cursor_page_returns_early) {
+    /* Test that calling increaseCapacity on a page that is NOT the cursor's
+     * page properly delegates to pages.increaseCapacity without doing the
+     * extra cursor accounting (style/hyperlink re-adding). */
+    SCREEN(s, 80, 24, (size_t)10000);
+
+    /* Set up a custom style and hyperlink on the cursor */
+    NOERR(s.setAttribute(attr(A::bold)));
+    NOERR(startLink(s, "https://example.com/"));
+    WRITE(s, "Hello");
+
+    /* Store cursor state before growing pages */
+    const style::Style old_style = s.cursor.style;
+    const style::Id old_style_id = s.cursor.style_id;
+    const hyperlink::Hyperlink *old_hyperlink = s.cursor.hyperlink;
+    const hyperlink::Id old_hyperlink_id = s.cursor.hyperlink_id;
+
+    /* The cursor is on the first (and only) page */
+    ASSERT_TRUE(s.pages.pages.first == s.pages.pages.last);
+    ASSERT_TRUE(s.cursor.page_pin->node == s.pages.pages.first);
+
+    /* Grow pages until we have multiple pages. The cursor's pin stays on
+     * the first page since we're just adding rows. */
+    PageList::Node *first_page_node = s.pages.pages.first;
+    first_page_node->page()->pauseIntegrityChecks(true);
+    const size_t grow_n = (size_t)(first_page_node->capacity().rows - first_page_node->rows());
+    for (size_t i = 0; i < grow_n; i++) {
+        PageList::Node *g;
+        ASSERT_TRUE(s.pages.grow(&g));
+    }
+    first_page_node->page()->pauseIntegrityChecks(false);
+    {
+        PageList::Node *g;
+        ASSERT_TRUE(s.pages.grow(&g));
+    }
+
+    /* Now we have two pages */
+    ASSERT_TRUE(s.pages.pages.first != s.pages.pages.last);
+    PageList::Node *second_page = s.pages.pages.last;
+
+    /* Cursor should still be on the first page (where it was created) */
+    ASSERT_TRUE(s.cursor.page_pin->node == s.pages.pages.first);
+    ASSERT_TRUE(s.cursor.page_pin->node != second_page);
+
+    const size_t second_page_styles_cap = second_page->capacity().styles;
+    const size_t cursor_page_styles_cap = s.cursor.page_pin->node->capacity().styles;
+
+    /* Call increaseCapacity on the second page (NOT the cursor's page) */
+    PageList::Node *new_second_page = nullptr;
+    NOERR(s.increaseCapacity(second_page, PageList::IncreaseCapacity::styles, &new_second_page));
+
+    /* The second page should have increased capacity */
+    ASSERT_TRUE(second_page_styles_cap * 2 == new_second_page->capacity().styles);
+
+    /* The cursor's page (first page) should be unchanged */
+    ASSERT_TRUE(cursor_page_styles_cap == s.cursor.page_pin->node->capacity().styles);
+
+    /* Cursor state should be completely unchanged since we didn't touch its page */
+    ASSERT_TRUE(old_style.eql(s.cursor.style));
+    ASSERT_TRUE(old_style_id == s.cursor.style_id);
+    ASSERT_TRUE(old_hyperlink == s.cursor.hyperlink);
+    ASSERT_TRUE(old_hyperlink_id == s.cursor.hyperlink_id);
+
+    /* Verify hyperlink is still valid */
+    ASSERT_TRUE(s.cursor.hyperlink != nullptr);
+    EXPECT_STR("https://example.com/", std::string((const char *)s.cursor.hyperlink->uri, s.cursor.hyperlink->uri_len));
+}
+
+/* Wisp: while (page.styles.add(page.memory, .{ .bg_color = .{ .rgb = @bitCast(n) } })) |_| n += 1 else |_| {} */
+static void fillStyles(Page *page, size_t max_items = SIZE_MAX) {
+    for (size_t n = 1; n < max_items; n++) {
+        style::Style st;
+        st.bg_color = style::Style::Color::makeRgb(
+            style::RGB((uint8_t)(n & 0xFF), (uint8_t)((n >> 8) & 0xFF), (uint8_t)((n >> 16) & 0xFF)));
+        style::Id id;
+        if (page->styles.add((const void *)page->memory, st, &id) != ref_counted_set::AddError::none) break;
+    }
+}
+
+TEST(screen, Screen__cursorDown_to_page_with_insufficient_capacity) {
+    /* Regression test for https://github.com/ghostty-org/ghostty/issues/10282
+     *
+     * This test exposes a use-after-realloc bug in cursorDown (and similar
+     * cursor movement functions). The bug pattern:
+     *
+     * 1. cursorDown creates a by-value copy of the pin via page_pin.down(n)
+     * 2. cursorChangePin is called, which may trigger increaseCapacity
+     *    if the target page's style map is full
+     * 3. increaseCapacity frees the old page and creates a new one
+     * 4. The local pin copy still points to the freed page
+     * 5. rowAndCell() on the stale pin accesses freed memory
+     *
+     * Small screen to make page boundary crossing easy to set up */
+    SCREEN(s, 10, 3, (size_t)1);
+
+    /* Scroll down enough to create a second page */
+    Page *start_page = s.pages.pages.last->page();
+    ASSERT_TRUE(scrollToNewPage(s, start_page));
+
+    /* Cursor should now be on a new page */
+    Page *new_page = s.cursor.page_pin->node->page();
+    ASSERT_TRUE(start_page != new_page);
+
+    /* Fill new_page's style map to capacity. When we move INTO this page
+     * with a style set, increaseCapacity will be triggered. */
+    {
+        new_page->pauseIntegrityChecks(true);
+        fillStyles(new_page);
+        new_page->pauseIntegrityChecks(false);
+        new_page->assertIntegrity();
+    }
+
+    /* Move cursor to start of active area and set a style */
+    s.cursorAbsolute(0, 0);
+    NOERR(s.setAttribute(attr(A::bold)));
+    ASSERT_TRUE(s.cursor.style.flags.bold);
+    ASSERT_TRUE(s.cursor.style_id != style::default_id);
+
+    /* Find the row just before the page boundary */
+    bool found = false;
+    for (size_t row = 0; row < (size_t)(s.pages.rows - 1); row++) {
+        s.cursorAbsolute(0, (size::CellCountInt)row);
+        PageList::Node *cur_node = s.cursor.page_pin->node;
+        const Maybe<Pin> next_pin = s.cursor.page_pin->down(1);
+        if (next_pin.has) {
+            if (next_pin.value.node != cur_node) {
+                /* Cursor is at 'row', moving down crosses to new_page */
+                ASSERT_TRUE(next_pin.value.node->page() == new_page);
+
+                /* This cursorDown triggers the bug: the local page_pin copy
+                 * becomes stale after increaseCapacity, causing rowAndCell()
+                 * to access freed memory. */
+                s.cursorDown(1);
+
+                /* If the fix is applied, verify correct state */
+                ASSERT_TRUE(s.cursor.y == row + 1);
+                ASSERT_TRUE(s.cursor.style.flags.bold);
+                found = true;
+                break;
+            }
+        }
+    }
+    /* Didn't find boundary */
+    ASSERT_TRUE(found);
+}
+
+TEST(screen, Screen_setAttribute_increases_capacity_when_style_map_is_full) {
+    /* Tests that setAttribute succeeds when the style map is full by
+     * increasing page capacity. When capacity is at max and increaseCapacity
+     * returns OutOfSpace, manualStyleUpdate will split the page instead.
+     *
+     * Use a small screen with multiple rows */
+    SCREEN(s, 10, 5, (size_t)10);
+
+    /* Write content to multiple rows */
+    WRITE(s, "line1\nline2\nline3\nline4\nline5");
+
+    /* Get the page and fill its style map to capacity */
+    Page *page = s.cursor.page_pin->node->page();
+    const size_t original_styles_capacity = page->capacity.styles;
+
+    /* Fill the style map to capacity using the StyleSet's layout capacity
+     * which accounts for the load factor */
+    {
+        page->pauseIntegrityChecks(true);
+        const size_t max_items = page->styles.layout.cap;
+        fillStyles(page, max_items);
+        page->pauseIntegrityChecks(false);
+        page->assertIntegrity();
+    }
+
+    /* Now try to set a new unique attribute that would require a new style slot
+     * This should succeed by increasing capacity (or splitting if at max capacity) */
+    NOERR(s.setAttribute(attr(A::bold)));
+
+    /* The style should have been applied (bold flag set) */
+    ASSERT_TRUE(s.cursor.style.flags.bold);
+
+    /* The cursor should have a valid non-default style_id */
+    ASSERT_TRUE(s.cursor.style_id != style::default_id);
+
+    /* Either the capacity increased or the page was split/changed */
+    Page *current_page = s.cursor.page_pin->node->page();
+    const bool capacity_increased = current_page->capacity.styles > original_styles_capacity;
+    const bool page_changed = current_page != page;
+    ASSERT_TRUE(capacity_increased || page_changed);
+}
+
+TEST(screen, Screen_setAttribute_splits_page_on_OutOfSpace_at_max_styles) {
+    SCREEN(s, 10, 10, (size_t)0);
+
+    /* Write content to multiple rows so we have something to split */
+    WRITE(s, "line1\nline2\nline3\nline4\nline5");
+
+    /* Remember the original node */
+    PageList::Node *original_node = s.cursor.page_pin->node;
+
+    /* Increase the page's style capacity to max by repeatedly calling increaseCapacity
+     * Use Screen.increaseCapacity to properly maintain cursor state */
+    const size_t max_styles = 0xFFFF;
+    while (s.cursor.page_pin->node->capacity().styles < max_styles) {
+        PageList::Node *n;
+        if (s.increaseCapacity(s.cursor.page_pin->node, PageList::IncreaseCapacity::styles, &n) !=
+            PageList::IncreaseCapacityError::none)
+            break;
+    }
+
+    /* Get the page reference after increaseCapacity - cursor may have moved */
+    Page *page = s.cursor.page_pin->node->page();
+    ASSERT_TRUE(max_styles == page->capacity.styles);
+
+    /* Fill the style map to capacity using the StyleSet's layout capacity
+     * which accounts for the load factor */
+    {
+        page->pauseIntegrityChecks(true);
+        const size_t max_items = page->styles.layout.cap;
+        fillStyles(page, max_items);
+        page->pauseIntegrityChecks(false);
+        page->assertIntegrity();
+    }
+
+    /* Track the node before setAttribute */
+    PageList::Node *node_before_set = s.cursor.page_pin->node;
+
+    /* Now try to set a new unique attribute that would require a new style slot
+     * At max capacity, increaseCapacity will return OutOfSpace, triggering page split */
+    NOERR(s.setAttribute(attr(A::bold)));
+
+    /* The style should have been applied (bold flag set) */
+    ASSERT_TRUE(s.cursor.style.flags.bold);
+
+    /* The cursor should have a valid non-default style_id */
+    ASSERT_TRUE(s.cursor.style_id != style::default_id);
+
+    /* The page should have been split */
+    const bool page_was_split = s.cursor.page_pin->node != node_before_set || node_before_set->next != nullptr ||
+                                node_before_set->prev != nullptr || s.cursor.page_pin->node != original_node;
+    ASSERT_TRUE(page_was_split);
+}
+
 /* @@TESTS@@ */
 
 /* Wisp: std.testing.allocator's leak check. Runs last (registration order). */
