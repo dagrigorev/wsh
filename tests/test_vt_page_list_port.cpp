@@ -7252,6 +7252,572 @@ TEST(page_list, PageList_resize_reflow_grapheme_map_capacity_exceeded) {
     ASSERT_TRUE(2 == s->cols);
 }
 
+static Node *compactNode(PageList &s, Node *node) {
+    Node *out = nullptr;
+    const bool ok = s.compact(node, &out);
+    assert(ok);
+    (void)ok;
+    return out;
+}
+
+static void writeRowY(Page *page) {
+    for (size_t y = 0; y < page->size.rows; y++) *page->getRowAndCell(0, y).cell = page::Cell::init((uint32_t)y);
+}
+
+TEST(page_list, PageList_resize_grow_cols_with_unwrap_fixes_viewport_pin) {
+    /* Regression test: after resize/reflow, the viewport pin can end up at a
+     * position where pin.y + rows > total_rows, causing getBottomRight to panic.
+     *
+     * The plan is to pin viewport in history, then grow columns to unwrap rows.
+     * The unwrap reduces total_rows, but the tracked pin moves to a position
+     * that no longer has enough rows below it for the viewport height. */
+    ListHolder s(opts(2, 10));
+
+    /* Make sure we have some history, in this case we have 30 rows of history */
+    ASSERT_TRUE(s->growRows(30));
+    ASSERT_TRUE(40 == s->totalRows());
+
+    /* Fill all rows with wrapped content (pairs that unwrap when cols increase) */
+    PageList::PageIterator it = s->pageIterator(Dir::right_down, Point::screen());
+    PageList::Chunk chunk;
+    while (it.next(&chunk)) {
+        Page *page = chunk.node->page();
+        for (size_t y = chunk.start; y < chunk.end; y++) {
+            const Page::RowAndCell rac = page->getRowAndCell(0, y);
+            if (y % 2 == 0) {
+                rac.row->setWrap(true);
+            } else {
+                rac.row->setWrapContinuation(true);
+            }
+            for (size_t x = 0; x < s->cols; x++) *page->getRowAndCell(x, y).cell = page::Cell::init('A');
+        }
+    }
+
+    /* Pin viewport at row 28 (in history, 2 rows before active area at row 30).
+     * After unwrap: row 28 -> row 14, total_rows 40 -> 20, active starts at 10.
+     * Pin at 14 needs rows 14-23, but only 0-19 exist -> overflow. */
+    s->scroll(Scroll::pinAt(s->pin(Point::screen(0, 28)).value));
+    ASSERT_TRUE(s->viewport == Viewport::pin);
+    ASSERT_TRUE(s->getBottomRight(point::Tag::viewport).has);
+
+    /* Resize with reflow: unwraps rows, reducing total_rows */
+    ASSERT_TRUE(s->resize(rz(4, -1, true)));
+    ASSERT_TRUE(4 == s->cols);
+    ASSERT_TRUE(s->totalRows() < 40);
+
+    /* Used to panic here, so test that we can get the bottom right. */
+    ASSERT_TRUE(s->getBottomRight(point::Tag::viewport).has);
+}
+
+TEST(page_list, PageList_grow_reuses_non_standard_page_without_leak) {
+    /* Create a PageList with 3 * std_size max so we can fit multiple pages
+     * but will still trigger reuse. */
+    ListHolder s(opts(80, 24, 3 * PageList::std_size));
+
+    /* Increase the first page capacity to make it non-standard (larger than std_size). */
+    while (s->pages.first->page()->memory_len <= PageList::std_size) {
+        (void)incCap(*s, s->pages.first, IncCap::grapheme_bytes);
+    }
+
+    /* The first page should now have non-standard memory size. */
+    ASSERT_TRUE(s->pages.first->page()->memory_len > PageList::std_size);
+
+    /* First, fill up the first page's capacity */
+    Node *first_page = s->pages.first;
+    while (first_page->rows() < first_page->capacity().rows) (void)growNode(&*s);
+
+    /* Now grow to create a second page */
+    (void)growNode(&*s);
+    ASSERT_TRUE(s->pages.first != s->pages.last);
+
+    /* Continue growing until we exceed max_size AND the last page is full */
+    while (s->page_size + kItem <= s->limits.max(Limits::Key::bytes) ||
+           s->pages.last->rows() < s->pages.last->capacity().rows) {
+        (void)growNode(&*s);
+    }
+
+    /* The first page should still be non-standard */
+    ASSERT_TRUE(s->pages.first->page()->memory_len > PageList::std_size);
+
+    /* Verify we have enough rows for active area (so prune path isn't skipped) */
+    ASSERT_TRUE(s->totalRows() >= s->rows);
+
+    /* Verify last page is full (so grow will need to allocate/reuse) */
+    ASSERT_TRUE(s->pages.last->page()->size.rows == s->pages.last->capacity().rows);
+
+    /* Remember the first page memory pointer before the reuse attempt */
+    Node *first_page_ptr = s->pages.first;
+    uint8_t *first_page_mem_ptr = s->pages.first->page()->memory;
+
+    /* Create a tracked pin pointing to the non-standard first page */
+    Pin *tracked_pin = s->trackPin(Pin(first_page_ptr, 0, 0));
+
+    /* Now grow one more time to trigger the reuse path. Since the first page
+     * is non-standard, it should be destroyed (not reused). The testing
+     * allocator will detect a leak if destroyNode doesn't properly free
+     * the non-standard memory. */
+    (void)growNode(&*s);
+
+    /* After grow, check if the first page is a different one
+     * (meaning the non-standard page was pruned, not reused at the end)
+     * The original first page should no longer be the first page */
+    ASSERT_TRUE(s->pages.first != first_page_ptr);
+
+    /* If the non-standard page was properly destroyed and not reused,
+     * the last page should not have the same memory pointer */
+    ASSERT_TRUE(s->pages.last->page()->memory != first_page_mem_ptr);
+
+    /* The tracked pin should have been moved to the new first page and marked as garbage */
+    ASSERT_TRUE(s->pages.first == tracked_pin->node);
+    ASSERT_TRUE(0 == tracked_pin->x);
+    ASSERT_TRUE(0 == tracked_pin->y);
+    ASSERT_TRUE(tracked_pin->garbage);
+    s->untrackPin(tracked_pin);
+}
+
+TEST(page_list, PageList_grow_non_standard_page_prune_protection) {
+    /* This test specifically verifies the fix for the bug where pruning a
+     * non-standard page would cause totalRows() < self.rows.
+     *
+     * Bug trigger conditions (all must be true simultaneously):
+     * 1. first page is non-standard (memory.len > std_size)
+     * 2. page_size + PagePool.item_size > maxSize() (triggers prune consideration)
+     * 3. pages.first != pages.last (have multiple pages)
+     * 4. total_rows >= self.rows (have enough rows for active area)
+     * 5. total_rows - first.size.rows + 1 < self.rows (prune would lose too many) */
+
+    /* This is kind of magic and likely depends on std_size. */
+    const size::CellCountInt rows_count = 600;
+    ListHolder s(opts(80, rows_count, PageList::std_size));
+
+    /* Make the first page non-standard */
+    while (s->pages.first->page()->memory_len <= PageList::std_size) {
+        (void)incCap(*s, s->pages.first, IncCap::grapheme_bytes);
+    }
+    ASSERT_TRUE(s->pages.first->page()->memory_len > PageList::std_size);
+
+    Node *first_page_node = s->pages.first;
+    const size_t first_page_cap = first_page_node->capacity().rows;
+
+    /* Fill first page to capacity */
+    while (first_page_node->rows() < first_page_cap) (void)growNode(&*s);
+
+    /* Grow until we have a second page (first page fills up first) */
+    while (s->pages.first == s->pages.last) (void)growNode(&*s);
+    ASSERT_TRUE(s->pages.first != s->pages.last);
+
+    /* Fill the second page to capacity so that the next grow() triggers prune */
+    Node *last_node = s->pages.last;
+    const size_t second_cap = last_node->capacity().rows;
+    while (last_node->rows() < second_cap) (void)growNode(&*s);
+
+    /* Now the last page is full. The next grow must either:
+     * 1. Prune the first page and reuse it, OR
+     * 2. Allocate a new page */
+    const size_t total = s->totalRows();
+    const size_t would_remain = total - first_page_cap + 1;
+
+    /* Verify the bug condition is present: pruning first page would leave < rows */
+    ASSERT_TRUE(would_remain < s->rows);
+
+    /* Verify prune path conditions are met */
+    ASSERT_TRUE(s->pages.first != s->pages.last);
+    ASSERT_TRUE(s->page_size + kItem > s->limits.max(Limits::Key::bytes));
+    ASSERT_TRUE(s->totalRows() >= s->rows);
+
+    /* Verify last page is at capacity (so grow must prune or allocate new) */
+    ASSERT_TRUE(second_cap == last_node->rows());
+
+    /* The next grow should trigger prune consideration.
+     * Without the fix, this would destroy the non-standard first page,
+     * leaving only second_cap + 1 rows, which is < self.rows. */
+    (void)growNode(&*s);
+
+    /* Verify the invariant holds - the fix prevents the destructive prune */
+    ASSERT_TRUE(s->totalRows() >= s->rows);
+}
+
+TEST(page_list, PageList_resize_no_reflow_more_cols_remaps_pins_in_backfill_path) {
+    /* Regression test: when resizeWithoutReflowGrowCols copies rows to a previous
+     * page with spare capacity, tracked pins in those rows must be remapped.
+     * Without the fix, pins become dangling pointers when the original page is destroyed. */
+    const size::CellCountInt cols = 5;
+    const Capacity cap = stdAdjust(cols);
+    ListHolder s(opts(cols, cap.rows));
+
+    /* Grow until we have two pages. */
+    while (s->pages.first == s->pages.last) (void)growNode(&*s);
+    Node *first_page = s->pages.first;
+    Node *second_page = s->pages.last;
+    ASSERT_TRUE(first_page != second_page);
+
+    /* Trim a history row so the first page has spare capacity.
+     * This triggers the backfill path in resizeWithoutReflowGrowCols. */
+    s->eraseHistory(Point::history(0, 0));
+    ASSERT_TRUE(first_page->rows() < first_page->capacity().rows);
+
+    /* Ensure the resize takes the slow path (new capacity > current capacity). */
+    const size::CellCountInt new_cols = cols + 1;
+    Capacity adjusted;
+    ASSERT_TRUE(second_page->capacity().adjust(Capacity::Adjustment::withCols(new_cols), &adjusted));
+    ASSERT_TRUE(second_page->capacity().cols < adjusted.cols);
+
+    /* Track a pin in row 0 of the second page. This row will be copied
+     * to the first page during backfill and the pin must be remapped. */
+    Pin *tracked = s->trackPin(Pin(second_page, 0, 0));
+
+    /* Write a marker character to the tracked cell so we can verify
+     * the pin points to the correct cell after resize. */
+    const uint32_t marker = 'X';
+    *tracked->rowAndCell().cell = page::Cell::init(marker);
+
+    ASSERT_TRUE(s->resize(rz(new_cols, -1, false)));
+
+    /* Verify the pin points to a valid node still in the page list. */
+    bool found = false;
+    for (Node *node = s->pages.first; node; node = node->next) {
+        if (node == tracked->node) {
+            found = true;
+            break;
+        }
+    }
+    ASSERT_TRUE(found);
+    ASSERT_TRUE(tracked->y < tracked->node->rows());
+
+    /* Verify the pin still points to the cell with our marker content. */
+    const page::Cell *cell = tracked->rowAndCell().cell;
+    ASSERT_TRUE(page::Cell::ContentTag::codepoint == cell->content_tag());
+    ASSERT_TRUE(marker == cell->contentCodepoint());
+    s->untrackPin(tracked);
+}
+
+TEST(page_list, PageList_compact_pool_page_produces_exact_size_heap_page) {
+    ListHolder s(opts(80, 24, (size_t)0));
+
+    /* A freshly created page is pool-owned at std_size. */
+    Node *node = s->pages.first;
+    ASSERT_TRUE(Node::Owned::pool == node->owned);
+    ASSERT_TRUE(node->page()->memory_len <= PageList::std_size);
+    const page::Size original_size = node->page()->size;
+
+    /* Compacting it should produce a much smaller exact-size heap page. */
+    Node *new_node = compactNode(*s, node);
+    ASSERT_TRUE(new_node != nullptr);
+    ASSERT_TRUE(Node::Owned::heap == new_node->owned);
+    ASSERT_TRUE(new_node->page()->memory_len < PageList::std_size);
+    ASSERT_TRUE(original_size.rows == new_node->rows());
+    ASSERT_TRUE(original_size.cols == new_node->cols());
+    ASSERT_TRUE(new_node == s->pages.first);
+
+    /* Our page size accounting should exactly match the compacted
+     * page since it is the only page in the list. */
+    ASSERT_TRUE(new_node->page()->memory_len == s->page_size);
+
+    /* Compacting again should be a no-op since it is already exact. */
+    ASSERT_TRUE(nullptr == compactNode(*s, new_node));
+}
+
+TEST(page_list, PageList_compact_then_grow_allocates_new_page) {
+    ListHolder s(opts(80, 24));
+
+    /* Compact the only page. It now has no spare row capacity. */
+    Node *node = compactNode(*s, s->pages.first);
+    ASSERT_TRUE(node->rows() == node->capacity().rows);
+
+    /* Growing must allocate a fresh standard page from the pool,
+     * exercising that a compacted page remains a valid live page. */
+    (void)growNode(&*s);
+    ASSERT_TRUE(s->pages.first != s->pages.last);
+    ASSERT_TRUE(Node::Owned::pool == s->pages.last->owned);
+    ASSERT_TRUE(25 == s->totalRows());
+}
+
+TEST(page_list, PageList_compact_then_reset_frees_heap_pages) {
+    ListHolder s(opts(80, 24, (size_t)0));
+
+    /* Compact the only page so the list contains a sub-std_size
+     * heap-owned page. */
+    Node *node = compactNode(*s, s->pages.first);
+    ASSERT_TRUE(Node::Owned::heap == node->owned);
+    ASSERT_TRUE(node->page()->memory_len < PageList::std_size);
+
+    /* Reset must free the heap page (testing allocator catches leaks
+     * and invalid frees) and rebuild from the pool. */
+    s->reset();
+    ASSERT_TRUE(Node::Owned::pool == s->pages.first->owned);
+    ASSERT_TRUE((size_t)s->rows == s->totalRows());
+}
+
+TEST(page_list, PageList_compact_then_clone) {
+    ListHolder s(opts(80, 24));
+
+    /* Write a marker so we can verify contents survive. */
+    *s->pages.first->page()->getRowAndCell(1, 2).cell = page::Cell::init('X');
+
+    /* Compact so the source list contains a sub-std_size heap page. */
+    Node *node = compactNode(*s, s->pages.first);
+    ASSERT_TRUE(Node::Owned::heap == node->owned);
+    ASSERT_TRUE(node->page()->memory_len < PageList::std_size);
+
+    PageList s2;
+    ASSERT_TRUE(s->clone(talloc(), cloneOpts(Point::screen()), &s2) == page::PageError::none);
+    ASSERT_TRUE((size_t)s->rows == s2.totalRows());
+
+    /* Verify the marker survived the clone. */
+    ASSERT_TRUE('X' == s2.pages.first->page()->getRowAndCell(1, 2).cell->contentCodepoint());
+    s2.deinit();
+}
+
+TEST(page_list, PageList_compact_oversized_page) {
+    ListHolder s(opts(80, 24));
+
+    /* Grow until we have multiple pages */
+    Node *page1_node = s->pages.first;
+    page1_node->page()->pauseIntegrityChecks(true);
+    {
+        const size_t n = (size_t)page1_node->capacity().rows - page1_node->rows();
+        for (size_t i = 0; i < n; i++) (void)growNode(&*s);
+    }
+    page1_node->page()->pauseIntegrityChecks(false);
+    (void)growNode(&*s);
+    ASSERT_TRUE(s->pages.first != s->pages.last);
+
+    Node *node = s->pages.first;
+
+    /* Write content to verify it's preserved */
+    {
+        Page *page = node->page();
+        for (size_t y = 0; y < page->size.rows; y++) {
+            for (size_t x = 0; x < s->cols; x++) {
+                *page->getRowAndCell(x, y).cell = page::Cell::init((uint32_t)(x + y * s->cols));
+            }
+        }
+    }
+
+    /* Create a tracked pin on this page */
+    Pin *tracked = s->trackPin(Pin(node, 10, 5));
+
+    /* Make the page oversized */
+    while (node->page()->memory_len <= PageList::std_size) {
+        node = incCap(*s, node, IncCap::grapheme_bytes);
+    }
+    ASSERT_TRUE(node->page()->memory_len > PageList::std_size);
+    const size_t oversized_len = node->page()->memory_len;
+    const page::Size original_size = node->page()->size;
+    Node *second_node = node->next;
+
+    /* Set dirty flag after increaseCapacity */
+    node->page()->dirty = true;
+
+    /* Compact the page */
+    Node *new_node = compactNode(*s, node);
+    ASSERT_TRUE(new_node != nullptr);
+
+    /* Verify memory is smaller */
+    ASSERT_TRUE(new_node->page()->memory_len < oversized_len);
+
+    /* Verify size preserved */
+    ASSERT_TRUE(original_size.rows == new_node->rows());
+    ASSERT_TRUE(original_size.cols == new_node->cols());
+
+    /* Verify dirty flag preserved */
+    ASSERT_TRUE(new_node->page()->dirty);
+
+    /* Verify linked list integrity */
+    ASSERT_TRUE(new_node == s->pages.first);
+    ASSERT_TRUE(nullptr == new_node->prev);
+    ASSERT_TRUE(second_node == new_node->next);
+    ASSERT_TRUE(new_node == second_node->prev);
+
+    /* Verify pin updated correctly */
+    ASSERT_TRUE(new_node == tracked->node);
+    ASSERT_TRUE(5 == tracked->x);
+    ASSERT_TRUE(10 == tracked->y);
+
+    /* Verify content preserved */
+    Page *page = new_node->page();
+    for (size_t y = 0; y < page->size.rows; y++) {
+        for (size_t x = 0; x < s->cols; x++) {
+            ASSERT_TRUE((uint32_t)(x + y * s->cols) == page->getRowAndCell(x, y).cell->contentCodepoint());
+        }
+    }
+    s->untrackPin(tracked);
+}
+
+TEST(page_list, PageList_destroyed_pool_page_reuse_is_zeroed) {
+    ListHolder s(opts(80, 24));
+
+    /* Create a page and scribble over its entire backing memory,
+     * then destroy it so the buffer returns to the pool free list. */
+    Node *node = s->createPage(PageList::CreatePage(PageList::initialCapacity(80)));
+    node->page()->size.rows = 1;
+    uint8_t *mem_ptr = node->page()->memory;
+    memset(node->page()->memory, 0xAA, node->page()->memory_len);
+    s->destroyNode(node);
+
+    /* Reusing the buffer must produce a fully valid, zeroed page. */
+    Node *node2 = s->createPage(PageList::CreatePage(PageList::initialCapacity(80)));
+    ASSERT_TRUE(mem_ptr == node2->page()->memory);
+    node2->page()->size.rows = node2->capacity().rows;
+
+    const size_t cells_len = (size_t)node2->capacity().cols * node2->capacity().rows;
+    const page::Cell *cells = node2->page()->cells.ptr(node2->page()->memory);
+    bool zero = true;
+    for (size_t i = 0; i < cells_len; i++)
+        if (cells[i].bits != 0) zero = false;
+    ASSERT_TRUE(zero);
+    node2->page()->assertIntegrity();
+    s->destroyNode(node2);
+}
+
+TEST(page_list, PageList_increaseCapacity_from_zero_capacity_dimensions) {
+    ListHolder s(opts(80, 24, (size_t)0));
+
+    /* Compact the only page. A plain page has no styled, grapheme,
+     * or hyperlink content so the exact capacity is zero in every
+     * managed dimension. */
+    Node *node = compactNode(*s, s->pages.first);
+    ASSERT_TRUE(0 == node->capacity().styles);
+    ASSERT_TRUE(0 == node->capacity().grapheme_bytes);
+    ASSERT_TRUE(0 == node->capacity().string_bytes);
+    ASSERT_TRUE(0 == node->capacity().hyperlink_bytes);
+
+    /* Increasing each dimension from zero must actually grow it.
+     * Regression: 0 * 2 == 0 used to "succeed" without growing,
+     * which turned caller retry loops into infinite loops. */
+    node = incCap(*s, node, IncCap::styles);
+    ASSERT_TRUE(node->capacity().styles > 0);
+    node = incCap(*s, node, IncCap::grapheme_bytes);
+    ASSERT_TRUE(node->capacity().grapheme_bytes > 0);
+    node = incCap(*s, node, IncCap::string_bytes);
+    ASSERT_TRUE(node->capacity().string_bytes > 0);
+    node = incCap(*s, node, IncCap::hyperlink_bytes);
+    ASSERT_TRUE(node->capacity().hyperlink_bytes > 0);
+
+    /* Increasing a non-zero dimension still doubles. */
+    const size_t styles = node->capacity().styles;
+    node = incCap(*s, node, IncCap::styles);
+    ASSERT_TRUE(styles * 2 == node->capacity().styles);
+}
+
+TEST(page_list, PageList_compact_after_increaseCapacity) {
+    ListHolder s(opts(80, 24, (size_t)0));
+
+    Node *node = s->pages.first;
+
+    /* Grow the page capacity. The content is unchanged, so compaction
+     * should always shrink it back down to an exact-size heap page. */
+    node = incCap(*s, node, IncCap::grapheme_bytes);
+    const size_t grown_len = node->page()->memory_len;
+
+    Node *new_node = compactNode(*s, node);
+    ASSERT_TRUE(Node::Owned::heap == new_node->owned);
+    ASSERT_TRUE(new_node->page()->memory_len < grown_len);
+    ASSERT_TRUE(new_node->page()->memory_len < PageList::std_size);
+}
+
+TEST(page_list, PageList_split_at_middle_row) {
+    ListHolder s(opts(10, 10, (size_t)0));
+
+    Page *page = s->pages.first->page();
+
+    /* Write content to rows: row 0 gets codepoint 0, row 1 gets 1, etc. */
+    writeRowY(page);
+
+    /* Split at row 5 (middle) */
+    ASSERT_TRUE(s->split(Pin(s->pages.first, 5, 0)) == PageList::SplitError::none);
+
+    /* Verify two pages exist */
+    ASSERT_TRUE(s->pages.first != nullptr);
+    ASSERT_TRUE(s->pages.first->next != nullptr);
+
+    Page *first_page = s->pages.first->page();
+    Page *second_page = s->pages.first->next->page();
+
+    /* First page should have rows 0-4 (5 rows) */
+    ASSERT_TRUE(5 == first_page->size.rows);
+    /* Second page should have rows 5-9 (5 rows) */
+    ASSERT_TRUE(5 == second_page->size.rows);
+
+    /* Verify content in first page is preserved (rows 0-4 have codepoints 0-4) */
+    for (uint32_t y = 0; y < 5; y++) ASSERT_TRUE(y == first_page->getRowAndCell(0, y).cell->contentCodepoint());
+
+    /* Verify content in second page (original rows 5-9, now at y=0-4) */
+    for (uint32_t y = 0; y < 5; y++) ASSERT_TRUE(y + 5 == second_page->getRowAndCell(0, y).cell->contentCodepoint());
+}
+
+TEST(page_list, PageList_split_at_row_0_is_no_op) {
+    ListHolder s(opts(10, 10, (size_t)0));
+
+    Page *page = s->pages.first->page();
+
+    /* Write content to all rows */
+    writeRowY(page);
+
+    /* Split at row 0 should be a no-op */
+    ASSERT_TRUE(s->split(Pin(s->pages.first, 0, 0)) == PageList::SplitError::none);
+
+    /* Verify only one page exists (no split occurred) */
+    ASSERT_TRUE(s->pages.first != nullptr);
+    ASSERT_TRUE(s->pages.first->next == nullptr);
+
+    /* Verify all content is still in the original page */
+    ASSERT_TRUE(10 == page->size.rows);
+    for (uint32_t y = 0; y < 10; y++) ASSERT_TRUE(y == page->getRowAndCell(0, y).cell->contentCodepoint());
+}
+
+TEST(page_list, PageList_split_at_last_row) {
+    ListHolder s(opts(10, 10, (size_t)0));
+
+    Page *page = s->pages.first->page();
+
+    /* Write content to all rows */
+    writeRowY(page);
+
+    /* Split at last row (row 9) */
+    ASSERT_TRUE(s->split(Pin(s->pages.first, 9, 0)) == PageList::SplitError::none);
+
+    /* Verify two pages exist */
+    ASSERT_TRUE(s->pages.first != nullptr);
+    ASSERT_TRUE(s->pages.first->next != nullptr);
+
+    Page *first_page = s->pages.first->page();
+    Page *second_page = s->pages.first->next->page();
+
+    /* First page should have 9 rows */
+    ASSERT_TRUE(9 == first_page->size.rows);
+    /* Second page should have 1 row */
+    ASSERT_TRUE(1 == second_page->size.rows);
+
+    /* Verify content in second page (original row 9, now at y=0) */
+    ASSERT_TRUE(9 == second_page->getRowAndCell(0, 0).cell->contentCodepoint());
+}
+
+TEST(page_list, PageList_split_single_row_page_returns_OutOfSpace) {
+    /* Initialize with 1 row */
+    ListHolder s(opts(10, 1, (size_t)0));
+
+    ASSERT_TRUE(s->split(Pin(s->pages.first, 0, 0)) == PageList::SplitError::OutOfSpace);
+}
+
+TEST(page_list, PageList_split_moves_tracked_pins) {
+    ListHolder s(opts(10, 10, (size_t)0));
+
+    /* Track a pin at row 7 */
+    Pin *tracked = s->trackPin(Pin(s->pages.first, 7, 3));
+
+    /* Split at row 5 */
+    ASSERT_TRUE(s->split(Pin(s->pages.first, 5, 0)) == PageList::SplitError::none);
+
+    /* The tracked pin should now be in the second page */
+    ASSERT_TRUE(tracked->node == s->pages.first->next);
+    /* y should be adjusted: was 7, split at 5, so new y = 7 - 5 = 2 */
+    ASSERT_TRUE(2 == tracked->y);
+    /* x should remain unchanged */
+    ASSERT_TRUE(3 == tracked->x);
+    s->untrackPin(tracked);
+}
+
 /* @@TESTS@@ */
 
 /* Wisp: std.testing.allocator's leak check. Runs last (registration order). */
