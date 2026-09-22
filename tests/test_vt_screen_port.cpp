@@ -1554,6 +1554,643 @@ TEST(screen, Screen__scroll_above_hyperlink_dense_row_to_existing_page) {
     }
 }
 
+/* Wisp: var s2 = try s.clone(io, alloc, top, bot); defer s2.deinit(); */
+struct CloneHolder {
+    Screen s;
+    bool ok;
+    CloneHolder(const Screen &src, const Point &top, Maybe<Point> bot) {
+        ok = src.clone(talloc(), top, bot, &s) == page::PageError::none;
+    }
+    ~CloneHolder() {
+        if (ok) s.deinit();
+    }
+};
+#define CLONE(var, src, top, bot)                                                                                      \
+    CloneHolder var##_holder((src), (top), (bot));                                                                     \
+    ASSERT_TRUE(var##_holder.ok);                                                                                      \
+    Screen &var = var##_holder.s
+
+static Screen::Resize rsz(size::CellCountInt cols, size::CellCountInt rows, bool reflow = true,
+                          bool pull_scrollback = true) {
+    Screen::Resize r(cols, rows, reflow);
+    r.pull_scrollback = pull_scrollback;
+    return r;
+}
+
+TEST(screen, Screen__clone) {
+    SCREEN(s, 10, 3, (size_t)10);
+    WRITE(s, "1ABCD\n2EFGH");
+    EXPECT_DUMP(s, active, "1ABCD\n2EFGH");
+    ASSERT_TRUE(5 == s.cursor.x);
+    ASSERT_TRUE(1 == s.cursor.y);
+
+    /* Clone */
+    CLONE(s2, s, Point::active(), Maybe<Point>());
+    EXPECT_DUMP(s2, active, "1ABCD\n2EFGH");
+    ASSERT_TRUE(5 == s2.cursor.x);
+    ASSERT_TRUE(1 == s2.cursor.y);
+
+    /* Write to s1, should not be in s2 */
+    WRITE(s, "\n34567");
+    EXPECT_DUMP(s, active, "1ABCD\n2EFGH\n34567");
+    EXPECT_DUMP(s2, active, "1ABCD\n2EFGH");
+    ASSERT_TRUE(5 == s2.cursor.x);
+    ASSERT_TRUE(1 == s2.cursor.y);
+}
+
+TEST(screen, Screen__clone_partial) {
+    SCREEN(s, 10, 3, (size_t)10);
+    WRITE(s, "1ABCD\n2EFGH");
+    EXPECT_DUMP(s, active, "1ABCD\n2EFGH");
+    ASSERT_TRUE(5 == s.cursor.x);
+    ASSERT_TRUE(1 == s.cursor.y);
+
+    /* Clone */
+    CLONE(s2, s, Point::active(0, 1), Maybe<Point>());
+    EXPECT_DUMP(s2, active, "2EFGH");
+
+    /* Cursor is shifted since we cloned partial */
+    ASSERT_TRUE(5 == s2.cursor.x);
+    ASSERT_TRUE(0 == s2.cursor.y);
+}
+
+TEST(screen, Screen__clone_partial_cursor_out_of_bounds) {
+    SCREEN(s, 10, 3, (size_t)10);
+    WRITE(s, "1ABCD\n2EFGH");
+    EXPECT_DUMP(s, active, "1ABCD\n2EFGH");
+    ASSERT_TRUE(5 == s.cursor.x);
+    ASSERT_TRUE(1 == s.cursor.y);
+
+    /* Clone */
+    CLONE(s2, s, Point::active(0, 0), Point::active(0, 0));
+    EXPECT_DUMP(s2, active, "1ABCD");
+
+    /* Cursor is shifted since we cloned partial */
+    ASSERT_TRUE(0 == s2.cursor.x);
+    ASSERT_TRUE(0 == s2.cursor.y);
+}
+
+TEST(screen, Screen__clone_contains_full_selection) {
+    SCREEN(s, 5, 3, (size_t)1);
+    WRITE(s, "1ABCD\n2EFGH\n3IJKL");
+
+    /* Select a single line */
+    ASSERT_TRUE(s.select(
+        Selection::init(pinAt(s, Point::active(0, 1)), pinAt(s, Point::active(s.pages.cols - 1, 1)), false)));
+
+    /* Clone */
+    CLONE(s2, s, Point::active(), Maybe<Point>());
+
+    /* Our selection should remain valid */
+    {
+        const Selection sel = s2.selection.value;
+        ASSERT_TRUE(ptEq(s2.pages.pointFromPin(point::Tag::active, sel.start()), Point::active(0, 1)));
+        ASSERT_TRUE(ptEq(s2.pages.pointFromPin(point::Tag::active, sel.end()), Point::active(s2.pages.cols - 1, 1)));
+    }
+}
+
+TEST(screen, Screen__clone_contains_none_of_selection) {
+    SCREEN(s, 5, 3, (size_t)1);
+    WRITE(s, "1ABCD\n2EFGH\n3IJKL");
+
+    /* Select a single line */
+    ASSERT_TRUE(s.select(
+        Selection::init(pinAt(s, Point::active(0, 0)), pinAt(s, Point::active(s.pages.cols - 1, 0)), false)));
+
+    /* Clone */
+    CLONE(s2, s, Point::active(0, 1), Maybe<Point>());
+
+    /* Our selection should be null */
+    ASSERT_TRUE(!s2.selection.has);
+}
+
+TEST(screen, Screen__clone_contains_selection_start_cutoff) {
+    SCREEN(s, 5, 3, (size_t)1);
+    WRITE(s, "1ABCD\n2EFGH\n3IJKL");
+
+    /* Select a single line */
+    ASSERT_TRUE(s.select(
+        Selection::init(pinAt(s, Point::active(0, 0)), pinAt(s, Point::active(s.pages.cols - 1, 1)), false)));
+
+    /* Clone */
+    CLONE(s2, s, Point::active(0, 1), Maybe<Point>());
+
+    /* Our selection should remain valid */
+    {
+        const Selection sel = s2.selection.value;
+        ASSERT_TRUE(ptEq(s2.pages.pointFromPin(point::Tag::active, sel.start()), Point::active(0, 0)));
+        ASSERT_TRUE(ptEq(s2.pages.pointFromPin(point::Tag::active, sel.end()), Point::active(s2.pages.cols - 1, 0)));
+    }
+}
+
+TEST(screen, Screen__clone_contains_selection_end_cutoff) {
+    SCREEN(s, 5, 3, (size_t)1);
+    WRITE(s, "1ABCD\n2EFGH\n3IJKL");
+
+    /* Select a single line */
+    ASSERT_TRUE(s.select(Selection::init(pinAt(s, Point::active(0, 1)), pinAt(s, Point::active(2, 2)), false)));
+
+    /* Clone */
+    CLONE(s2, s, Point::active(0, 0), Point::active(0, 1));
+
+    /* Our selection should remain valid */
+    {
+        const Selection sel = s2.selection.value;
+        ASSERT_TRUE(ptEq(s2.pages.pointFromPin(point::Tag::active, sel.start()), Point::active(0, 1)));
+        ASSERT_TRUE(ptEq(s2.pages.pointFromPin(point::Tag::active, sel.end()), Point::active(s2.pages.cols - 1, 2)));
+    }
+}
+
+TEST(screen, Screen__clone_contains_selection_end_cutoff_reversed) {
+    SCREEN(s, 5, 3, (size_t)1);
+    WRITE(s, "1ABCD\n2EFGH\n3IJKL");
+
+    /* Select a single line */
+    ASSERT_TRUE(s.select(Selection::init(pinAt(s, Point::active(2, 2)), pinAt(s, Point::active(0, 1)), false)));
+
+    /* Clone */
+    CLONE(s2, s, Point::active(0, 0), Point::active(0, 1));
+
+    /* Our selection should remain valid */
+    {
+        const Selection sel = s2.selection.value;
+        ASSERT_TRUE(ptEq(s2.pages.pointFromPin(point::Tag::active, sel.start()), Point::active(0, 1)));
+        ASSERT_TRUE(ptEq(s2.pages.pointFromPin(point::Tag::active, sel.end()), Point::active(s2.pages.cols - 1, 2)));
+    }
+}
+
+TEST(screen, Screen__clone_contains_subset_of_selection) {
+    SCREEN(s, 5, 4, (size_t)1);
+    WRITE(s, "1ABCD\n2EFGH\n3IJKL\n4ABCD");
+
+    /* Select the full screen */
+    ASSERT_TRUE(s.select(Selection::init(pinAt(s, Point::active(0, 0)), pinAt(s, Point::active(0, 3)), false)));
+
+    /* Clone */
+    CLONE(s2, s, Point::active(0, 1), Point::active(0, 2));
+
+    /* Our selection should remain valid */
+    {
+        const Selection sel = s2.selection.value;
+        ASSERT_TRUE(ptEq(s2.pages.pointFromPin(point::Tag::active, sel.start()), Point::active(0, 0)));
+        ASSERT_TRUE(ptEq(s2.pages.pointFromPin(point::Tag::active, sel.end()), Point::active(s2.pages.cols - 1, 3)));
+    }
+}
+
+TEST(screen, Screen__clone_clamps_clipped_selections_to_mixed_width_pages) {
+    SCREEN(s, 4, 3, (size_t)0);
+
+    PageList::Node *first = s.pages.pages.first;
+    ASSERT_TRUE(s.pages.split(Pin(first, 2)) == PageList::SplitError::none);
+    ASSERT_TRUE(s.pages.split(Pin(first, 1)) == PageList::SplitError::none);
+    PageList::Node *middle = first->next;
+    PageList::Node *last = middle->next;
+    middle->page()->size.cols = 2;
+
+    ASSERT_TRUE(s.select(Selection::init(Pin(first), Pin(last, 0, 3), false)));
+    {
+        CLONE(linear, s, Point::screen(), Point::screen(0, 1));
+        const Pin linear_end = linear.selection.value.end();
+        (void)linear_end.rowAndCell();
+        ASSERT_TRUE(1 == linear_end.x);
+    }
+
+    ASSERT_TRUE(s.select(Selection::init(Pin(first, 0, 3), Pin(last, 0, 3), true)));
+    {
+        CLONE(rectangle, s, Point::screen(0, 1), Maybe<Point>());
+        const Pin rectangle_start = rectangle.selection.value.start();
+        (void)rectangle_start.rowAndCell();
+        ASSERT_TRUE(1 == rectangle_start.x);
+    }
+}
+
+TEST(screen, Screen__clone_contains_subset_of_rectangle_selection) {
+    SCREEN(s, 5, 4, (size_t)1);
+    WRITE(s, "1ABCD\n2EFGH\n3IJKL\n4ABCD");
+
+    /* Select the full screen from x=1 to x=3 */
+    ASSERT_TRUE(s.select(Selection::init(pinAt(s, Point::active(1, 0)), pinAt(s, Point::active(3, 3)), true)));
+
+    /* Clone */
+    CLONE(s2, s, Point::active(0, 1), Point::active(0, 2));
+
+    /* Our selection should remain valid and be properly clipped
+     * preserving the columns of the start and end points of the
+     * selection. */
+    {
+        const Selection sel = s2.selection.value;
+        ASSERT_TRUE(ptEq(s2.pages.pointFromPin(point::Tag::active, sel.start()), Point::active(1, 0)));
+        ASSERT_TRUE(ptEq(s2.pages.pointFromPin(point::Tag::active, sel.end()), Point::active(3, 3)));
+    }
+}
+
+TEST(screen, Screen__clone_basic) {
+    SCREEN(s, 10, 3, (size_t)0);
+    WRITE(s, "1ABCD\n2EFGH\n3IJKL");
+
+    {
+        CLONE(s2, s, Point::active(0, 1), Point::active(0, 1));
+
+        /* Test our contents rotated */
+        EXPECT_DUMP(s2, active, "2EFGH");
+    }
+
+    {
+        CLONE(s2, s, Point::active(0, 1), Point::active(0, 2));
+
+        /* Test our contents rotated */
+        EXPECT_DUMP(s2, active, "2EFGH\n3IJKL");
+    }
+}
+
+TEST(screen, Screen__clone_empty_viewport) {
+    SCREEN(s, 10, 3, (size_t)0);
+
+    {
+        CLONE(s2, s, Point::viewport(0, 0), Point::viewport(0, 0));
+
+        /* Test our contents rotated */
+        EXPECT_DUMP(s2, viewport, "");
+    }
+}
+
+TEST(screen, Screen__clone_one_line_viewport) {
+    SCREEN(s, 10, 3, (size_t)0);
+    WRITE(s, "1ABC");
+
+    {
+        CLONE(s2, s, Point::viewport(0, 0), Point::viewport(0, 0));
+
+        /* Test our contents */
+        EXPECT_DUMP(s2, viewport, "1ABC");
+    }
+}
+
+TEST(screen, Screen__clone_empty_active) {
+    SCREEN(s, 10, 3, (size_t)0);
+
+    {
+        CLONE(s2, s, Point::active(0, 0), Point::active(0, 0));
+
+        /* Test our contents rotated */
+        EXPECT_DUMP(s2, active, "");
+    }
+}
+
+TEST(screen, Screen__clone_one_line_active_with_extra_space) {
+    SCREEN(s, 10, 3, (size_t)0);
+    WRITE(s, "1ABC");
+
+    {
+        CLONE(s2, s, Point::active(0, 0), Maybe<Point>());
+
+        /* Test our contents rotated */
+        EXPECT_DUMP(s2, active, "1ABC");
+    }
+}
+
+TEST(screen, Screen__clear_history_with_no_history) {
+    SCREEN(s, 10, 3, (size_t)3);
+    WRITE(s, "4ABCD\n5EFGH\n6IJKL");
+    ASSERT_TRUE(s.pages.viewport == PageList::Viewport::active);
+    s.eraseHistory(Maybe<Point>());
+    ASSERT_TRUE(s.pages.viewport == PageList::Viewport::active);
+    /* Test our contents rotated */
+    EXPECT_DUMP(s, viewport, "4ABCD\n5EFGH\n6IJKL");
+    /* Test our contents rotated */
+    EXPECT_DUMP(s, screen, "4ABCD\n5EFGH\n6IJKL");
+}
+
+TEST(screen, Screen__clear_history) {
+    SCREEN(s, 10, 3, (size_t)3);
+    WRITE(s, "1ABCD\n2EFGH\n3IJKL\n4ABCD\n5EFGH\n6IJKL");
+    ASSERT_TRUE(s.pages.viewport == PageList::Viewport::active);
+
+    /* Scroll to top */
+    s.scroll(Screen::Scroll::top());
+    /* Test our contents rotated */
+    EXPECT_DUMP(s, viewport, "1ABCD\n2EFGH\n3IJKL");
+
+    s.eraseHistory(Maybe<Point>());
+    ASSERT_TRUE(s.pages.viewport == PageList::Viewport::active);
+    /* Test our contents rotated */
+    EXPECT_DUMP(s, viewport, "4ABCD\n5EFGH\n6IJKL");
+    /* Test our contents rotated */
+    EXPECT_DUMP(s, screen, "4ABCD\n5EFGH\n6IJKL");
+}
+
+TEST(screen, Screen__clear_above_cursor) {
+    SCREEN(s, 10, 10, (size_t)3);
+    WRITE(s, "4ABCD\n5EFGH\n6IJKL");
+    s.clearRows(Point::active(0, 0), Point::active(0, s.cursor.y - 1), false);
+    EXPECT_DUMP(s, viewport, "\n\n6IJKL");
+    EXPECT_DUMP(s, screen, "\n\n6IJKL");
+
+    ASSERT_TRUE(5 == s.cursor.x);
+    ASSERT_TRUE(2 == s.cursor.y);
+}
+
+TEST(screen, Screen__clear_above_cursor_with_history) {
+    SCREEN(s, 10, 3, (size_t)3);
+    WRITE(s, "1ABCD\n2EFGH\n3IJKL\n");
+    WRITE(s, "4ABCD\n5EFGH\n6IJKL");
+    s.clearRows(Point::active(0, 0), Point::active(0, s.cursor.y - 1), false);
+    EXPECT_DUMP(s, viewport, "\n\n6IJKL");
+    EXPECT_DUMP(s, screen, "1ABCD\n2EFGH\n3IJKL\n\n\n6IJKL");
+
+    ASSERT_TRUE(5 == s.cursor.x);
+    ASSERT_TRUE(2 == s.cursor.y);
+}
+
+TEST(screen, Screen__resize__no_reflow__more_rows) {
+    SCREEN(s, 10, 3, (size_t)0);
+    const char *str = "1ABCD\n2EFGH\n3IJKL";
+    WRITE(s, str);
+
+    /* Resize */
+    ASSERT_TRUE(s.resize(rsz(10, 10, false)));
+    EXPECT_DUMP(s, viewport, str);
+}
+
+TEST(screen, Screen__resize__no_reflow__less_rows) {
+    SCREEN(s, 10, 3, (size_t)0);
+    const char *str = "1ABCD\n2EFGH\n3IJKL";
+    WRITE(s, str);
+    ASSERT_TRUE(5 == s.cursor.x);
+    ASSERT_TRUE(2 == s.cursor.y);
+    ASSERT_TRUE(s.resize(rsz(10, 2, false)));
+
+    /* Since we shrunk, we should adjust our cursor */
+    ASSERT_TRUE(5 == s.cursor.x);
+    ASSERT_TRUE(1 == s.cursor.y);
+
+    EXPECT_DUMP(s, viewport, "2EFGH\n3IJKL");
+}
+
+/* Wisp: write only a background color into the remaining rows. */
+static void fillBgRows(Screen &s) {
+    for (size_t y = 1; y < s.pages.rows; y++) {
+        const PageList::Cell list_cell = s.pages.getCell(Point::active(0, (uint32_t)y)).value;
+        Cell c;
+        c.setContentTag(Cell::ContentTag::bg_color_rgb);
+        Cell::RGB rgb;
+        rgb.r = 0xFF;
+        rgb.g = 0;
+        rgb.b = 0;
+        c.setContentColorRgb(rgb);
+        *list_cell.cell = c;
+    }
+}
+
+TEST(screen, Screen__resize__no_reflow__less_rows_trims_blank_lines) {
+    SCREEN(s, 10, 3, (size_t)0);
+    const char *str = "1ABCD";
+    WRITE(s, str);
+
+    /* Write only a background color into the remaining rows */
+    fillBgRows(s);
+
+    const Screen::Cursor cursor = s.cursor;
+    ASSERT_TRUE(s.resize(rsz(6, 2, false)));
+
+    /* Cursor should not move */
+    ASSERT_TRUE(cursor.x == s.cursor.x);
+    ASSERT_TRUE(cursor.y == s.cursor.y);
+
+    EXPECT_DUMP(s, viewport, "1ABCD");
+}
+
+TEST(screen, Screen__resize__no_reflow__more_rows_trims_blank_lines) {
+    SCREEN(s, 10, 3, (size_t)0);
+    const char *str = "1ABCD";
+    WRITE(s, str);
+
+    /* Write only a background color into the remaining rows */
+    fillBgRows(s);
+
+    const Screen::Cursor cursor = s.cursor;
+    ASSERT_TRUE(s.resize(rsz(10, 7, false)));
+
+    /* Cursor should not move */
+    ASSERT_TRUE(cursor.x == s.cursor.x);
+    ASSERT_TRUE(cursor.y == s.cursor.y);
+
+    EXPECT_DUMP(s, viewport, "1ABCD");
+}
+
+TEST(screen, Screen__resize__no_reflow__more_cols) {
+    SCREEN(s, 10, 3, (size_t)0);
+    const char *str = "1ABCD\n2EFGH\n3IJKL";
+    WRITE(s, str);
+    ASSERT_TRUE(s.resize(rsz(20, 3, false)));
+    EXPECT_DUMP(s, viewport, str);
+}
+
+TEST(screen, Screen__resize__no_reflow__less_cols) {
+    SCREEN(s, 10, 3, (size_t)0);
+    const char *str = "1ABCD\n2EFGH\n3IJKL";
+    WRITE(s, str);
+    ASSERT_TRUE(s.resize(rsz(4, 3, false)));
+    EXPECT_DUMP(s, viewport, "1ABC\n2EFG\n3IJK");
+}
+
+TEST(screen, Screen__resize__no_reflow__more_rows_with_scrollback_cursor_end) {
+    SCREEN(s, 7, 3, (size_t)2);
+    const char *str = "1ABCD\n2EFGH\n3IJKL\n4ABCD\n5EFGH";
+    WRITE(s, str);
+    ASSERT_TRUE(s.resize(rsz(7, 10, false)));
+    EXPECT_DUMP(s, viewport, str);
+}
+
+TEST(screen, Screen__resize__no_reflow__more_rows_no_scrollback_pull) {
+    SCREEN(s, 7, 3, (size_t)2);
+    const char *str = "1ABCD\n2EFGH\n3IJKL\n4ABCD\n5EFGH";
+    WRITE(s, str);
+
+    /* Cursor is at the bottom so this would normally pull scrollback. */
+    ASSERT_TRUE(2 == s.cursor.y);
+    ASSERT_TRUE(s.resize(rsz(7, 10, false, false)));
+    ASSERT_TRUE(2 == s.cursor.y);
+    EXPECT_DUMP(s, active, "3IJKL\n4ABCD\n5EFGH");
+    EXPECT_DUMP(s, screen, str);
+}
+
+TEST(screen, Screen__resize_more_cols_no_scrollback_pull) {
+    SCREEN(s, 5, 3, (size_t)2);
+    WRITE(s, "1AAAA\n2BBBB\n3CCCCDD\n4E");
+    EXPECT_DUMP(s, active, "3CCCC\nDD\n4E");
+
+    /* The wrapped line in the active area unwraps, freeing up a row. This
+     * would normally pull "2BBBB" back but we should get a blank row at
+     * the bottom instead. */
+    ASSERT_TRUE(s.resize(rsz(10, 3, true, false)));
+    ASSERT_TRUE(2 == s.cursor.x);
+    ASSERT_TRUE(1 == s.cursor.y);
+    EXPECT_DUMP(s, active, "3CCCCDD\n4E");
+    EXPECT_DUMP(s, screen, "1AAAA\n2BBBB\n3CCCCDD\n4E");
+}
+
+TEST(screen, Screen__resize_more_cols_no_scrollback_pull_wrap_straddles_scrollback) {
+    SCREEN(s, 5, 3, (size_t)2);
+    WRITE(s, "1AAAA\n2BBBBXX\n3C\n4D");
+    EXPECT_DUMP(s, active, "XX\n3C\n4D");
+
+    /* The line isn't fully in scrollback so it is allowed to unwrap
+     * back into view, but nothing above it is. */
+    ASSERT_TRUE(s.resize(rsz(10, 3, true, false)));
+    ASSERT_TRUE(2 == s.cursor.y);
+    EXPECT_DUMP(s, active, "2BBBBXX\n3C\n4D");
+}
+
+TEST(screen, Screen__resize_more_cols_and_rows_no_scrollback_pull) {
+    SCREEN(s, 5, 3, (size_t)2);
+    WRITE(s, "1AAAA\n2BBBB\n3CCCCDD\n4E");
+
+    ASSERT_TRUE(s.resize(rsz(10, 5, true, false)));
+    ASSERT_TRUE(1 == s.cursor.y);
+    EXPECT_DUMP(s, active, "3CCCCDD\n4E");
+}
+
+TEST(screen, Screen__resize_less_cols_no_scrollback_pull) {
+    SCREEN(s, 10, 3, (size_t)2);
+    WRITE(s, "0Z\n1AAAA\n2BBBBXX\n3C");
+
+    /* Wrapping needs more rows than we have so the top of the active
+     * area still scrolls off as usual. */
+    ASSERT_TRUE(s.resize(rsz(5, 3, true, false)));
+    ASSERT_TRUE(2 == s.cursor.y);
+    EXPECT_DUMP(s, active, "2BBBB\nXX\n3C");
+}
+
+TEST(screen, Screen__resize__no_reflow__less_rows_with_scrollback) {
+    SCREEN(s, 7, 3, (size_t)2);
+    const char *str = "1ABCD\n2EFGH\n3IJKL\n4ABCD\n5EFGH";
+    WRITE(s, str);
+    ASSERT_TRUE(s.resize(rsz(7, 2, false)));
+    EXPECT_DUMP(s, viewport, "4ABCD\n5EFGH");
+}
+
+/* https://github.com/mitchellh/ghostty/issues/1030 */
+TEST(screen, Screen__resize__no_reflow__less_rows_with_empty_trailing) {
+    SCREEN(s, 5, 3, (size_t)5);
+    const char *str = "1\n2\n3\n4\n5\n6\n7\n8";
+    WRITE(s, str);
+    ASSERT_TRUE(s.scrollClear());
+    s.cursorAbsolute(0, 0);
+    WRITE(s, "A\nB");
+
+    const Screen::Cursor cursor = s.cursor;
+    ASSERT_TRUE(s.resize(rsz(5, 2, false)));
+    ASSERT_TRUE(cursor.x == s.cursor.x);
+    ASSERT_TRUE(cursor.y == s.cursor.y);
+    EXPECT_DUMP(s, viewport, "A\nB");
+}
+
+TEST(screen, Screen__resize__no_reflow__more_rows_with_soft_wrapping) {
+    SCREEN(s, 2, 3, (size_t)3);
+    const char *str = "1A2B\n3C4E\n5F6G";
+    WRITE(s, str);
+
+    /* Every second row should be wrapped */
+    for (uint32_t y = 0; y < 6; y++) {
+        const PageList::Cell list_cell = s.pages.getCell(Point::screen(0, y)).value;
+        const Row *row = list_cell.row;
+        const bool wrapped = (y % 2 == 0);
+        ASSERT_TRUE(wrapped == row->wrap());
+    }
+
+    /* Resize */
+    ASSERT_TRUE(s.resize(rsz(2, 10, false)));
+    EXPECT_DUMP(s, viewport, "1A\n2B\n3C\n4E\n5F\n6G");
+
+    /* Every second row should be wrapped */
+    for (uint32_t y = 0; y < 6; y++) {
+        const PageList::Cell list_cell = s.pages.getCell(Point::screen(0, y)).value;
+        const Row *row = list_cell.row;
+        const bool wrapped = (y % 2 == 0);
+        ASSERT_TRUE(wrapped == row->wrap());
+    }
+}
+
+TEST(screen, Screen__resize_more_rows_no_scrollback) {
+    SCREEN(s, 5, 3, (size_t)0);
+    const char *str = "1ABCD\n2EFGH\n3IJKL";
+    WRITE(s, str);
+    const Screen::Cursor cursor = s.cursor;
+    ASSERT_TRUE(s.resize(rsz(5, 10)));
+
+    /* Cursor should not move */
+    ASSERT_TRUE(cursor.x == s.cursor.x);
+    ASSERT_TRUE(cursor.y == s.cursor.y);
+
+    EXPECT_DUMP(s, viewport, str);
+    EXPECT_DUMP(s, screen, str);
+}
+
+TEST(screen, Screen__resize_more_rows_with_empty_scrollback) {
+    SCREEN(s, 5, 3, (size_t)10);
+    const char *str = "1ABCD\n2EFGH\n3IJKL";
+    WRITE(s, str);
+    const Screen::Cursor cursor = s.cursor;
+    ASSERT_TRUE(s.resize(rsz(5, 10)));
+
+    /* Cursor should not move */
+    ASSERT_TRUE(cursor.x == s.cursor.x);
+    ASSERT_TRUE(cursor.y == s.cursor.y);
+
+    EXPECT_DUMP(s, viewport, str);
+    EXPECT_DUMP(s, screen, str);
+}
+
+TEST(screen, Screen__resize_more_rows_with_populated_scrollback) {
+    SCREEN(s, 5, 3, (size_t)5);
+    const char *str = "1ABCD\n2EFGH\n3IJKL\n4ABCD\n5EFGH";
+    WRITE(s, str);
+    EXPECT_DUMP(s, viewport, "3IJKL\n4ABCD\n5EFGH");
+
+    /* Set our cursor to be on the "4" */
+    s.cursorAbsolute(0, 1);
+    {
+        const PageList::Cell list_cell = s.pages.getCell(Point::active(s.cursor.x, s.cursor.y)).value;
+        ASSERT_TRUE('4' == list_cell.cell->contentCodepoint());
+    }
+
+    /* Resize */
+    ASSERT_TRUE(s.resize(rsz(5, 10)));
+
+    /* Cursor should still be on the "4" */
+    {
+        const PageList::Cell list_cell = s.pages.getCell(Point::active(s.cursor.x, s.cursor.y)).value;
+        ASSERT_TRUE('4' == list_cell.cell->contentCodepoint());
+    }
+
+    EXPECT_DUMP(s, viewport, "3IJKL\n4ABCD\n5EFGH");
+}
+
+TEST(screen, Screen__resize_more_cols_no_reflow) {
+    SCREEN(s, 5, 3, (size_t)0);
+    const char *str = "1ABCD\n2EFGH\n3IJKL";
+    WRITE(s, str);
+    const Screen::Cursor cursor = s.cursor;
+    ASSERT_TRUE(s.resize(rsz(10, 3)));
+
+    /* Cursor should not move */
+    ASSERT_TRUE(cursor.x == s.cursor.x);
+    ASSERT_TRUE(cursor.y == s.cursor.y);
+
+    EXPECT_DUMP(s, viewport, str);
+    EXPECT_DUMP(s, screen, str);
+}
+
+/* https://github.com/mitchellh/ghostty/issues/272#issuecomment-1676038963 */
+TEST(screen, Screen__resize_more_cols_perfect_split) {
+    SCREEN(s, 5, 3, (size_t)0);
+    const char *str = "1ABCD2EFGH3IJKL";
+    WRITE(s, str);
+    ASSERT_TRUE(s.resize(rsz(10, 3)));
+    EXPECT_DUMP(s, screen, "1ABCD2EFGH\n3IJKL");
+}
+
 /* @@TESTS@@ */
 
 /* Wisp: std.testing.allocator's leak check. Runs last (registration order). */
