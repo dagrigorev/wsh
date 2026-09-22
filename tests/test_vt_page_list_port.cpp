@@ -6109,6 +6109,362 @@ TEST(page_list, PageList_resize_reflow_more_cols_unwrap_wide_spacer_head) {
     }
 }
 
+typedef page::Cell::Wide Wide;
+
+static bool cellIs(Page *page, size_t x, size_t y, uint32_t cp, Wide w) {
+    const Page::RowAndCell rac = page->getRowAndCell(x, y);
+    return rac.cell->contentCodepoint() == cp && rac.cell->wide() == w;
+}
+
+/* Wisp: fill `cols` cells of each row with their x index. */
+static void fillX(PageList &s, Page *page, size_t cols) {
+    for (size_t y = 0; y < s.rows; y++) {
+        for (size_t x = 0; x < cols; x++) *page->getRowAndCell(x, y).cell = page::Cell::init((uint32_t)x);
+    }
+}
+
+/* Wisp: next row from the iterator: wrap flag, cols, first codepoint. */
+static bool nextRowIs(PageList::RowIterator &it, bool wrap, size_t cols, uint32_t cp0) {
+    Pin offset;
+    if (!it.next(&offset)) return false;
+    const Page::RowAndCell rac = offset.rowAndCell();
+    const page::Cell *cells = offset.node->page()->getCells(rac.row);
+    return rac.row->wrap() == wrap && offset.node->page()->size.cols == cols && cells[0].contentCodepoint() == cp0;
+}
+
+TEST(page_list, PageList_resize_reflow_more_cols_unwrap_wide_spacer_head_across_two_rows) {
+    ListHolder s(opts(2, 3, (size_t)0));
+    {
+        ASSERT_TRUE(s->pages.first == s->pages.last);
+        Page *page = s->pages.first->page();
+
+        {
+            const Page::RowAndCell rac = page->getRowAndCell(0, 0);
+            rac.row->setWrap(true);
+            *rac.cell = page::Cell::init('x');
+        }
+        *page->getRowAndCell(1, 0).cell = page::Cell::init('x');
+        {
+            const Page::RowAndCell rac = page->getRowAndCell(0, 1);
+            rac.row->setWrapContinuation(true);
+            rac.row->setWrap(true);
+            *rac.cell = page::Cell::init('x');
+        }
+        *page->getRowAndCell(1, 1).cell = wideCell(0, Wide::spacer_head);
+        {
+            const Page::RowAndCell rac = page->getRowAndCell(0, 2);
+            rac.row->setWrapContinuation(true);
+            *rac.cell = wideCell(0x1F600, Wide::wide);
+        }
+        *page->getRowAndCell(1, 2).cell = wideCell(0, Wide::spacer_tail);
+    }
+
+    /* Resize */
+    ASSERT_TRUE(s->resize(rz(4, -1, true)));
+    ASSERT_TRUE(4 == s->cols);
+    ASSERT_TRUE(3 == s->totalRows());
+
+    {
+        ASSERT_TRUE(s->pages.first == s->pages.last);
+        Page *page = s->pages.first->page();
+
+        ASSERT_TRUE(cellIs(page, 0, 0, 'x', Wide::narrow));
+        ASSERT_TRUE(page->getRowAndCell(0, 0).row->wrap());
+        ASSERT_TRUE(cellIs(page, 1, 0, 'x', Wide::narrow));
+        ASSERT_TRUE(cellIs(page, 2, 0, 'x', Wide::narrow));
+        ASSERT_TRUE(cellIs(page, 3, 0, 0, Wide::spacer_head));
+        ASSERT_TRUE(cellIs(page, 0, 1, 0x1F600, Wide::wide));
+        ASSERT_TRUE(cellIs(page, 1, 1, 0, Wide::spacer_tail));
+    }
+}
+
+TEST(page_list, PageList_resize_reflow_more_cols_unwrap_still_requires_wide_spacer_head) {
+    ListHolder s(opts(2, 2, (size_t)0));
+    {
+        ASSERT_TRUE(s->pages.first == s->pages.last);
+        Page *page = s->pages.first->page();
+
+        {
+            const Page::RowAndCell rac = page->getRowAndCell(0, 0);
+            rac.row->setWrap(true);
+            *rac.cell = page::Cell::init('x');
+        }
+        *page->getRowAndCell(1, 0).cell = page::Cell::init('x');
+        {
+            const Page::RowAndCell rac = page->getRowAndCell(0, 1);
+            rac.row->setWrapContinuation(true);
+            *rac.cell = wideCell(0x1F600, Wide::wide);
+        }
+        *page->getRowAndCell(1, 1).cell = wideCell(0, Wide::spacer_tail);
+    }
+
+    /* Resize */
+    ASSERT_TRUE(s->resize(rz(3, -1, true)));
+    ASSERT_TRUE(3 == s->cols);
+    ASSERT_TRUE(2 == s->totalRows());
+
+    {
+        ASSERT_TRUE(s->pages.first == s->pages.last);
+        Page *page = s->pages.first->page();
+
+        ASSERT_TRUE(cellIs(page, 0, 0, 'x', Wide::narrow));
+        ASSERT_TRUE(page->getRowAndCell(0, 0).row->wrap());
+        ASSERT_TRUE(cellIs(page, 1, 0, 'x', Wide::narrow));
+        ASSERT_TRUE(cellIs(page, 2, 0, 0, Wide::spacer_head));
+        ASSERT_TRUE(cellIs(page, 0, 1, 0x1F600, Wide::wide));
+        ASSERT_TRUE(cellIs(page, 1, 1, 0, Wide::spacer_tail));
+    }
+}
+
+TEST(page_list, PageList_resize_reflow_less_cols_no_reflow_preserves_semantic_prompt) {
+    ListHolder s(opts(4, 4, (size_t)0));
+    {
+        ASSERT_TRUE(s->pages.first == s->pages.last);
+        Page *page = s->pages.first->page();
+        setPrompt(page, 1, SP::prompt);
+        for (size_t x = 0; x < s->cols; x++) *page->getRowAndCell(x, 1).cell = page::Cell::init((uint32_t)x);
+    }
+
+    /* Resize */
+    ASSERT_TRUE(s->resize(rz(2, -1, true)));
+    ASSERT_TRUE(2 == s->cols);
+    ASSERT_TRUE(4 == s->totalRows());
+
+    {
+        ASSERT_TRUE(s->pages.first == s->pages.last);
+        {
+            const page::Row *row = activeRow(*s, 1);
+            ASSERT_TRUE(row->wrap());
+            ASSERT_TRUE(row->semantic_prompt() == SP::prompt);
+        }
+        {
+            const page::Row *row = activeRow(*s, 2);
+            ASSERT_TRUE(row->semantic_prompt() == SP::prompt);
+        }
+    }
+}
+
+TEST(page_list, PageList_resize_reflow_less_cols_no_reflow_preserves_semantic_prompt_on_first_line) {
+    ListHolder s(opts(4, 4, (size_t)0));
+    {
+        ASSERT_TRUE(s->pages.first == s->pages.last);
+        setPrompt(s->pages.first->page(), 0, SP::prompt);
+    }
+
+    /* Resize */
+    ASSERT_TRUE(s->resize(rz(2, -1, true)));
+    ASSERT_TRUE(2 == s->cols);
+    ASSERT_TRUE(4 == s->totalRows());
+
+    {
+        ASSERT_TRUE(s->pages.first == s->pages.last);
+        ASSERT_TRUE(s->pages.first->page()->getRowAndCell(0, 0).row->semantic_prompt() == SP::prompt);
+    }
+}
+
+TEST(page_list, PageList_resize_reflow_less_cols_wrap_preserves_semantic_prompt) {
+    ListHolder s(opts(4, 4, (size_t)0));
+    {
+        ASSERT_TRUE(s->pages.first == s->pages.last);
+        setPrompt(s->pages.first->page(), 0, SP::prompt);
+    }
+
+    /* Resize */
+    ASSERT_TRUE(s->resize(rz(2, -1, true)));
+    ASSERT_TRUE(2 == s->cols);
+    ASSERT_TRUE(4 == s->totalRows());
+
+    {
+        ASSERT_TRUE(s->pages.first == s->pages.last);
+        ASSERT_TRUE(s->pages.first->page()->getRowAndCell(0, 0).row->semantic_prompt() == SP::prompt);
+    }
+}
+
+TEST(page_list, PageList_resize_reflow_less_cols_no_wrapped_rows) {
+    ListHolder s(opts(10, 3, (size_t)0));
+    ASSERT_TRUE(s->pages.first == s->pages.last);
+    fillX(*s, s->pages.first->page(), 4);
+
+    /* Resize */
+    ASSERT_TRUE(s->resize(rz(5, -1, true)));
+    ASSERT_TRUE(5 == s->cols);
+    ASSERT_TRUE(3 == s->totalRows());
+
+    PageList::RowIterator it = s->rowIterator(Dir::right_down, Point::screen());
+    Pin offset;
+    while (it.next(&offset)) {
+        for (size_t x = 0; x < 4; x++) {
+            Pin offset_copy = offset;
+            offset_copy.x = (size::CellCountInt)x;
+            const Page::RowAndCell rac = offset_copy.rowAndCell();
+            const page::Cell *cells = offset.node->page()->getCells(rac.row);
+            ASSERT_TRUE(5 == offset.node->page()->size.cols);
+            ASSERT_TRUE((uint32_t)x == cells[x].contentCodepoint());
+        }
+    }
+}
+
+TEST(page_list, PageList_resize_reflow_less_cols_wrapped_rows) {
+    ListHolder s(opts(4, 2));
+    ASSERT_TRUE(s->pages.first == s->pages.last);
+    fillX(*s, s->pages.first->page(), 4);
+
+    /* Resize */
+    ASSERT_TRUE(s->resize(rz(2, -1, true)));
+    ASSERT_TRUE(2 == s->cols);
+    ASSERT_TRUE(4 == s->totalRows());
+
+    /* Active moves due to scrollback */
+    ASSERT_TRUE(activeScreenIs(*s, 2));
+
+    PageList::RowIterator it = s->rowIterator(Dir::right_down, Point::screen());
+    /* First row should be wrapped */
+    ASSERT_TRUE(nextRowIs(it, true, 2, 0));
+    ASSERT_TRUE(nextRowIs(it, false, 2, 2));
+    /* First row should be wrapped */
+    ASSERT_TRUE(nextRowIs(it, true, 2, 0));
+    ASSERT_TRUE(nextRowIs(it, false, 2, 2));
+}
+
+TEST(page_list, PageList_resize_reflow_less_cols_wrapped_rows_with_graphemes) {
+    ListHolder s(opts(4, 2));
+    {
+        ASSERT_TRUE(s->pages.first == s->pages.last);
+        Page *page = s->pages.first->page();
+        for (size_t y = 0; y < s->rows; y++) {
+            for (size_t x = 0; x < s->cols; x++) *page->getRowAndCell(x, y).cell = page::Cell::init((uint32_t)x);
+
+            const Page::RowAndCell rac = page->getRowAndCell(2, y);
+            ASSERT_TRUE(page->appendGrapheme(rac.row, rac.cell, 'A') == page::PageError::none);
+        }
+    }
+
+    /* Resize */
+    ASSERT_TRUE(s->resize(rz(2, -1, true)));
+    ASSERT_TRUE(2 == s->cols);
+    ASSERT_TRUE(4 == s->totalRows());
+
+    /* Active moves due to scrollback */
+    ASSERT_TRUE(activeScreenIs(*s, 2));
+
+    ASSERT_TRUE(s->pages.first == s->pages.last);
+    Page *page = s->pages.first->page();
+    PageList::RowIterator it = s->rowIterator(Dir::right_down, Point::screen());
+    for (int k = 0; k < 2; k++) {
+        /* First row should be wrapped */
+        ASSERT_TRUE(nextRowIs(it, true, 2, 0));
+        {
+            Pin offset;
+            ASSERT_TRUE(it.next(&offset));
+            const Page::RowAndCell rac = offset.rowAndCell();
+            const page::Cell *cells = offset.node->page()->getCells(rac.row);
+            ASSERT_FALSE(rac.row->wrap());
+            ASSERT_TRUE(rac.row->grapheme());
+            ASSERT_TRUE(2 == offset.node->page()->size.cols);
+            ASSERT_TRUE(2 == cells[0].contentCodepoint());
+
+            size_t len = 0;
+            const uint32_t *cps = page->lookupGrapheme(rac.cell, &len);
+            ASSERT_TRUE(1 == len);
+            ASSERT_TRUE('A' == cps[0]);
+        }
+    }
+}
+
+TEST(page_list, PageList_resize_reflow_less_cols_cursor_in_wrapped_row) {
+    ListHolder s(opts(4, 2));
+    ASSERT_TRUE(s->pages.first == s->pages.last);
+    fillX(*s, s->pages.first->page(), 4);
+
+    /* Put a tracked pin in the history */
+    Pin *p = s->trackPin(s->pin(Point::active(2, 1)).value);
+
+    /* Resize */
+    ASSERT_TRUE(s->resize(rz(2, -1, true)));
+    ASSERT_TRUE(2 == s->cols);
+    ASSERT_TRUE(4 == s->totalRows());
+
+    /* Our cursor should move to the first row */
+    ASSERT_TRUE(activeAt(*s, p, 0, 1));
+    s->untrackPin(p);
+}
+
+TEST(page_list, PageList_resize_reflow_less_cols_wraps_spacer_head) {
+    ListHolder s(opts(4, 3, (size_t)0));
+    {
+        ASSERT_TRUE(s->pages.first == s->pages.last);
+        Page *page = s->pages.first->page();
+
+        {
+            const Page::RowAndCell rac = page->getRowAndCell(0, 0);
+            rac.row->setWrap(true);
+            *rac.cell = page::Cell::init('x');
+        }
+        *page->getRowAndCell(1, 0).cell = page::Cell::init('x');
+        *page->getRowAndCell(2, 0).cell = page::Cell::init('x');
+        *page->getRowAndCell(3, 0).cell = wideCell(0, Wide::spacer_head);
+        {
+            const Page::RowAndCell rac = page->getRowAndCell(0, 1);
+            rac.row->setWrapContinuation(true);
+            *rac.cell = wideCell(0x1F600, Wide::wide);
+        }
+        *page->getRowAndCell(1, 1).cell = wideCell(0, Wide::spacer_tail);
+    }
+
+    /* Resize */
+    ASSERT_TRUE(s->resize(rz(3, -1, true)));
+    ASSERT_TRUE(3 == s->cols);
+    ASSERT_TRUE(3 == s->totalRows());
+
+    {
+        ASSERT_TRUE(s->pages.first == s->pages.last);
+        Page *page = s->pages.first->page();
+
+        ASSERT_TRUE(cellIs(page, 0, 0, 'x', Wide::narrow));
+        ASSERT_TRUE(page->getRowAndCell(0, 0).row->wrap());
+        ASSERT_TRUE(cellIs(page, 1, 0, 'x', Wide::narrow));
+        ASSERT_TRUE(cellIs(page, 2, 0, 'x', Wide::narrow));
+        ASSERT_TRUE(cellIs(page, 0, 1, 0x1F600, Wide::wide));
+        ASSERT_TRUE(cellIs(page, 1, 1, 0, Wide::spacer_tail));
+    }
+}
+
+TEST(page_list, PageList_resize_reflow_less_cols_cursor_goes_to_scrollback) {
+    ListHolder s(opts(4, 2));
+    ASSERT_TRUE(s->pages.first == s->pages.last);
+    fillX(*s, s->pages.first->page(), 4);
+
+    /* Put a tracked pin in the history */
+    Pin *p = s->trackPin(s->pin(Point::active(2, 0)).value);
+
+    /* Resize */
+    ASSERT_TRUE(s->resize(rz(2, -1, true)));
+    ASSERT_TRUE(2 == s->cols);
+    ASSERT_TRUE(4 == s->totalRows());
+
+    /* Our cursor should move to the first row */
+    ASSERT_FALSE(s->pointFromPin(point::Tag::active, *p).has);
+    s->untrackPin(p);
+}
+
+TEST(page_list, PageList_resize_reflow_less_cols_cursor_in_unchanged_row) {
+    ListHolder s(opts(4, 2));
+    ASSERT_TRUE(s->pages.first == s->pages.last);
+    fillX(*s, s->pages.first->page(), 2);
+
+    /* Put a tracked pin in the history */
+    Pin *p = s->trackPin(s->pin(Point::active(1, 0)).value);
+
+    /* Resize */
+    ASSERT_TRUE(s->resize(rz(2, -1, true)));
+    ASSERT_TRUE(2 == s->cols);
+    ASSERT_TRUE(2 == s->totalRows());
+
+    /* Our cursor should move to the first row */
+    ASSERT_TRUE(activeAt(*s, p, 1, 0));
+    s->untrackPin(p);
+}
+
 /* @@TESTS@@ */
 
 /* Wisp: std.testing.allocator's leak check. Runs last (registration order). */
