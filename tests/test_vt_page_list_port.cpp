@@ -2882,6 +2882,534 @@ TEST(page_list, PageList_eraseRowBounded_invalidates_viewport_offset_cache) {
     ASSERT_TRUE(sbEq(s->scrollbar(), s->total_rows, pin_y - 1, s->rows));
 }
 
+typedef PageList::IncreaseCapacity IncCap;
+typedef PageList::IncreaseCapacityError IncErr;
+
+static Node *incCap(PageList &s, Node *node, Maybe<IncCap> adj) {
+    Node *out = nullptr;
+    const IncErr e = s.increaseCapacity(node, adj, &out);
+    assert(e == IncErr::none);
+    (void)e;
+    return out;
+}
+
+static void fillCodepoints(PageList &s, Page *page, uint32_t add) {
+    for (size_t y = 0; y < s.rows; y++) {
+        for (size_t x = 0; x < s.cols; x++) {
+            *page->getRowAndCell(x, y).cell = page::Cell::init((uint32_t)x + add);
+        }
+    }
+}
+
+static bool codepointsAre(PageList &s, Page *page, uint32_t add) {
+    for (size_t y = 0; y < s.rows; y++) {
+        for (size_t x = 0; x < s.cols; x++) {
+            if (page->getRowAndCell(x, y).cell->contentCodepoint() != (uint32_t)x + add) return false;
+        }
+    }
+    return true;
+}
+
+TEST(page_list, PageList_row_erasure_renews_affected_page_generations) {
+    ListHolder s(opts(80, 24));
+    while (s->totalPages() < 2) (void)growNode(&*s);
+
+    Node *first = s->pages.first;
+    Node *second = first->next;
+    uint64_t first_serial = first->serial;
+    uint64_t second_serial = second->serial;
+    uint64_t activity = s->page_compression.activity_serial;
+
+    s->eraseRow(Point::history(0, 0));
+    ASSERT_FALSE(s->nodeIsValid(first, first_serial));
+    ASSERT_FALSE(s->nodeIsValid(second, second_serial));
+    ASSERT_TRUE(activity != s->page_compression.activity_serial);
+
+    first_serial = first->serial;
+    second_serial = second->serial;
+    activity = s->page_compression.activity_serial;
+    s->eraseRowBounded(Point::history(0, 0), (size_t)first->rows() + 1);
+    ASSERT_FALSE(s->nodeIsValid(first, first_serial));
+    ASSERT_FALSE(s->nodeIsValid(second, second_serial));
+    ASSERT_TRUE(activity != s->page_compression.activity_serial);
+}
+
+TEST(page_list, PageList_trailing_row_truncation_renews_page_generation) {
+    ListHolder s(opts(80, 24));
+
+    Node *node = s->pages.last;
+    const uint64_t old_serial = node->serial;
+    const size::CellCountInt trimmed = s->trimTrailingBlankRows(1);
+    s->total_rows -= trimmed;
+    ASSERT_TRUE(1 == trimmed);
+    ASSERT_FALSE(s->nodeIsValid(node, old_serial));
+
+    (void)growNode(&*s);
+    ASSERT_TRUE(expectLivePageSerialsValidForTest(&*s));
+}
+
+TEST(page_list, PageList_eraseRowBounded_multi_page_invalidates_viewport_offset_cache) {
+    ListHolder s(opts(80, 24));
+
+    /* Grow so we take up several pages worth of history */
+    const size_t cap_rows = s->pages.last->page()->capacity.rows;
+    growTracking(*s, cap_rows * 3);
+
+    /* Scroll back to create a pinned viewport somewhere in the middle
+     * of the scrollback, after the first page */
+    const size_t pin_y = cap_rows + 1;
+    s->scroll(Scroll::pinAt(s->pin(Point::screen(0, (uint32_t)pin_y)).value));
+    ASSERT_TRUE(s->viewport == Viewport::pin);
+    ASSERT_TRUE(sbEq(s->scrollbar(), s->total_rows, pin_y, s->rows));
+
+    /* Erase a row from the beginning of history with a limit that spans
+     * across multiple pages. This ensures we hit the code path where
+     * eraseRowBounded finds the limit boundary in a subsequent page. */
+    const size_t limit = cap_rows + 10;
+    s->eraseRowBounded(Point::history(0, 0), limit);
+
+    /* Verify the scrollbar reflects the change (offset decreased by 1) */
+    ASSERT_TRUE(sbEq(s->scrollbar(), s->total_rows, pin_y - 1, s->rows));
+}
+
+TEST(page_list, PageList_eraseRowBounded_full_page_shift_invalidates_viewport_offset_cache) {
+    ListHolder s(opts(80, 24));
+
+    /* Grow so we take up several pages worth of history */
+    const size_t cap_rows = s->pages.last->page()->capacity.rows;
+    growTracking(*s, cap_rows * 4);
+
+    /* Scroll back to create a pinned viewport somewhere well beyond
+     * the first two pages */
+    const size_t pin_y = 5;
+    s->scroll(Scroll::pinAt(s->pin(Point::screen(0, (uint32_t)pin_y)).value));
+    ASSERT_TRUE(s->viewport == Viewport::pin);
+    ASSERT_TRUE(sbEq(s->scrollbar(), s->total_rows, pin_y, s->rows));
+
+    /* Erase a row from the beginning of history with a limit that is
+     * larger than multiple full pages. This ensures we hit the code path
+     * where eraseRowBounded continues looping through entire pages,
+     * rotating all rows in each page until it reaches the limit or
+     * runs out of pages. */
+    const size_t limit = cap_rows * 2 + 10;
+    s->eraseRowBounded(Point::history(0, 0), limit);
+
+    /* Verify the scrollbar reflects the change (offset decreased by 1) */
+    ASSERT_TRUE(sbEq(s->scrollbar(), s->total_rows, pin_y - 1, s->rows));
+}
+
+TEST(page_list, PageList_eraseRowBounded_exhausts_pages_invalidates_viewport_offset_cache) {
+    ListHolder s(opts(80, 24));
+
+    /* Grow so we take up several pages worth of history */
+    const size_t cap_rows = s->pages.last->page()->capacity.rows;
+    growTracking(*s, cap_rows * 3);
+
+    /* Our total rows should include history */
+    const size_t total_rows_before = s->totalRows();
+    ASSERT_TRUE(total_rows_before > s->rows);
+
+    /* Scroll back to create a pinned viewport somewhere in the history,
+     * well after the erase will complete */
+    const size_t pin_y = cap_rows * 2 + 10;
+    s->scroll(Scroll::pinAt(s->pin(Point::screen(0, (uint32_t)pin_y)).value));
+    ASSERT_TRUE(s->viewport == Viewport::pin);
+    ASSERT_TRUE(sbEq(s->scrollbar(), s->total_rows, pin_y, s->rows));
+
+    /* Erase a row from the beginning of history with a limit that is
+     * LARGER than all remaining pages combined. This ensures we exhaust
+     * all pages in the while loop and reach the cleanup code after the loop. */
+    const size_t limit = total_rows_before * 2;
+    s->eraseRowBounded(Point::history(0, 0), limit);
+
+    /* Verify the scrollbar reflects the change (offset decreased by 1) */
+    ASSERT_TRUE(sbEq(s->scrollbar(), s->total_rows, pin_y - 1, s->rows));
+}
+
+TEST(page_list, PageList_increaseCapacity_to_increase_styles) {
+    ListHolder s(opts(2, 2, (size_t)0));
+
+    const size_t original_styles_cap = s->pages.first->capacity().styles;
+
+    {
+        ASSERT_TRUE(s->pages.first == s->pages.last);
+        /* Write all our data so we can assert its the same after */
+        fillCodepoints(*s, s->pages.first->page(), 0);
+    }
+
+    /* Increase our styles */
+    (void)incCap(*s, s->pages.first, IncCap::styles);
+
+    {
+        ASSERT_TRUE(s->pages.first == s->pages.last);
+        Page *page = s->pages.first->page();
+
+        /* Verify capacity doubled */
+        ASSERT_TRUE(original_styles_cap * 2 == page->capacity.styles);
+
+        /* Verify data preserved */
+        ASSERT_TRUE(codepointsAre(*s, page, 0));
+    }
+}
+
+TEST(page_list, PageList_increaseCapacity_styles_projects_capacity_from_page_density) {
+    ListHolder s(opts(2, 2, (size_t)0));
+
+    const size_t original_cap = s->pages.first->capacity().styles;
+
+    /* Write styled cells so the page has a measurable per-row style
+     * density (unlike the plain doubling test above, which grows a
+     * page with no styles in use). */
+    style::Style bold;
+    bold.flags.bold = true;
+    {
+        ASSERT_TRUE(s->pages.first == s->pages.last);
+        Page *page = s->pages.first->page();
+
+        for (size_t y = 0; y < s->rows; y++) {
+            for (size_t x = 0; x < s->cols; x++) {
+                const Page::RowAndCell rac = page->getRowAndCell(x, y);
+                style::Id style_id;
+                ASSERT_TRUE(page->styles.add((const void *)page->memory, bold, &style_id) ==
+                            ref_counted_set::AddError::none);
+                rac.row->setStyled(true);
+                page::Cell c = page::Cell::init((uint32_t)x + 1);
+                c.setStyleId(style_id);
+                *rac.cell = c;
+            }
+        }
+    }
+
+    (void)incCap(*s, s->pages.first, IncCap::styles);
+
+    {
+        ASSERT_TRUE(s->pages.first == s->pages.last);
+        Page *page = s->pages.first->page();
+
+        /* The page uses only two active rows out of thousands of rows
+         * of capacity, so the projected full-page need saturates the
+         * 32x-per-event growth bound instead of merely doubling. */
+        ASSERT_TRUE(original_cap * 32 == page->capacity.styles);
+
+        /* All cell content and styles are preserved by the growth. */
+        for (size_t y = 0; y < s->rows; y++) {
+            for (size_t x = 0; x < s->cols; x++) {
+                const Page::RowAndCell rac = page->getRowAndCell(x, y);
+                ASSERT_TRUE((uint32_t)x + 1 == rac.cell->contentCodepoint());
+                ASSERT_TRUE(rac.cell->style_id() != style::default_id);
+                ASSERT_TRUE(bold.eql(*page->styles.get((const void *)page->memory, rac.cell->style_id())));
+            }
+        }
+    }
+}
+
+TEST(page_list, PageList_increaseCapacity_to_increase_graphemes) {
+    ListHolder s(opts(2, 2, (size_t)0));
+
+    const size_t original_cap = s->pages.first->capacity().grapheme_bytes;
+
+    {
+        ASSERT_TRUE(s->pages.first == s->pages.last);
+        fillCodepoints(*s, s->pages.first->page(), 0);
+    }
+
+    (void)incCap(*s, s->pages.first, IncCap::grapheme_bytes);
+
+    {
+        ASSERT_TRUE(s->pages.first == s->pages.last);
+        Page *page = s->pages.first->page();
+
+        ASSERT_TRUE(original_cap * 2 == page->capacity.grapheme_bytes);
+
+        ASSERT_TRUE(codepointsAre(*s, page, 0));
+    }
+}
+
+TEST(page_list, PageList_increaseCapacity_graphemes_projects_capacity_from_page_density) {
+    ListHolder s(opts(2, 2, (size_t)0));
+
+    const size_t original_cap = s->pages.first->capacity().grapheme_bytes;
+
+    /* Write cells with grapheme data so the page has a measurable
+     * per-row grapheme density (unlike the plain doubling test above,
+     * which grows a page with no grapheme usage). */
+    {
+        ASSERT_TRUE(s->pages.first == s->pages.last);
+        Page *page = s->pages.first->page();
+
+        for (size_t y = 0; y < s->rows; y++) {
+            for (size_t x = 0; x < s->cols; x++) {
+                const Page::RowAndCell rac = page->getRowAndCell(x, y);
+                *rac.cell = page::Cell::init((uint32_t)x + 1);
+                ASSERT_TRUE(page->appendGrapheme(rac.row, rac.cell, 0x0301) == page::PageError::none);
+                ASSERT_TRUE(page->appendGrapheme(rac.row, rac.cell, 0x0302) == page::PageError::none);
+            }
+        }
+    }
+
+    (void)incCap(*s, s->pages.first, IncCap::grapheme_bytes);
+
+    {
+        ASSERT_TRUE(s->pages.first == s->pages.last);
+        Page *page = s->pages.first->page();
+
+        /* The page uses only two active rows out of thousands of rows
+         * of capacity, so the projected full-page need saturates the
+         * 32x-per-event growth bound instead of merely doubling. */
+        ASSERT_TRUE(original_cap * 32 == page->capacity.grapheme_bytes);
+
+        /* All cell and grapheme content is preserved by the growth. */
+        ASSERT_TRUE((size_t)s->rows * s->cols == page->graphemeCount());
+        for (size_t y = 0; y < s->rows; y++) {
+            for (size_t x = 0; x < s->cols; x++) {
+                const Page::RowAndCell rac = page->getRowAndCell(x, y);
+                ASSERT_TRUE((uint32_t)x + 1 == rac.cell->contentCodepoint());
+                size_t len = 0;
+                const uint32_t *cps = page->lookupGrapheme(rac.cell, &len);
+                ASSERT_TRUE(2 == len);
+                ASSERT_TRUE(0x0301 == cps[0]);
+                ASSERT_TRUE(0x0302 == cps[1]);
+            }
+        }
+    }
+}
+
+TEST(page_list, PageList_increaseCapacity_to_increase_hyperlinks) {
+    ListHolder s(opts(2, 2, (size_t)0));
+
+    const size_t original_cap = s->pages.first->capacity().hyperlink_bytes;
+
+    {
+        ASSERT_TRUE(s->pages.first == s->pages.last);
+        fillCodepoints(*s, s->pages.first->page(), 0);
+    }
+
+    (void)incCap(*s, s->pages.first, IncCap::hyperlink_bytes);
+
+    {
+        ASSERT_TRUE(s->pages.first == s->pages.last);
+        Page *page = s->pages.first->page();
+
+        ASSERT_TRUE(original_cap * 2 == page->capacity.hyperlink_bytes);
+
+        ASSERT_TRUE(codepointsAre(*s, page, 0));
+    }
+}
+
+TEST(page_list, PageList_increaseCapacity_to_increase_string_bytes) {
+    ListHolder s(opts(2, 2, (size_t)0));
+
+    const size_t original_cap = s->pages.first->capacity().string_bytes;
+
+    {
+        ASSERT_TRUE(s->pages.first == s->pages.last);
+        fillCodepoints(*s, s->pages.first->page(), 0);
+    }
+
+    (void)incCap(*s, s->pages.first, IncCap::string_bytes);
+
+    {
+        ASSERT_TRUE(s->pages.first == s->pages.last);
+        Page *page = s->pages.first->page();
+
+        ASSERT_TRUE(original_cap * 2 == page->capacity.string_bytes);
+
+        ASSERT_TRUE(codepointsAre(*s, page, 0));
+    }
+}
+
+TEST(page_list, PageList_increaseCapacity_tracked_pins) {
+    ListHolder s(opts(2, 2, (size_t)0));
+
+    /* Create a tracked pin on the first page */
+    Pin *tracked = s->trackPin(s->pin(Point::active(1, 1)).value);
+
+    Node *old_node = s->pages.first;
+    ASSERT_TRUE(old_node == tracked->node);
+
+    /* Increase capacity */
+    Node *new_node = incCap(*s, s->pages.first, IncCap::styles);
+
+    /* Pin should now point to the new node */
+    ASSERT_TRUE(new_node == tracked->node);
+    ASSERT_TRUE(1 == tracked->x);
+    ASSERT_TRUE(1 == tracked->y);
+    s->untrackPin(tracked);
+}
+
+TEST(page_list, PageList_increaseCapacity_returns_OutOfSpace_at_max_capacity) {
+    ListHolder s(opts(2, 2, (size_t)0));
+
+    /* Keep increasing styles capacity until we get OutOfSpace */
+    const size_t max_styles = (size::StyleCountInt)~(size::StyleCountInt)0;
+    for (;;) {
+        Node *n;
+        const IncErr err = s->increaseCapacity(s->pages.first, IncCap::styles, &n);
+        if (err != IncErr::none) {
+            /* Before OutOfSpace, we should have reached maxInt */
+            ASSERT_TRUE(IncErr::OutOfSpace == err);
+            ASSERT_TRUE(max_styles == s->pages.first->capacity().styles);
+            break;
+        }
+    }
+}
+
+TEST(page_list, PageList_increaseCapacity_after_col_shrink) {
+    ListHolder s(opts(10, 2, (size_t)0));
+
+    /* Shrink columns */
+    ASSERT_TRUE(s->resize(rz(5, -1, false)));
+    ASSERT_TRUE(5 == s->cols);
+
+    {
+        Page *page = s->pages.first->page();
+        ASSERT_TRUE(5 == page->size.cols);
+        ASSERT_TRUE(page->capacity.cols >= 10);
+    }
+
+    /* Increase capacity */
+    (void)incCap(*s, s->pages.first, IncCap::styles);
+
+    {
+        Page *page = s->pages.first->page();
+        /* size.cols should still be 5, not reverted to capacity.cols */
+        ASSERT_TRUE(5 == page->size.cols);
+        ASSERT_TRUE(5 == s->cols);
+    }
+}
+
+TEST(page_list, PageList_increaseCapacity_multi_page) {
+    ListHolder s(opts(80, 24));
+
+    /* Grow to create a second page */
+    Node *page1_node = s->pages.last;
+    page1_node->page()->pauseIntegrityChecks(true);
+    {
+        const size_t n = (size_t)page1_node->capacity().rows - page1_node->rows();
+        for (size_t i = 0; i < n; i++) ASSERT_TRUE(growNode(&*s) == nullptr);
+    }
+    page1_node->page()->pauseIntegrityChecks(false);
+    ASSERT_TRUE(growNode(&*s) != nullptr);
+
+    /* Now we have two pages */
+    ASSERT_TRUE(s->pages.first != s->pages.last);
+    Node *page2_node = s->pages.last;
+
+    const size_t page1_styles_cap = s->pages.first->capacity().styles;
+    const size_t page2_styles_cap = page2_node->capacity().styles;
+
+    /* Increase capacity on the first page only */
+    (void)incCap(*s, s->pages.first, IncCap::styles);
+
+    /* First page capacity should be doubled */
+    ASSERT_TRUE(page1_styles_cap * 2 == s->pages.first->capacity().styles);
+
+    /* Second page should be unchanged */
+    ASSERT_TRUE(page2_styles_cap == s->pages.last->capacity().styles);
+}
+
+TEST(page_list, PageList_increaseCapacity_preserves_dirty_flag) {
+    ListHolder s(opts(2, 4, (size_t)0));
+
+    /* Set page dirty flag and mark some rows as dirty */
+    Page *page = s->pages.first->page();
+    page->dirty = true;
+
+    page::Row *rows = page->rows.ptr(page->memory);
+    rows[0].setDirty(true);
+    rows[1].setDirty(false);
+    rows[2].setDirty(true);
+    rows[3].setDirty(false);
+
+    /* Increase capacity */
+    Node *new_node = incCap(*s, s->pages.first, IncCap::styles);
+
+    /* The page dirty flag should be preserved */
+    ASSERT_TRUE(new_node->page()->dirty);
+
+    /* Row dirty flags should be preserved */
+    page::Row *new_rows = new_node->page()->rows.ptr(new_node->page()->memory);
+    ASSERT_TRUE(new_rows[0].dirty());
+    ASSERT_FALSE(new_rows[1].dirty());
+    ASSERT_TRUE(new_rows[2].dirty());
+    ASSERT_FALSE(new_rows[3].dirty());
+}
+
+TEST(page_list, PageList_pageIterator_single_page) {
+    ListHolder s(opts(80, 24));
+
+    /* The viewport should be within a single page */
+    ASSERT_TRUE(s->pages.first->next == nullptr);
+
+    /* Iterate the active area */
+    PageList::PageIterator it = s->pageIterator(PageList::Direction::right_down, Point::active());
+    PageList::Chunk chunk;
+    {
+        ASSERT_TRUE(it.next(&chunk));
+        ASSERT_TRUE(chunk.node == s->pages.first);
+        ASSERT_TRUE(0 == chunk.start);
+        ASSERT_TRUE(s->rows == chunk.end);
+    }
+
+    /* Should only have one chunk */
+    ASSERT_FALSE(it.next(&chunk));
+}
+
+static void fillFirstPagePlusOne(PageList &s) {
+    Node *page1_node = s.pages.last;
+    Page *page1 = page1_node->page();
+    page1->pauseIntegrityChecks(true);
+    const size_t n = (size_t)page1->capacity.rows - page1->size.rows;
+    for (size_t i = 0; i < n; i++) (void)growNode(&s);
+    page1->pauseIntegrityChecks(false);
+    (void)growNode(&s);
+}
+
+TEST(page_list, PageList_pageIterator_two_pages) {
+    ListHolder s(opts(80, 24));
+
+    /* Grow to capacity */
+    fillFirstPagePlusOne(*s);
+    ASSERT_TRUE(s->pages.first != s->pages.last);
+
+    /* Iterate the active area */
+    PageList::PageIterator it = s->pageIterator(PageList::Direction::right_down, Point::active());
+    PageList::Chunk chunk;
+    {
+        ASSERT_TRUE(it.next(&chunk));
+        ASSERT_TRUE(chunk.node == s->pages.first);
+        const size_t start = (size_t)chunk.node->rows() - s->rows + 1;
+        ASSERT_TRUE(start == chunk.start);
+        ASSERT_TRUE(chunk.node->rows() == chunk.end);
+    }
+    {
+        ASSERT_TRUE(it.next(&chunk));
+        ASSERT_TRUE(chunk.node == s->pages.last);
+        ASSERT_TRUE(0 == chunk.start);
+        ASSERT_TRUE(1 == chunk.end);
+    }
+    ASSERT_FALSE(it.next(&chunk));
+}
+
+TEST(page_list, PageList_pageIterator_history_two_pages) {
+    ListHolder s(opts(80, 24));
+
+    /* Grow to capacity */
+    fillFirstPagePlusOne(*s);
+
+    /* Iterate the active area */
+    PageList::PageIterator it = s->pageIterator(PageList::Direction::right_down, Point::history());
+    PageList::Chunk chunk;
+    {
+        const Pin active_tl = s->getTopLeft(point::Tag::active);
+        ASSERT_TRUE(it.next(&chunk));
+        ASSERT_TRUE(chunk.node == s->pages.first);
+        ASSERT_TRUE(0 == chunk.start);
+        ASSERT_TRUE(active_tl.y == chunk.end);
+    }
+    ASSERT_FALSE(it.next(&chunk));
+}
+
 /* @@TESTS@@ */
 
 /* Wisp: std.testing.allocator's leak check. Runs last (registration order). */
