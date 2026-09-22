@@ -59,6 +59,25 @@ static bool ptEq(const Maybe<Point> &m, const Point &p) { return m.has && m.valu
 static bool rgbEq(const Cell::RGB &a, uint8_t r, uint8_t g, uint8_t b) { return a.r == r && a.g == g && a.b == b; }
 static Pin pinAt(const Screen &s, const Point &p) { return s.pages.pin(p).value; }
 
+/* Wisp: var sel = s.selectX(...).?; defer sel.deinit(&s); */
+struct SelDeinit {
+    Selection *sel;
+    Screen *screen;
+    ~SelDeinit() { sel->deinit(screen); }
+};
+#define SEL(var, scr, e)                                                                                                   const Maybe<Selection> var##_maybe = (e);                                                                              ASSERT_TRUE(var##_maybe.has);                                                                                          Selection var = var##_maybe.value;                                                                                     SelDeinit var##_deinit = {&var, &(scr)};                                                                               (void)var##_deinit
+
+/* Wisp: .{ .pin = p, .whitespace = null, .semantic_prompt_boundary = b } */
+static Screen::SelectLine selLine(const Pin &p, bool whitespace_null = false, bool semantic_prompt_boundary = true) {
+    Screen::SelectLine l(p);
+    if (whitespace_null) {
+        l.whitespace = nullptr;
+        l.whitespace_len = SIZE_MAX;
+    }
+    l.semantic_prompt_boundary = semantic_prompt_boundary;
+    return l;
+}
+
 TEST(screen, Screen_forwards_optional_scrollback_limits) {
     const size_t max_lines = 123;
     SCREEN_OPTS(s, Screen::Options(80, 24, Maybe<size_t>(), max_lines));
@@ -3233,6 +3252,326 @@ TEST(screen, Screen__select_replaces_existing_pins) {
      * rather than leak them. */
     ASSERT_TRUE(s.select(Selection::init(pinAt(s, Point::active(0, 1)), pinAt(s, Point::active(2, 1)), false)));
     ASSERT_TRUE(tracked + 2 == s.pages.countTrackedPins());
+}
+
+TEST(screen, Screen__reselecting_tracked_selection_preserves_its_pins) {
+
+    SCREEN(s, 10, 2, (size_t)0);
+
+    ASSERT_TRUE(s.select(Selection::init(pinAt(s, Point::active(1, 0)), pinAt(s, Point::active(3, 0)), false)));
+
+    ASSERT_TRUE(s.select(s.selection.value));
+    ASSERT_TRUE(Selection::Order::forward == s.selection.value.order(&s));
+}
+
+TEST(screen, Screen__selectAll) {
+
+    SCREEN(s, 10, 10, (size_t)0);
+
+    {
+        WRITE(s, "ABC  DEF\n 123\n456");
+        SEL(sel, s, s.selectAll());
+        ASSERT_TRUE(ptEq(s.pages.pointFromPin(point::Tag::screen, sel.start()), Point::screen(0, 0)));
+        ASSERT_TRUE(ptEq(s.pages.pointFromPin(point::Tag::screen, sel.end()), Point::screen(2, 2)));
+    }
+
+    {
+        WRITE(s, "\nFOO\n BAR\n BAZ\n QWERTY\n 12345678");
+        SEL(sel, s, s.selectAll());
+        ASSERT_TRUE(ptEq(s.pages.pointFromPin(point::Tag::screen, sel.start()), Point::screen(0, 0)));
+        ASSERT_TRUE(ptEq(s.pages.pointFromPin(point::Tag::screen, sel.end()), Point::screen(8, 7)));
+    }
+}
+
+TEST(screen, Screen__selectLine) {
+
+    SCREEN(s, 10, 10, (size_t)0);
+    WRITE(s, "ABC  DEF\n 123\n456");
+
+    /* Outside of active area
+     * try testing.expect(s.selectLine(.{ .x = 13, .y = 0 }) == null);
+     * try testing.expect(s.selectLine(.{ .x = 0, .y = 5 }) == null); */
+
+    /* Going forward */
+    {
+        SEL(sel, s, s.selectLine(selLine(pinAt(s, Point::active(0, 0)))));
+        ASSERT_TRUE(ptEq(s.pages.pointFromPin(point::Tag::screen, sel.start()), Point::screen(0, 0)));
+        ASSERT_TRUE(ptEq(s.pages.pointFromPin(point::Tag::screen, sel.end()), Point::screen(7, 0)));
+    }
+
+    /* Going backward */
+    {
+        SEL(sel, s, s.selectLine(selLine(pinAt(s, Point::active(7, 0)))));
+        ASSERT_TRUE(ptEq(s.pages.pointFromPin(point::Tag::screen, sel.start()), Point::screen(0, 0)));
+        ASSERT_TRUE(ptEq(s.pages.pointFromPin(point::Tag::screen, sel.end()), Point::screen(7, 0)));
+    }
+
+    /* Going forward and backward */
+    {
+        SEL(sel, s, s.selectLine(selLine(pinAt(s, Point::active(3, 0)))));
+        ASSERT_TRUE(ptEq(s.pages.pointFromPin(point::Tag::screen, sel.start()), Point::screen(0, 0)));
+        ASSERT_TRUE(ptEq(s.pages.pointFromPin(point::Tag::screen, sel.end()), Point::screen(7, 0)));
+    }
+
+    /* Outside active area */
+    {
+        SEL(sel, s, s.selectLine(selLine(pinAt(s, Point::active(9, 0)))));
+        ASSERT_TRUE(ptEq(s.pages.pointFromPin(point::Tag::screen, sel.start()), Point::screen(0, 0)));
+        ASSERT_TRUE(ptEq(s.pages.pointFromPin(point::Tag::screen, sel.end()), Point::screen(7, 0)));
+    }
+}
+
+TEST(screen, Screen__selectLine_across_soft_wrap) {
+
+    SCREEN(s, 5, 10, (size_t)0);
+    WRITE(s, " 12 34012   \n 123");
+
+    /* Going forward */
+    {
+        SEL(sel, s, s.selectLine(selLine(pinAt(s, Point::active(1, 0)))));
+        ASSERT_TRUE(ptEq(s.pages.pointFromPin(point::Tag::screen, sel.start()), Point::screen(1, 0)));
+        ASSERT_TRUE(ptEq(s.pages.pointFromPin(point::Tag::screen, sel.end()), Point::screen(3, 1)));
+    }
+}
+
+TEST(screen, Screen__selectLine_across_full_soft_wrap) {
+
+    SCREEN(s, 5, 5, (size_t)0);
+    WRITE(s, "1ABCD2EFGH\n3IJKL");
+
+    {
+        SEL(sel, s, s.selectLine(selLine(pinAt(s, Point::active(2, 1)))));
+        ASSERT_TRUE(ptEq(s.pages.pointFromPin(point::Tag::screen, sel.start()), Point::screen(0, 0)));
+        ASSERT_TRUE(ptEq(s.pages.pointFromPin(point::Tag::screen, sel.end()), Point::screen(4, 1)));
+    }
+}
+
+TEST(screen, Screen__selectLine_across_soft_wrap_ignores_blank_lines) {
+
+    SCREEN(s, 5, 10, (size_t)0);
+    WRITE(s, " 12 34012             \n 123");
+
+    /* Going forward */
+    {
+        SEL(sel, s, s.selectLine(selLine(pinAt(s, Point::active(1, 0)))));
+        ASSERT_TRUE(ptEq(s.pages.pointFromPin(point::Tag::screen, sel.start()), Point::screen(1, 0)));
+        ASSERT_TRUE(ptEq(s.pages.pointFromPin(point::Tag::screen, sel.end()), Point::screen(3, 1)));
+    }
+
+    /* Going backward */
+    {
+        SEL(sel, s, s.selectLine(selLine(pinAt(s, Point::active(1, 1)))));
+        ASSERT_TRUE(ptEq(s.pages.pointFromPin(point::Tag::screen, sel.start()), Point::screen(1, 0)));
+        ASSERT_TRUE(ptEq(s.pages.pointFromPin(point::Tag::screen, sel.end()), Point::screen(3, 1)));
+    }
+
+    /* Going forward and backward */
+    {
+        SEL(sel, s, s.selectLine(selLine(pinAt(s, Point::active(3, 0)))));
+        ASSERT_TRUE(ptEq(s.pages.pointFromPin(point::Tag::screen, sel.start()), Point::screen(1, 0)));
+        ASSERT_TRUE(ptEq(s.pages.pointFromPin(point::Tag::screen, sel.end()), Point::screen(3, 1)));
+    }
+}
+
+TEST(screen, Screen__selectLine_disabled_whitespace_trimming) {
+
+    SCREEN(s, 5, 10, (size_t)0);
+    WRITE(s, " 12 34012   \n 123");
+
+    /* Going forward */
+    {
+        SEL(sel, s, s.selectLine(selLine(pinAt(s, Point::active(1, 0)), true)));
+        ASSERT_TRUE(ptEq(s.pages.pointFromPin(point::Tag::screen, sel.start()), Point::screen(0, 0)));
+        ASSERT_TRUE(ptEq(s.pages.pointFromPin(point::Tag::screen, sel.end()), Point::screen(4, 2)));
+    }
+
+    /* Non-wrapped */
+    {
+        SEL(sel, s, s.selectLine(selLine(pinAt(s, Point::active(1, 3)), true)));
+        ASSERT_TRUE(ptEq(s.pages.pointFromPin(point::Tag::screen, sel.start()), Point::screen(0, 3)));
+        ASSERT_TRUE(ptEq(s.pages.pointFromPin(point::Tag::screen, sel.end()), Point::screen(4, 3)));
+    }
+}
+
+TEST(screen, Screen__selectLine_with_scrollback) {
+
+    SCREEN(s, 2, 3, (size_t)5);
+    WRITE(s, "1A\n2B\n3C\n4D\n5E");
+
+    /* Selecting first line */
+    {
+        SEL(sel, s, s.selectLine(selLine(pinAt(s, Point::active(0, 0)))));
+        ASSERT_TRUE(ptEq(s.pages.pointFromPin(point::Tag::active, sel.start()), Point::active(0, 0)));
+        ASSERT_TRUE(ptEq(s.pages.pointFromPin(point::Tag::active, sel.end()), Point::active(1, 0)));
+    }
+
+    /* Selecting last line */
+    {
+        SEL(sel, s, s.selectLine(selLine(pinAt(s, Point::active(0, 2)))));
+        ASSERT_TRUE(ptEq(s.pages.pointFromPin(point::Tag::active, sel.start()), Point::active(0, 2)));
+        ASSERT_TRUE(ptEq(s.pages.pointFromPin(point::Tag::active, sel.end()), Point::active(1, 2)));
+    }
+}
+
+/* https://github.com/mitchellh/ghostty/issues/1329 */
+TEST(screen, Screen__selectLine_semantic_prompt_boundary) {
+
+    SCREEN(s, 5, 10, (size_t)0);
+    WRITE(s, "ABCDE\n");
+    s.cursorSetSemanticContent(SCS::makePrompt(PromptKind::initial));
+    WRITE(s, "A    ");
+    s.cursorSetSemanticContent(SCS::makeOutput());
+    WRITE(s, "> ");
+
+    EXPECT_DUMP(s, screen, "ABCDE\nA    \n> ");
+
+    /* Selecting output stops at the prompt even if soft-wrapped */
+    {
+        SEL(sel, s, s.selectLine(selLine(pinAt(s, Point::active(1, 1)))));
+        EXPECT_STR("A", s.selectionString(Screen::SelectionString(sel, false)));
+    }
+    {
+        SEL(sel, s, s.selectLine(selLine(pinAt(s, Point::active(1, 2)))));
+        ASSERT_TRUE(ptEq(s.pages.pointFromPin(point::Tag::active, sel.start()), Point::active(0, 2)));
+        ASSERT_TRUE(ptEq(s.pages.pointFromPin(point::Tag::active, sel.end()), Point::active(0, 2)));
+    }
+}
+
+TEST(screen, Screen__selectLine_semantic_prompt_to_input_boundary) {
+
+    SCREEN(s, 10, 5, (size_t)0);
+
+    /* Write prompt followed by user input on same row: "$>command"
+     * Using non-whitespace to avoid whitespace trimming affecting the test */
+    s.cursorSetSemanticContent(SCS::makePrompt(PromptKind::initial));
+    WRITE(s, "$>");
+    s.cursorSetSemanticContent(SCS::makeInput(SCS::InputClear::clear_explicit));
+    WRITE(s, "command");
+
+    /* Selecting from prompt should only select prompt */
+    {
+        SEL(sel, s, s.selectLine(selLine(pinAt(s, Point::active(0, 0)))));
+        ASSERT_TRUE(ptEq(s.pages.pointFromPin(point::Tag::active, sel.start()), Point::active(0, 0)));
+        ASSERT_TRUE(ptEq(s.pages.pointFromPin(point::Tag::active, sel.end()), Point::active(1, 0)));
+    }
+
+    /* Selecting from input should only select input */
+    {
+        SEL(sel, s, s.selectLine(selLine(pinAt(s, Point::active(5, 0)))));
+        ASSERT_TRUE(ptEq(s.pages.pointFromPin(point::Tag::active, sel.start()), Point::active(2, 0)));
+        ASSERT_TRUE(ptEq(s.pages.pointFromPin(point::Tag::active, sel.end()), Point::active(8, 0)));
+    }
+}
+
+TEST(screen, Screen__selectLine_semantic_input_to_output_boundary) {
+
+    SCREEN(s, 10, 5, (size_t)0);
+
+    /* Row 0: user input */
+    s.cursorSetSemanticContent(SCS::makeInput(SCS::InputClear::clear_explicit));
+    WRITE(s, "ls -la\n");
+    /* Row 1: command output */
+    s.cursorSetSemanticContent(SCS::makeOutput());
+    WRITE(s, "file.txt");
+
+    /* Selecting from input should only select input */
+    {
+        SEL(sel, s, s.selectLine(selLine(pinAt(s, Point::active(2, 0)))));
+        EXPECT_STR("ls -la", s.selectionString(Screen::SelectionString(sel, false)));
+    }
+
+    /* Selecting from output should only select output */
+    {
+        SEL(sel, s, s.selectLine(selLine(pinAt(s, Point::active(2, 1)))));
+        EXPECT_STR("file.txt", s.selectionString(Screen::SelectionString(sel, false)));
+    }
+}
+
+TEST(screen, Screen__selectLine_semantic_mid_row_boundary) {
+
+    SCREEN(s, 10, 5, (size_t)0);
+
+    /* Single row with output then prompt then input: "out$>cmd"
+     * Using non-whitespace to avoid whitespace trimming affecting the test */
+    s.cursorSetSemanticContent(SCS::makeOutput());
+    WRITE(s, "out");
+    s.cursorSetSemanticContent(SCS::makePrompt(PromptKind::initial));
+    WRITE(s, "$>");
+    s.cursorSetSemanticContent(SCS::makeInput(SCS::InputClear::clear_explicit));
+    WRITE(s, "cmd");
+
+    /* Selecting from output should stop at prompt */
+    {
+        SEL(sel, s, s.selectLine(selLine(pinAt(s, Point::active(1, 0)))));
+        ASSERT_TRUE(ptEq(s.pages.pointFromPin(point::Tag::active, sel.start()), Point::active(0, 0)));
+        ASSERT_TRUE(ptEq(s.pages.pointFromPin(point::Tag::active, sel.end()), Point::active(2, 0)));
+    }
+
+    /* Selecting from prompt should only select prompt */
+    {
+        SEL(sel, s, s.selectLine(selLine(pinAt(s, Point::active(3, 0)))));
+        ASSERT_TRUE(ptEq(s.pages.pointFromPin(point::Tag::active, sel.start()), Point::active(3, 0)));
+        ASSERT_TRUE(ptEq(s.pages.pointFromPin(point::Tag::active, sel.end()), Point::active(4, 0)));
+    }
+
+    /* Selecting from input should only select input */
+    {
+        SEL(sel, s, s.selectLine(selLine(pinAt(s, Point::active(6, 0)))));
+        ASSERT_TRUE(ptEq(s.pages.pointFromPin(point::Tag::active, sel.start()), Point::active(5, 0)));
+        ASSERT_TRUE(ptEq(s.pages.pointFromPin(point::Tag::active, sel.end()), Point::active(7, 0)));
+    }
+}
+
+TEST(screen, Screen__selectLine_semantic_boundary_soft_wrap_with_mid_row_transition) {
+
+    SCREEN(s, 5, 5, (size_t)0);
+
+    /* Row 0: prompt "$ " + input "cmd" (soft-wraps)
+     * Row 1: input continues "12" + output "out" */
+    s.cursorSetSemanticContent(SCS::makePrompt(PromptKind::initial));
+    WRITE(s, "$ ");
+    s.cursorSetSemanticContent(SCS::makeInput(SCS::InputClear::clear_explicit));
+    WRITE(s, "cmd12");
+    s.cursorSetSemanticContent(SCS::makeOutput());
+    WRITE(s, "out");
+
+    /* Verify layout */
+    EXPECT_DUMP(s, screen, "$ cmd\n12out");
+
+    /* Selecting from input on row 0 should get all input across soft-wrap */
+    {
+        SEL(sel, s, s.selectLine(selLine(pinAt(s, Point::active(3, 0)))));
+        EXPECT_STR("cmd12", s.selectionString(Screen::SelectionString(sel, false)));
+    }
+
+    /* Selecting from input on row 1 should get all input across soft-wrap */
+    {
+        SEL(sel, s, s.selectLine(selLine(pinAt(s, Point::active(0, 1)))));
+        EXPECT_STR("cmd12", s.selectionString(Screen::SelectionString(sel, false)));
+    }
+
+    /* Selecting from output should only get output */
+    {
+        SEL(sel, s, s.selectLine(selLine(pinAt(s, Point::active(3, 1)))));
+        EXPECT_STR("out", s.selectionString(Screen::SelectionString(sel, false)));
+    }
+}
+
+TEST(screen, Screen__selectLine_semantic_boundary_disabled) {
+
+    SCREEN(s, 10, 5, (size_t)0);
+
+    /* Write prompt followed by input */
+    s.cursorSetSemanticContent(SCS::makePrompt(PromptKind::initial));
+    WRITE(s, "$ ");
+    s.cursorSetSemanticContent(SCS::makeInput(SCS::InputClear::clear_explicit));
+    WRITE(s, "command");
+
+    /* With semantic_prompt_boundary = false, should select entire line */
+    {
+        SEL(sel, s, s.selectLine(selLine(pinAt(s, Point::active(0, 0)), false, false)));
+        EXPECT_STR("$ command", s.selectionString(Screen::SelectionString(sel, false)));
+    }
 }
 
 /* @@TESTS@@ */
