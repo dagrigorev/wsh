@@ -2789,6 +2789,452 @@ TEST(screen, Screen__resize_less_cols_with_reflow_and_scrollback) {
     ASSERT_TRUE(2 == s.cursor.y);
 }
 
+TEST(screen, Screen__resize_less_cols_with_reflow_previously_wrapped_and_scrollback) {
+
+    SCREEN(s, 5, 3, (size_t)2);
+    const char *str = "1ABCD2EFGH3IJKL4ABCD5EFGH";
+    WRITE(s, str);
+
+    /* Check */
+    EXPECT_DUMP(s, viewport, "3IJKL\n4ABCD\n5EFGH");
+
+    /* Put our cursor on the end */
+    s.cursorAbsolute(s.pages.cols - 1, s.pages.rows - 1);
+    EXPECT_CURSOR_CP(s, 'H');
+
+    ASSERT_TRUE(s.resize(rsz(3, 3)));
+
+    EXPECT_DUMP(s, viewport, "CD5\nEFG\nH");
+    EXPECT_DUMP(s, screen, "1AB\nCD2\nEFG\nH3I\nJKL\n4AB\nCD5\nEFG\nH");
+
+    /* Cursor should be on the last line */
+    ASSERT_TRUE(0 == s.cursor.x);
+    ASSERT_TRUE(2 == s.cursor.y);
+    EXPECT_CURSOR_CP(s, 'H');
+}
+
+TEST(screen, Screen__resize_less_cols_with_scrollback_keeps_cursor_row) {
+
+    SCREEN(s, 5, 3, (size_t)5);
+    const char *str = "1A\n2B\n3C\n4D\n5E";
+    WRITE(s, str);
+
+    /* Lets do a scroll and clear operation */
+    ASSERT_TRUE(s.scrollClear());
+
+    /* Move our cursor to the beginning */
+    s.cursorAbsolute(0, 0);
+
+    ASSERT_TRUE(s.resize(rsz(3, 3)));
+
+    EXPECT_DUMP(s, viewport, "");
+
+    /* Cursor should be on the last line */
+    ASSERT_TRUE(0 == s.cursor.x);
+    ASSERT_TRUE(0 == s.cursor.y);
+}
+
+TEST(screen, Screen__resize_more_rows__less_cols_with_reflow_with_scrollback) {
+
+    SCREEN(s, 5, 3, (size_t)3);
+    const char *str = "1ABCD\n2EFGH3IJKL\n4MNOP";
+    WRITE(s, str);
+
+    EXPECT_DUMP(s, screen, "1ABCD\n2EFGH\n3IJKL\n4MNOP");
+    EXPECT_DUMP(s, viewport, "2EFGH\n3IJKL\n4MNOP");
+
+    ASSERT_TRUE(s.resize(rsz(2, 10)));
+
+    EXPECT_DUMP(s, viewport, "BC\nD\n2E\nFG\nH3\nIJ\nKL\n4M\nNO\nP");
+    EXPECT_DUMP(s, screen, "1A\nBC\nD\n2E\nFG\nH3\nIJ\nKL\n4M\nNO\nP");
+}
+
+/* This seems like it should work fine but for some reason in practice
+ * in the initial implementation I found this bug! This is a regression
+ * test for that. */
+TEST(screen, Screen__resize_more_rows_then_shrink_again) {
+
+    SCREEN(s, 5, 3, (size_t)10);
+    const char *str = "1ABC";
+    WRITE(s, str);
+
+    /* Grow */
+    ASSERT_TRUE(s.resize(rsz(5, 10)));
+    EXPECT_DUMP(s, viewport, str);
+    EXPECT_DUMP(s, screen, str);
+
+    /* Shrink */
+    ASSERT_TRUE(s.resize(rsz(5, 3)));
+    EXPECT_DUMP(s, screen, str);
+    EXPECT_DUMP(s, viewport, str);
+
+    /* Grow again */
+    ASSERT_TRUE(s.resize(rsz(5, 10)));
+    EXPECT_DUMP(s, viewport, str);
+    EXPECT_DUMP(s, screen, str);
+}
+
+TEST(screen, Screen__resize_less_cols_to_eliminate_wide_char) {
+
+    SCREEN(s, 2, 1, (size_t)0);
+    const char *str = "\xF0\x9F\x98\x80";
+    WRITE(s, str);
+    EXPECT_DUMP(s, screen, str);
+    {
+        const PageList::Cell list_cell = s.pages.getCell(Point::screen(0, 0)).value;
+        const Cell *cell = list_cell.cell;
+        ASSERT_TRUE(Cell::Wide::wide == cell->wide());
+        ASSERT_TRUE(0x1F600 == cell->contentCodepoint());
+    }
+
+    /* Resize to 1 column can't fit a wide char. So it should be deleted. */
+    ASSERT_TRUE(s.resize(rsz(1, 1)));
+    EXPECT_DUMP(s, screen, "");
+    {
+        const PageList::Cell list_cell = s.pages.getCell(Point::screen(0, 0)).value;
+        const Cell *cell = list_cell.cell;
+        ASSERT_TRUE(0 == cell->contentCodepoint());
+        ASSERT_TRUE(Cell::Wide::narrow == cell->wide());
+    }
+}
+
+TEST(screen, Screen__resize_less_cols_to_wrap_wide_char) {
+
+    SCREEN(s, 3, 3, (size_t)0);
+    const char *str = "x\xF0\x9F\x98\x80";
+    WRITE(s, str);
+    EXPECT_DUMP(s, screen, str);
+    {
+        const PageList::Cell list_cell = s.pages.getCell(Point::screen(1, 0)).value;
+        const Cell *cell = list_cell.cell;
+        ASSERT_TRUE(Cell::Wide::wide == cell->wide());
+        ASSERT_TRUE(0x1F600 == cell->contentCodepoint());
+    }
+    {
+        const PageList::Cell list_cell = s.pages.getCell(Point::screen(2, 0)).value;
+        const Cell *cell = list_cell.cell;
+        ASSERT_TRUE(Cell::Wide::spacer_tail == cell->wide());
+    }
+
+    ASSERT_TRUE(s.resize(rsz(2, 3)));
+    EXPECT_DUMP(s, screen, "x\n\xF0\x9F\x98\x80");
+    {
+        const PageList::Cell list_cell = s.pages.getCell(Point::screen(1, 0)).value;
+        const Cell *cell = list_cell.cell;
+        ASSERT_TRUE(Cell::Wide::spacer_head == cell->wide());
+        ASSERT_TRUE(list_cell.row->wrap());
+    }
+}
+
+TEST(screen, Screen__resize_less_cols_to_eliminate_wide_char_with_row_space) {
+
+    SCREEN(s, 2, 2, (size_t)0);
+    const char *str = "\xF0\x9F\x98\x80";
+    WRITE(s, str);
+    EXPECT_DUMP(s, screen, str);
+    {
+        const PageList::Cell list_cell = s.pages.getCell(Point::screen(0, 0)).value;
+        const Cell *cell = list_cell.cell;
+        ASSERT_TRUE(Cell::Wide::wide == cell->wide());
+        ASSERT_TRUE(0x1F600 == cell->contentCodepoint());
+    }
+    {
+        const PageList::Cell list_cell = s.pages.getCell(Point::screen(1, 0)).value;
+        const Cell *cell = list_cell.cell;
+        ASSERT_TRUE(Cell::Wide::spacer_tail == cell->wide());
+    }
+
+    ASSERT_TRUE(s.resize(rsz(1, 2)));
+    EXPECT_DUMP(s, screen, "");
+}
+
+TEST(screen, Screen__resize_less_cols_reflows_cursor_after_wrapped_text) {
+    SCREEN(s, 50, 7, (size_t)0);
+
+    for (size_t _i = 0; _i < (size_t)30; _i++) WRITE(s, "a");
+
+    ASSERT_TRUE(0 == s.cursor.y);
+    ASSERT_TRUE(30 == s.cursor.x);
+
+    ASSERT_TRUE(s.resize(rsz(25, 7)));
+
+    ASSERT_TRUE(1 == s.cursor.y);
+    ASSERT_TRUE(5 == s.cursor.x);
+}
+
+TEST(screen, Screen__resize_less_cols_reflows_cursor_after_empty_cells) {
+    SCREEN(s, 10, 3, (size_t)0);
+
+    WRITE(s, "abc");
+    s.cursorRight(6);
+
+    ASSERT_TRUE(0 == s.cursor.y);
+    ASSERT_TRUE(9 == s.cursor.x);
+
+    ASSERT_TRUE(s.resize(rsz(5, 3)));
+
+    ASSERT_TRUE(1 == s.cursor.y);
+    ASSERT_TRUE(4 == s.cursor.x);
+}
+
+TEST(screen, Screen__resize_more_cols_with_wide_spacer_head) {
+
+    SCREEN(s, 3, 2, (size_t)0);
+    const char *str = "  \xF0\x9F\x98\x80";
+    WRITE(s, str);
+    EXPECT_DUMP(s, screen, "  \n\xF0\x9F\x98\x80");
+
+    /* So this is the key point: we end up with a wide spacer head at
+     * the end of row 1, then the emoji, then a wide spacer tail on row 2.
+     * We should expect that if we resize to more cols, the wide spacer
+     * head is replaced with the emoji. */
+    {
+        const PageList::Cell list_cell = s.pages.getCell(Point::screen(2, 0)).value;
+        const Cell *cell = list_cell.cell;
+        ASSERT_TRUE(Cell::Wide::spacer_head == cell->wide());
+    }
+    {
+        const PageList::Cell list_cell = s.pages.getCell(Point::screen(0, 1)).value;
+        const Cell *cell = list_cell.cell;
+        ASSERT_TRUE(Cell::Wide::wide == cell->wide());
+    }
+    {
+        const PageList::Cell list_cell = s.pages.getCell(Point::screen(1, 1)).value;
+        const Cell *cell = list_cell.cell;
+        ASSERT_TRUE(Cell::Wide::spacer_tail == cell->wide());
+    }
+
+    ASSERT_TRUE(s.resize(rsz(4, 2)));
+    EXPECT_DUMP(s, screen, str);
+    {
+        const PageList::Cell list_cell = s.pages.getCell(Point::screen(2, 0)).value;
+        const Cell *cell = list_cell.cell;
+        ASSERT_TRUE(Cell::Wide::wide == cell->wide());
+        ASSERT_TRUE(0x1F600 == cell->contentCodepoint());
+    }
+    {
+        const PageList::Cell list_cell = s.pages.getCell(Point::screen(3, 0)).value;
+        const Cell *cell = list_cell.cell;
+        ASSERT_TRUE(Cell::Wide::spacer_tail == cell->wide());
+    }
+}
+
+TEST(screen, Screen__resize_more_cols_with_wide_spacer_head_multiple_lines) {
+
+    SCREEN(s, 3, 3, (size_t)0);
+    const char *str = "xxxyy\xF0\x9F\x98\x80";
+    WRITE(s, str);
+    EXPECT_DUMP(s, screen, "xxx\nyy\n\xF0\x9F\x98\x80");
+
+    /* Similar to the "wide spacer head" test, but this time we'er going
+     * to increase our columns such that multiple rows are unwrapped. */
+    {
+        const PageList::Cell list_cell = s.pages.getCell(Point::screen(2, 1)).value;
+        const Cell *cell = list_cell.cell;
+        ASSERT_TRUE(Cell::Wide::spacer_head == cell->wide());
+    }
+    {
+        const PageList::Cell list_cell = s.pages.getCell(Point::screen(0, 2)).value;
+        const Cell *cell = list_cell.cell;
+        ASSERT_TRUE(Cell::Wide::wide == cell->wide());
+    }
+    {
+        const PageList::Cell list_cell = s.pages.getCell(Point::screen(1, 2)).value;
+        const Cell *cell = list_cell.cell;
+        ASSERT_TRUE(Cell::Wide::spacer_tail == cell->wide());
+    }
+
+    ASSERT_TRUE(s.resize(rsz(8, 2)));
+    EXPECT_DUMP(s, screen, str);
+    {
+        const PageList::Cell list_cell = s.pages.getCell(Point::screen(5, 0)).value;
+        const Cell *cell = list_cell.cell;
+        ASSERT_TRUE(Cell::Wide::wide == cell->wide());
+        ASSERT_TRUE(0x1F600 == cell->contentCodepoint());
+    }
+    {
+        const PageList::Cell list_cell = s.pages.getCell(Point::screen(6, 0)).value;
+        const Cell *cell = list_cell.cell;
+        ASSERT_TRUE(Cell::Wide::spacer_tail == cell->wide());
+    }
+}
+
+TEST(screen, Screen__resize_more_cols_requiring_a_wide_spacer_head) {
+
+    SCREEN(s, 2, 2, (size_t)0);
+    const char *str = "xx\xF0\x9F\x98\x80";
+    WRITE(s, str);
+    EXPECT_DUMP(s, screen, "xx\n\xF0\x9F\x98\x80");
+    {
+        const PageList::Cell list_cell = s.pages.getCell(Point::screen(0, 1)).value;
+        const Cell *cell = list_cell.cell;
+        ASSERT_TRUE(Cell::Wide::wide == cell->wide());
+    }
+    {
+        const PageList::Cell list_cell = s.pages.getCell(Point::screen(1, 1)).value;
+        const Cell *cell = list_cell.cell;
+        ASSERT_TRUE(Cell::Wide::spacer_tail == cell->wide());
+    }
+
+    /* This resizes to 3 columns, which isn't enough space for our wide
+     * char to enter row 1. But we need to mark the wide spacer head on the
+     * end of the first row since we're wrapping to the next row. */
+    ASSERT_TRUE(s.resize(rsz(3, 2)));
+    EXPECT_DUMP(s, screen, "xx\n\xF0\x9F\x98\x80");
+    {
+        const PageList::Cell list_cell = s.pages.getCell(Point::screen(2, 0)).value;
+        const Cell *cell = list_cell.cell;
+        ASSERT_TRUE(Cell::Wide::spacer_head == cell->wide());
+    }
+    {
+        const PageList::Cell list_cell = s.pages.getCell(Point::screen(0, 1)).value;
+        const Cell *cell = list_cell.cell;
+        ASSERT_TRUE(Cell::Wide::wide == cell->wide());
+        ASSERT_TRUE(0x1F600 == cell->contentCodepoint());
+    }
+    {
+        const PageList::Cell list_cell = s.pages.getCell(Point::screen(1, 1)).value;
+        const Cell *cell = list_cell.cell;
+        ASSERT_TRUE(Cell::Wide::spacer_tail == cell->wide());
+    }
+}
+
+TEST(screen, Screen__resize_more_cols_with_cursor_at_prompt) {
+
+    SCREEN(s, 10, 3, (size_t)5);
+
+    /* zig fmt: off */
+    WRITE(s, "ABCDE\n");
+    s.cursorSetSemanticContent(SCS::makePrompt(PromptKind::initial));
+    WRITE(s, "> ");
+    s.cursorSetSemanticContent(SCS::makeInput(SCS::InputClear::clear_eol));
+    WRITE(s, "echo");
+    /* zig fmt: on */
+
+    EXPECT_DUMP(s, viewport, "ABCDE\n> echo");
+
+    {
+        Screen::Resize r = rsz(20, 3);
+        r.prompt_redraw = terminal::osc::semantic_prompt::Redraw::true_;
+        ASSERT_TRUE(s.resize(r));
+    }
+
+    /* Cursor should not move */
+    ASSERT_TRUE(6 == s.cursor.x);
+    ASSERT_TRUE(1 == s.cursor.y);
+
+    EXPECT_DUMP(s, viewport, "ABCDE");
+}
+
+TEST(screen, Screen__resize_more_cols_with_cursor_not_at_prompt) {
+
+    SCREEN(s, 10, 3, (size_t)5);
+
+    /* zig fmt: off */
+    WRITE(s, "ABCDE\n");
+    s.cursorSetSemanticContent(SCS::makePrompt(PromptKind::initial));
+    WRITE(s, "> ");
+    s.cursorSetSemanticContent(SCS::makeInput(SCS::InputClear::clear_eol));
+    WRITE(s, "echo\n");
+    WRITE(s, "output");
+    /* zig fmt: on */
+
+    EXPECT_DUMP(s, viewport, "ABCDE\n> echo\noutput");
+
+    {
+        Screen::Resize r = rsz(20, 3);
+        r.prompt_redraw = terminal::osc::semantic_prompt::Redraw::true_;
+        ASSERT_TRUE(s.resize(r));
+    }
+
+    /* Cursor should not move */
+    ASSERT_TRUE(6 == s.cursor.x);
+    ASSERT_TRUE(2 == s.cursor.y);
+
+    EXPECT_DUMP(s, viewport, "ABCDE\n> echo\noutput");
+}
+
+TEST(screen, Screen__resize_with_prompt_redraw_last_clears_only_one_line) {
+
+    SCREEN(s, 10, 4, (size_t)5);
+
+    /* zig fmt: off */
+    WRITE(s, "ABCDE\n");
+    s.cursorSetSemanticContent(SCS::makePrompt(PromptKind::initial));
+    WRITE(s, "> ");
+    s.cursorSetSemanticContent(SCS::makeInput(SCS::InputClear::clear_explicit));
+    WRITE(s, "hello\n");
+    WRITE(s, "world");
+    /* zig fmt: on */
+
+    EXPECT_DUMP(s, viewport, "ABCDE\n> hello\nworld");
+
+    /* Cursor is at end of "world" line with semantic_content = .input */
+    {
+        Screen::Resize r = rsz(20, 4);
+        r.prompt_redraw = terminal::osc::semantic_prompt::Redraw::last;
+        ASSERT_TRUE(s.resize(r));
+    }
+
+    /* With .last, only the current line where cursor is should be cleared */
+    EXPECT_DUMP(s, viewport, "ABCDE\n> hello");
+}
+
+TEST(screen, Screen__resize_with_prompt_redraw_last_multiline_prompt_clears_only_last_line) {
+
+    SCREEN(s, 20, 5, (size_t)5);
+
+    /* Create a 3-line prompt: 1 initial + 2 continuation lines
+     * zig fmt: off */
+    s.cursorSetSemanticContent(SCS::makePrompt(PromptKind::initial));
+    WRITE(s, "line1\n");
+    s.cursorSetSemanticContent(SCS::makePrompt(PromptKind::continuation));
+    WRITE(s, "line2\n");
+    s.cursorSetSemanticContent(SCS::makePrompt(PromptKind::continuation));
+    WRITE(s, "line3");
+    /* zig fmt: on */
+
+    EXPECT_DUMP(s, viewport, "line1\nline2\nline3");
+
+    /* Cursor is at end of line3 (the last continuation line) */
+    {
+        Screen::Resize r = rsz(30, 5);
+        r.prompt_redraw = terminal::osc::semantic_prompt::Redraw::last;
+        ASSERT_TRUE(s.resize(r));
+    }
+
+    /* With .last, only line3 (where cursor is) should be cleared */
+    EXPECT_DUMP(s, viewport, "line1\nline2");
+}
+
+TEST(screen, Screen__select_untracked) {
+
+    SCREEN(s, 10, 10, (size_t)0);
+    WRITE(s, "ABC  DEF\n 123\n456");
+
+    ASSERT_TRUE(!s.selection.has);
+    const size_t tracked = s.pages.countTrackedPins();
+    ASSERT_TRUE(s.select(Selection::init(pinAt(s, Point::active(0, 0)), pinAt(s, Point::active(3, 0)), false)));
+    ASSERT_TRUE(tracked + 2 == s.pages.countTrackedPins());
+    ASSERT_TRUE(s.select(Maybe<Selection>()));
+    ASSERT_TRUE(tracked == s.pages.countTrackedPins());
+}
+
+TEST(screen, Screen__select_replaces_existing_pins) {
+
+    SCREEN(s, 10, 10, (size_t)0);
+    WRITE(s, "ABC  DEF\n 123\n456");
+
+    const size_t tracked = s.pages.countTrackedPins();
+    ASSERT_TRUE(s.select(Selection::init(pinAt(s, Point::active(0, 0)), pinAt(s, Point::active(3, 0)), false)));
+    ASSERT_TRUE(tracked + 2 == s.pages.countTrackedPins());
+
+    /* Replacing the selection must untrack the prior selection's pins
+     * rather than leak them. */
+    ASSERT_TRUE(s.select(Selection::init(pinAt(s, Point::active(0, 1)), pinAt(s, Point::active(2, 1)), false)));
+    ASSERT_TRUE(tracked + 2 == s.pages.countTrackedPins());
+}
+
 /* @@TESTS@@ */
 
 /* Wisp: std.testing.allocator's leak check. Runs last (registration order). */
