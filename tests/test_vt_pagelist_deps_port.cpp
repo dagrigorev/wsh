@@ -365,3 +365,197 @@ TEST(lz4, decompress_rejects_malformed_blocks) {
     const uint8_t f[] = {0};
     ASSERT_TRUE(dec(f, 1, output, 1, &n) == DE::OutputSizeMismatch);
 }
+
+/* ---- compress/Page.zig ---- */
+
+#include "../vt/compress/page.hpp"
+
+typedef vt::compress::Page CPage;
+typedef vt::page::Page TerminalPage;
+namespace lz4 = wisp::vt::lz4;
+
+static uint8_t *dupeBytes(const uint8_t *p, size_t len) {
+    uint8_t *d = (uint8_t *)malloc(len ? len : 1);
+    memcpy(d, p, len);
+    return d;
+}
+
+TEST(compress_page, compressed_Page_retained_mapping_round_trip) {
+    vt::page::Capacity cap(12, 9);
+    cap.styles = 8;
+    cap.grapheme_bytes = 128;
+    cap.string_bytes = 128;
+    TerminalPage resident;
+    ASSERT_TRUE(TerminalPage::init(cap, &resident));
+    resident.size.cols = 10;
+    resident.size.rows = 7;
+    resident.dirty = true;
+
+    /* Put state in both the backing memory and the Page value. In particular,
+     * the style and hyperlink sets retain live counters outside Page.memory. */
+    TerminalPage::RowAndCell rac = resident.getRowAndCell(2, 3);
+    *rac.cell = vt::page::Cell::init('A');
+    ASSERT_TRUE(resident.appendGrapheme(rac.row, rac.cell, 0x0301) == vt::page::PageError::none);
+
+    vt::style::Style bold;
+    bold.flags.bold = true;
+    vt::size::StyleCountInt style_id;
+    ASSERT_TRUE(resident.styles.add((const void *)resident.memory, bold, &style_id) ==
+                vt::ref_counted_set::AddError::none);
+    rac.cell->setStyleId(style_id);
+    rac.row->setStyled(true);
+
+    vt::hyperlink::Hyperlink link;
+    link.uri = (const uint8_t *)"https://ghostty.org/docs";
+    link.uri_len = strlen("https://ghostty.org/docs");
+    link.id = vt::hyperlink::Hyperlink::Id::makeExplicit((const uint8_t *)"compressed-page", 15);
+    vt::hyperlink::Id hyperlink_id;
+    ASSERT_TRUE(resident.insertHyperlink(link, &hyperlink_id) == vt::page::PageError::none);
+    ASSERT_TRUE(resident.setHyperlink(rac.row, rac.cell, hyperlink_id) == vt::page::PageError::none);
+    ASSERT_TRUE(resident.verifyIntegrity() == vt::page::PageError::none);
+
+    uint8_t *expected = dupeBytes(resident.memory, resident.memory_len);
+    uint8_t *const memory_ptr = resident.memory;
+    const size_t memory_len = resident.memory_len;
+
+    size_t required;
+    ASSERT_TRUE(CPage::requiredScratch(resident.memory_len, &required) == lz4::CompressError::none);
+    uint8_t *scratch = (uint8_t *)malloc(required);
+    static lz4::HashTable table;
+    CPage compressed;
+    ASSERT_TRUE(CPage::init(&resident, scratch, required, table, &compressed) == CPage::InitResult::ok);
+
+    ASSERT_TRUE(memory_ptr == compressed.page.memory);
+    ASSERT_TRUE(memory_len == compressed.page.memory_len);
+    ASSERT_TRUE(compressed.encoded_len < resident.memory_len);
+    uint8_t *expected_encoded = dupeBytes(compressed.encoded, compressed.encoded_len);
+
+    /* Virtual-memory operations belong to PageList, so clearing the contents
+     * models a successful decommit: none of the resident bytes remain. */
+    memset(resident.memory, 0, resident.memory_len);
+
+    /* A clone decodes into independent storage for read-only consumers which
+     * must not change the compressed representation. In particular, it does
+     * not recommit or overwrite the retained source mapping. */
+    uint8_t *clone_memory = (uint8_t *)_aligned_malloc(resident.memory_len, 4096);
+    TerminalPage cloned;
+    ASSERT_TRUE(compressed.cloneBuf(clone_memory, resident.memory_len, &cloned) == lz4::DecompressError::none);
+    ASSERT_TRUE(cloned.memory != memory_ptr);
+    ASSERT_TRUE(allEqual(resident.memory, resident.memory_len, 0));
+    ASSERT_TRUE(memcmp(expected_encoded, compressed.encoded, compressed.encoded_len) == 0);
+    ASSERT_TRUE(memcmp(expected, cloned.memory, memory_len) == 0);
+    ASSERT_TRUE(resident.size.cols == cloned.size.cols && resident.size.rows == cloned.size.rows);
+    ASSERT_TRUE(cloned.dirty);
+    ASSERT_TRUE(cloned.verifyIntegrity() == vt::page::PageError::none);
+
+    TerminalPage restored;
+    ASSERT_TRUE(compressed.restore(&restored) == lz4::DecompressError::none);
+    ASSERT_TRUE(memory_ptr == restored.memory);
+    ASSERT_TRUE(memory_len == restored.memory_len);
+    ASSERT_TRUE(memcmp(expected, restored.memory, memory_len) == 0);
+    ASSERT_TRUE(resident.size.cols == restored.size.cols && resident.size.rows == restored.size.rows);
+    ASSERT_TRUE(restored.dirty);
+    ASSERT_TRUE(restored.verifyIntegrity() == vt::page::PageError::none);
+
+    TerminalPage::RowAndCell restored_rac = restored.getRowAndCell(2, 3);
+    size_t glen = 0;
+    const uint32_t *g = restored.lookupGrapheme(restored_rac.cell, &glen);
+    ASSERT_TRUE(g && glen == 1 && g[0] == 0x0301);
+    ASSERT_TRUE(restored.styles.get((const void *)restored.memory, restored_rac.cell->style_id())->flags.bold);
+
+    vt::hyperlink::Id restored_hyperlink_id;
+    ASSERT_TRUE(restored.lookupHyperlink(restored_rac.cell, &restored_hyperlink_id));
+    const vt::hyperlink::PageEntry *restored_hyperlink =
+        restored.hyperlink_set.get((const void *)restored.memory, restored_hyperlink_id);
+    ASSERT_TRUE(restored_hyperlink->uri.len == link.uri_len);
+    ASSERT_TRUE(memcmp(restored_hyperlink->uri.slice((const void *)restored.memory), link.uri, link.uri_len) == 0);
+
+    _aligned_free(clone_memory);
+    free(expected_encoded);
+    compressed.deinit();
+    free(scratch);
+    free(expected);
+    resident.deinit();
+}
+
+TEST(compress_page, compressed_Page_requires_the_maximum_useful_scratch) {
+    TerminalPage resident;
+    ASSERT_TRUE(TerminalPage::init(vt::page::Capacity(4, 4), &resident));
+    uint8_t *expected = dupeBytes(resident.memory, resident.memory_len);
+
+    size_t required, bound;
+    ASSERT_TRUE(CPage::requiredScratch(resident.memory_len, &required) == lz4::CompressError::none);
+    ASSERT_TRUE(resident.memory_len - (sizeof(CPage) - sizeof(TerminalPage)) - 1 == required);
+    ASSERT_TRUE(compressBound(resident.memory_len, &bound) == lz4::CompressError::none);
+    ASSERT_TRUE(required < bound);
+
+    uint8_t *scratch = (uint8_t *)malloc(required - 1);
+    static lz4::HashTable table;
+    CPage compressed;
+    ASSERT_TRUE(CPage::init(&resident, scratch, required - 1, table, &compressed) ==
+                CPage::InitResult::OutputTooSmall);
+    ASSERT_TRUE(memcmp(expected, resident.memory, resident.memory_len) == 0);
+    free(scratch);
+    free(expected);
+    resident.deinit();
+}
+
+TEST(compress_page, compressed_Page_rejects_a_representation_without_savings) {
+    vt::page::Capacity cap(4, 4);
+    cap.styles = 0;
+    cap.grapheme_bytes = 0;
+    cap.string_bytes = 0;
+    cap.hyperlink_bytes = 0;
+    TerminalPage resident;
+    ASSERT_TRUE(TerminalPage::init(cap, &resident));
+
+    zigstd::DefaultPrng prng = zigstd::DefaultPrng::init(0x4C5A3402);
+    zigstd::Random(&prng).bytes(resident.memory, resident.memory_len);
+
+    size_t required;
+    ASSERT_TRUE(CPage::requiredScratch(resident.memory_len, &required) == lz4::CompressError::none);
+    uint8_t *scratch = (uint8_t *)malloc(required);
+    static lz4::HashTable table;
+    /* Wisp: upstream also passes a FailingAllocator(fail_index = 0) to prove
+     * that no allocation is attempted; ok_null returns before malloc. */
+    CPage compressed;
+    ASSERT_TRUE(CPage::init(&resident, scratch, required, table, &compressed) == CPage::InitResult::ok_null);
+    free(scratch);
+    resident.deinit();
+}
+
+TEST(compress_page, compressed_Page_can_retry_after_malformed_encoded_data) {
+    TerminalPage resident;
+    ASSERT_TRUE(TerminalPage::init(vt::page::Capacity(8, 8), &resident));
+    uint8_t *expected = dupeBytes(resident.memory, resident.memory_len);
+
+    size_t required;
+    ASSERT_TRUE(CPage::requiredScratch(resident.memory_len, &required) == lz4::CompressError::none);
+    uint8_t *scratch = (uint8_t *)malloc(required);
+    static lz4::HashTable table;
+    CPage compressed;
+    ASSERT_TRUE(CPage::init(&resident, scratch, required, table, &compressed) == CPage::InitResult::ok);
+
+    const size_t full_len = compressed.encoded_len;
+    const uint8_t first_byte = compressed.encoded[0];
+    compressed.encoded_len = 1;
+    compressed.encoded[0] = 0xF0;
+
+    uint8_t *clone_memory = (uint8_t *)_aligned_malloc(resident.memory_len, 4096);
+    TerminalPage out;
+    ASSERT_TRUE(compressed.cloneBuf(clone_memory, resident.memory_len, &out) == lz4::DecompressError::TruncatedInput);
+    ASSERT_TRUE(compressed.restore(&out) == lz4::DecompressError::TruncatedInput);
+
+    compressed.encoded_len = full_len;
+    compressed.encoded[0] = first_byte;
+    memset(resident.memory, 0, resident.memory_len);
+    TerminalPage restored;
+    ASSERT_TRUE(compressed.restore(&restored) == lz4::DecompressError::none);
+    ASSERT_TRUE(memcmp(expected, restored.memory, resident.memory_len) == 0);
+
+    _aligned_free(clone_memory);
+    compressed.deinit();
+    free(scratch);
+    free(expected);
+    resident.deinit();
+}
