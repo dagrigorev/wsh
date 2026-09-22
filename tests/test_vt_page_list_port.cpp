@@ -936,6 +936,548 @@ TEST(page_list, PageList_bounded_pruning_after_front_replacement_preserves_live_
     ASSERT_TRUE(expectLivePageSerialsValidForTest(&*s));
 }
 
+static bool statsEq(const PageList::MemoryStats &a, const PageList::MemoryStats &b) {
+    return a.resident_pages == b.resident_pages && a.compressed_pages == b.compressed_pages &&
+           a.raw_bytes == b.raw_bytes && a.resident_raw_bytes == b.resident_raw_bytes &&
+           a.decommitted_raw_bytes == b.decommitted_raw_bytes &&
+           a.resident_backing_bytes == b.resident_backing_bytes && a.encoded_bytes == b.encoded_bytes;
+}
+
+static uint8_t *dupeMem(const Page *p) {
+    uint8_t *d = (uint8_t *)malloc(p->memory_len);
+    memcpy(d, p->memory, p->memory_len);
+    return d;
+}
+
+static bool allZero(const uint8_t *p, size_t n) {
+    for (size_t i = 0; i < n; i++)
+        if (p[i]) return false;
+    return true;
+}
+
+TEST(page_list, PageList_bounded_pruning_after_middle_replacement_preserves_live_serials) {
+    ListHolder s(opts(80, 24, 3 * PageList::PagePool::item_size));
+
+    while (s->totalPages() < 3) (void)growNode(&*s);
+    Node *old = s->pages.first->next;
+    const uint64_t old_serial = old->serial;
+    Node *replacement;
+    ASSERT_TRUE(s->increaseCapacity(old, Maybe<PageList::IncreaseCapacity>(), &replacement) ==
+                PageList::IncreaseCapacityError::none);
+    ASSERT_TRUE(replacement != old);
+    ASSERT_FALSE(s->nodeIsValid(old, old_serial));
+
+    /* Prune the original first page and then the fresh middle replacement. */
+    for (int k = 0; k < 2; k++) {
+        ASSERT_TRUE(fillLastPageForTest(&*s));
+        (void)growNode(&*s);
+        ASSERT_TRUE(expectLivePageSerialsValidForTest(&*s));
+    }
+}
+
+TEST(page_list, PageList_incremental_compression_restarts_after_earlier_replacement) {
+    ListHolder s(opts(80, 24));
+    ASSERT_TRUE(growColdPagesForTest(&*s, 3));
+
+    (void)s->compress(CMode::incremental);
+    (void)s->compress(CMode::incremental);
+    ASSERT_TRUE(s->pages.first->isCompressed());
+    ASSERT_TRUE(s->pages.first->next->isCompressed());
+
+    /* Replace a page before the still-valid continuation marker. The list's
+     * allocation serial changes even though the marker itself remains, so the
+     * next step must restart and inspect the replacement. */
+    Node *old_first = s->pages.first;
+    const uint64_t old_serial = old_first->serial;
+    Node *replacement;
+    ASSERT_TRUE(s->increaseCapacity(old_first, PageList::IncreaseCapacity::grapheme_bytes, &replacement) ==
+                PageList::IncreaseCapacityError::none);
+    ASSERT_TRUE(replacement->serial != old_serial);
+    ASSERT_FALSE(replacement->isCompressed());
+
+    (void)s->compress(CMode::incremental);
+    ASSERT_TRUE(replacement->isCompressed());
+}
+
+TEST(page_list, PageList_incremental_compression_keeps_progress_after_tail_growth) {
+    const size_t max_inspected = PageList::incremental_compression_max_inspected;
+    ListHolder s(opts(80, 24));
+    ASSERT_TRUE(growColdPagesForTest(&*s, max_inspected + 1));
+    (void)s->compress(CMode::full);
+    s->page_compression.reset();
+    s->page_compression.markActivity();
+
+    Node *expected_last = s->pages.first;
+    for (size_t i = 1; i < max_inspected; i++) expected_last = expected_last->next;
+
+    const CResult first = s->compress(CMode::incremental);
+    ASSERT_TRUE(CResult::pending == first);
+    ASSERT_TRUE(expected_last->serial == s->page_compression.last_serial.value);
+
+    /* Allocate a new page at the active tail between steps. It is after the
+     * continuation marker and must not restart progress through cold history. */
+    const uint64_t next_serial = s->page_serial;
+    while (s->page_serial == next_serial) (void)growNode(&*s);
+    const CResult continued = s->compress(CMode::incremental);
+    ASSERT_TRUE(CResult::pending == continued);
+    ASSERT_TRUE(s->page_compression.flags.verifying);
+}
+
+TEST(page_list, PageList_memory_stats_do_not_restore_compressed_pages) {
+    ListHolder s(opts(80, 24));
+    ASSERT_TRUE(growColdPagesForTest(&*s, 2));
+
+    const PageList::MemoryStats before = s->memoryStats();
+    ASSERT_TRUE(s->totalPages() == before.resident_pages);
+    ASSERT_TRUE(0 == before.compressed_pages);
+    ASSERT_TRUE(s->page_size == before.raw_bytes);
+    ASSERT_TRUE(before.raw_bytes == before.resident_raw_bytes);
+    ASSERT_TRUE(0 == before.decommitted_raw_bytes);
+    ASSERT_TRUE(s->page_size == before.resident_backing_bytes);
+    ASSERT_TRUE(0 == before.encoded_bytes);
+    ASSERT_TRUE(before.resident_backing_bytes == before.estimatedResidentBytes());
+    ASSERT_TRUE(0 == before.estimatedSavings());
+
+    (void)s->compress(CMode::full);
+    Node *first = s->pages.first;
+    ASSERT_TRUE(Node::Storage::compressed == first->storage());
+    ASSERT_TRUE(first->pageIfResident() == nullptr);
+
+    const PageList::MemoryStats after = s->memoryStats();
+    ASSERT_TRUE(first->isCompressed());
+    ASSERT_TRUE(s->totalPages() == after.resident_pages + after.compressed_pages);
+    ASSERT_TRUE(2 == after.compressed_pages);
+    ASSERT_TRUE(s->page_size == after.raw_bytes);
+    ASSERT_TRUE(after.raw_bytes == after.resident_raw_bytes + after.decommitted_raw_bytes);
+    ASSERT_TRUE(after.resident_backing_bytes + after.encoded_bytes == after.estimatedResidentBytes());
+    ASSERT_TRUE(after.decommitted_raw_bytes - after.encoded_bytes == after.estimatedSavings());
+
+    const size_t first_raw_len = first->metadata()->memory_len;
+    const size_t first_encoded_len = first->data.compressed.encoded_len;
+    (void)first->page();
+    ASSERT_TRUE(Node::Storage::resident == first->storage());
+    ASSERT_TRUE(first->pageIfResident() != nullptr);
+
+    const PageList::MemoryStats restored = s->memoryStats();
+    ASSERT_TRUE(after.resident_pages + 1 == restored.resident_pages);
+    ASSERT_TRUE(after.compressed_pages - 1 == restored.compressed_pages);
+    ASSERT_TRUE(after.raw_bytes == restored.raw_bytes);
+    ASSERT_TRUE(after.resident_raw_bytes + first_raw_len == restored.resident_raw_bytes);
+    ASSERT_TRUE(after.decommitted_raw_bytes - first_raw_len == restored.decommitted_raw_bytes);
+    ASSERT_TRUE(after.resident_backing_bytes + first_raw_len == restored.resident_backing_bytes);
+    ASSERT_TRUE(after.encoded_bytes - first_encoded_len == restored.encoded_bytes);
+}
+
+TEST(page_list, PageList_preserved_page_keeps_compressed_storage) {
+    const zigstd::Allocator alloc = talloc();
+    ListHolder s(alloc, opts(80, 24));
+
+    Node *node = s->pages.first;
+    Page *resident = node->page();
+    resident->dirty = true;
+    *resident->getRowAndCell(3, 2).cell = page::Cell::init('X');
+
+    /* Resident nodes can be borrowed without allocating an unnecessary copy. */
+    {
+        zigstd::FailingAllocator failing(alloc, 0);
+        Node::PreservedPage preserved;
+        ASSERT_TRUE(node->pagePreservingState(failing.allocator(), &preserved));
+        ASSERT_TRUE(preserved.tag == Node::PreservedPage::Tag::borrowed);
+        ASSERT_TRUE(resident == preserved.borrowed);
+        ASSERT_FALSE(failing.has_induced_failure);
+        preserved.deinit();
+    }
+
+    uint8_t *expected = dupeMem(resident);
+    uint8_t *const retained_ptr = resident->memory;
+    const size_t mem_len = resident->memory_len;
+
+    ASSERT_TRUE(s->compressPage(node));
+    const PageList::MemoryStats stats = s->memoryStats();
+    const size_t enc_len = node->data.compressed.encoded_len;
+    uint8_t *expected_encoded = (uint8_t *)malloc(enc_len);
+    memcpy(expected_encoded, node->data.compressed.encoded, enc_len);
+
+    /* Test decommit simulates physical reclamation by clearing the retained
+     * mapping. A preserved page must decode elsewhere rather than restoring
+     * it. */
+    ASSERT_TRUE(allZero(node->metadata()->memory, mem_len));
+
+    /* Preserved-page allocation is opportunistic for callers. Failure leaves
+     * the node and its compressed representation untouched. */
+    {
+        zigstd::FailingAllocator failing(alloc, 0);
+        Node::PreservedPage p;
+        ASSERT_FALSE(node->pagePreservingState(failing.allocator(), &p));
+    }
+    ASSERT_TRUE(Node::Storage::compressed == node->storage());
+    ASSERT_TRUE(statsEq(stats, s->memoryStats()));
+
+    Node::PreservedPage preserved;
+    ASSERT_TRUE(node->pagePreservingState(alloc, &preserved));
+    ASSERT_TRUE(preserved.tag == Node::PreservedPage::Tag::owned);
+    const Page *page_ = preserved.page();
+
+    ASSERT_TRUE(page_->memory != retained_ptr);
+    ASSERT_TRUE(memcmp(expected, page_->memory, mem_len) == 0);
+    ASSERT_TRUE(page_->dirty);
+    ASSERT_TRUE('X' == page_->getRowAndCell(3, 2).cell->contentCodepoint());
+
+    /* The node still owns the same compressed representation, and neither its
+     * storage accounting nor its discarded raw mapping changed while cloning. */
+    ASSERT_TRUE(Node::Storage::compressed == node->storage());
+    ASSERT_TRUE(statsEq(stats, s->memoryStats()));
+    ASSERT_TRUE(retained_ptr == node->metadata()->memory);
+    ASSERT_TRUE(allZero(node->metadata()->memory, mem_len));
+    ASSERT_TRUE(memcmp(expected_encoded, node->data.compressed.encoded, enc_len) == 0);
+
+    preserved.deinit();
+    free(expected_encoded);
+    free(expected);
+}
+
+TEST(page_list, PageList_memory_stats_include_unused_pool_backing) {
+    ListHolder s(opts(80, 24));
+
+    /* Pool allocation ownership is based on the requested layout fitting in a
+     * standard item. The Page itself exposes only the initialized prefix. */
+    Node *node = s->createPage(PageList::CreatePage(Capacity(1, 1)));
+    ASSERT_TRUE(Node::Owned::pool == node->owned);
+    ASSERT_TRUE(node->page()->memory_len < PageList::PagePool::item_size);
+    node->page()->size.rows = 1;
+    s->pages.append(node);
+    s->total_rows += 1;
+
+    const size_t raw_len = node->metadata()->memory_len;
+    const PageList::MemoryStats before = s->memoryStats();
+    ASSERT_TRUE(before.raw_bytes < s->page_size);
+    ASSERT_TRUE(before.raw_bytes == before.resident_raw_bytes);
+    ASSERT_TRUE(s->page_size == before.resident_backing_bytes);
+    ASSERT_TRUE(s->page_size == before.estimatedResidentBytes());
+
+    ASSERT_TRUE(s->compressPage(node));
+    const size_t encoded_len = node->data.compressed.encoded_len;
+    const PageList::MemoryStats compressed = s->memoryStats();
+    ASSERT_TRUE(before.raw_bytes == compressed.raw_bytes);
+    ASSERT_TRUE(before.resident_raw_bytes - raw_len == compressed.resident_raw_bytes);
+    ASSERT_TRUE(raw_len == compressed.decommitted_raw_bytes);
+    ASSERT_TRUE(before.resident_backing_bytes - raw_len == compressed.resident_backing_bytes);
+    ASSERT_TRUE(encoded_len == compressed.encoded_bytes);
+    ASSERT_TRUE(before.estimatedResidentBytes() - raw_len + encoded_len == compressed.estimatedResidentBytes());
+}
+
+TEST(page_list, PageList_does_not_compress_the_mixed_history_and_active_page) {
+    ListHolder s(opts(80, 24));
+
+    /* One additional row creates history, but the history and all active rows
+     * still share the first page. The active boundary therefore has a
+     * historical prefix and must remain resident as one indivisible mapping. */
+    (void)growNode(&*s);
+    const Pin active = s->getTopLeft(point::Tag::active);
+    ASSERT_TRUE(s->pages.first == active.node);
+    ASSERT_TRUE(active.y > 0);
+
+    (void)s->compress(CMode::full);
+    ASSERT_FALSE(s->pages.first->isCompressed());
+}
+
+TEST(page_list, PageList_compresses_only_complete_cold_history_pages) {
+    const zigstd::Allocator alloc = talloc();
+
+    /* More active rows than one page at these dimensions can hold ensures the
+     * active area spans multiple nodes when the pass chooses its boundary. */
+    const size::CellCountInt active_rows = (size::CellCountInt)(PageList::initialCapacity(80).rows + 1);
+    ListHolder s(alloc, opts(80, active_rows));
+    ASSERT_TRUE(growColdPagesForTest(&*s, 2));
+
+    /* Move the active top into the boundary page so it has both a historical
+     * prefix and active rows while the active area still spans later pages. */
+    (void)growNode(&*s);
+
+    const Pin active = s->getTopLeft(point::Tag::active);
+    Node *active_node = active.node;
+    ASSERT_TRUE(active.y > 0);
+    ASSERT_TRUE(active_node != s->pages.last);
+
+    size_t expected_compressed = 0;
+    size_t expected_raw_bytes = 0;
+    for (Node *node = s->pages.first; node; node = node->next) {
+        if (node == active_node) break;
+        expected_compressed += 1;
+        expected_raw_bytes += node->metadata()->memory_len;
+    }
+    ASSERT_TRUE(2 == expected_compressed);
+
+    Node *first = s->pages.first;
+    *first->page()->getRowAndCell(0, 0).cell = page::Cell::init('X');
+    uint8_t *expected = dupeMem(first->page());
+    uint8_t *first_memory = first->page()->memory;
+    const size_t page_size = s->page_size;
+
+    (void)s->compress(CMode::full);
+    const PageList::MemoryStats memory = s->memoryStats();
+    ASSERT_TRUE(expected_compressed == memory.compressed_pages);
+    ASSERT_TRUE(expected_raw_bytes == memory.decommitted_raw_bytes);
+    ASSERT_TRUE(memory.encoded_bytes < memory.decommitted_raw_bytes);
+    ASSERT_TRUE(page_size == s->page_size);
+
+    size_t actual_encoded_bytes = 0;
+    for (Node *node = s->pages.first; node; node = node->next) {
+        if (node == active_node) break;
+        ASSERT_TRUE(node->isCompressed());
+        actual_encoded_bytes += node->data.compressed.encoded_len;
+    }
+    ASSERT_TRUE(actual_encoded_bytes == memory.encoded_bytes);
+    for (Node *node = active_node; node; node = node->next) {
+        ASSERT_FALSE(node->isCompressed());
+    }
+
+    /* Restoring the oldest page preserves both the mapping identity and all
+     * of its bytes even though the pass discarded its physical pages. */
+    ASSERT_TRUE(first_memory == first->metadata()->memory);
+    ASSERT_TRUE(memcmp(expected, first->page()->memory, first->page()->memory_len) == 0);
+    ASSERT_TRUE(first_memory == first->page()->memory);
+    free(expected);
+}
+
+TEST(page_list, PageList_lazily_restores_compressed_history_made_active_by_resize) {
+    ListHolder s(opts(80, 24));
+    ASSERT_TRUE(growColdPagesForTest(&*s, 1));
+
+    Node *first = s->pages.first;
+    *first->page()->getRowAndCell(0, 0).cell = page::Cell::init('X');
+    uint8_t *memory_ptr = first->page()->memory;
+    const size_t memory_len = first->page()->memory_len;
+    const size_t page_size = s->page_size;
+
+    (void)s->compress(CMode::full);
+    ASSERT_TRUE(first->isCompressed());
+
+    /* Pull all scrollback into the active area by making the viewport as tall
+     * as the complete screen. A row-only resize needs only page metadata, so
+     * the newly active page can remain compressed until its contents are used. */
+    const size::CellCountInt all_rows = (size::CellCountInt)s->total_rows;
+    {
+        PageList::Resize r;
+        r.rows = all_rows;
+        ASSERT_TRUE(s->resize(r));
+    }
+    const Pin active = s->getTopLeft(point::Tag::active);
+    ASSERT_TRUE(first == active.node);
+    ASSERT_TRUE(0 == active.y);
+    ASSERT_TRUE(first->isCompressed());
+    ASSERT_TRUE(page_size == s->page_size);
+
+    /* The compression pass must not reconsider the node now that it is active.
+     * Content access follows the normal page boundary, which recommits and
+     * restores the retained mapping before returning the cell. */
+    (void)s->compress(CMode::full);
+    ASSERT_TRUE(first->isCompressed());
+    const PageList::Cell cell = s->getCell(Point::active()).value;
+    ASSERT_TRUE('X' == cell.cell->contentCodepoint());
+    ASSERT_FALSE(first->isCompressed());
+    ASSERT_TRUE(memory_ptr == first->page()->memory);
+    ASSERT_TRUE(memory_len == first->page()->memory_len);
+    ASSERT_TRUE(page_size == s->page_size);
+}
+
+TEST(page_list, PageList_full_and_incremental_compression_skip_a_spanning_viewport) {
+    ListHolder full(opts(80, 24));
+    ASSERT_TRUE(growColdPagesForTest(&*full, 3));
+
+    ListHolder incremental(opts(80, 24));
+    ASSERT_TRUE(growColdPagesForTest(&*incremental, 3));
+
+    /* Start near the end of the first page so the viewport intersects both
+     * the first and second historical page mappings. */
+    Node *first = full->pages.first;
+    const size_t overlap_rows = full->rows / 2;
+    const size_t viewport_row = first->rows() - overlap_rows;
+    full->scroll(PageList::Scroll::rowAt(viewport_row));
+    incremental->scroll(PageList::Scroll::rowAt(viewport_row));
+    ASSERT_TRUE(full->getTopLeft(point::Tag::viewport).node !=
+                full->getBottomRight(point::Tag::viewport).value.node);
+    Node *second = first->next;
+    ASSERT_TRUE(first == full->getTopLeft(point::Tag::viewport).node);
+    ASSERT_TRUE(second == full->getBottomRight(point::Tag::viewport).value.node);
+
+    (void)full->compress(CMode::full);
+    (void)incremental->compress(CMode::drain);
+    ASSERT_TRUE(statsEq(full->memoryStats(), incremental->memoryStats()));
+    ASSERT_FALSE(first->isCompressed());
+    ASSERT_FALSE(second->isCompressed());
+
+    Node *full_active = full->getTopLeft(point::Tag::active).node;
+    Node *incremental_active = incremental->getTopLeft(point::Tag::active).node;
+    Node *full_node = full->pages.first;
+    Node *incremental_node = incremental->pages.first;
+    while (full_node != full_active) {
+        ASSERT_TRUE(full_node->isCompressed() == incremental_node->isCompressed());
+
+        full_node = full_node->next;
+        incremental_node = incremental_node->next;
+    }
+    ASSERT_TRUE(incremental_active == incremental_node);
+
+    PageList::CompressionIterator eligible = PageList::CompressionIterator::init(&*full);
+    size_t compressed_pages = 0;
+    while (Node *node = eligible.next()) {
+        compressed_pages += 1;
+        ASSERT_TRUE(node->isCompressed());
+    }
+    ASSERT_TRUE(compressed_pages > 0);
+}
+
+TEST(page_list, PageList_cold_compression_continues_after_an_incompressible_page) {
+    ListHolder s(opts(80, 24));
+    ASSERT_TRUE(growColdPagesForTest(&*s, 2));
+
+    Node *first = s->pages.first;
+    Node *second = first->next;
+    uint8_t *original = dupeMem(first->page());
+    zigstd::DefaultPrng prng = zigstd::DefaultPrng::init(0x434F4C4450414745ull);
+    zigstd::Random(&prng).bytes(first->page()->memory, first->page()->memory_len);
+
+    const size_t page_size = s->page_size;
+    (void)s->compress(CMode::full);
+    const PageList::MemoryStats memory = s->memoryStats();
+    ASSERT_TRUE(1 == memory.compressed_pages);
+    ASSERT_FALSE(first->isCompressed());
+    ASSERT_TRUE(second->isCompressed());
+    ASSERT_TRUE(second->metadata()->memory_len == memory.decommitted_raw_bytes);
+    ASSERT_TRUE(memory.encoded_bytes < memory.decommitted_raw_bytes);
+    ASSERT_TRUE(page_size == s->page_size);
+
+    /* Failed resident candidates are deliberately retried on later passes,
+     * while the successful page remains compressed and is skipped. */
+    (void)s->compress(CMode::full);
+    ASSERT_TRUE(statsEq(memory, s->memoryStats()));
+
+    /* Wisp: restore the valid page bytes before teardown. */
+    memcpy(first->page()->memory, original, first->page()->memory_len);
+    free(original);
+}
+
+TEST(page_list, PageList_compression_restores_through_page_access) {
+    const zigstd::Allocator alloc = talloc();
+    ListHolder s(alloc, opts(80, 24));
+
+    Node *node = s->pages.first;
+    Page *page = node->page();
+    page->dirty = true;
+    *page->getRowAndCell(3, 2).cell = page::Cell::init('X');
+
+    uint8_t *expected = dupeMem(page);
+    uint8_t *memory_ptr = page->memory;
+    const size_t memory_len = page->memory_len;
+    const size_t page_size = s->page_size;
+
+    ASSERT_TRUE(s->compressPage(node));
+    ASSERT_TRUE(node->isCompressed());
+    ASSERT_TRUE(24 == node->rows());
+    ASSERT_TRUE(80 == node->cols());
+    ASSERT_TRUE(memory_ptr == node->metadata()->memory);
+    ASSERT_TRUE(memory_len == node->metadata()->memory_len);
+    ASSERT_TRUE(page_size == s->page_size);
+
+    /* Pin access restores the page without changing its retained mapping. */
+    const Pin page_pin = Pin::at(node, 3, 2);
+    ASSERT_TRUE('X' == page_pin.rowAndCell().cell->contentCodepoint());
+    ASSERT_FALSE(node->isCompressed());
+    ASSERT_TRUE(memory_ptr == node->page()->memory);
+    ASSERT_TRUE(memcmp(expected, node->page()->memory, memory_len) == 0);
+    ASSERT_TRUE(node->page()->dirty);
+
+    /* Recompressing exercises reuse of the page-pool scratch item. Page
+     * iterator chunks also restore before exposing row memory. */
+    ASSERT_TRUE(s->compressPage(node));
+    PageList::PageIterator page_it = Pin(node).pageIterator(PageList::Direction::right_down, Maybe<Pin>());
+    PageList::Chunk chunk;
+    ASSERT_TRUE(page_it.next(&chunk));
+    size_t chunk_len;
+    (void)chunk.rows(&chunk_len);
+    ASSERT_TRUE(node->rows() == chunk_len);
+    ASSERT_FALSE(node->isCompressed());
+    ASSERT_TRUE(memcmp(expected, node->page()->memory, memory_len) == 0);
+
+    /* Read-only PageList operations restore through the same boundary. */
+    ASSERT_TRUE(s->compressPage(node));
+    PageList cloned;
+    ASSERT_TRUE(s->clone(alloc, PageList::Clone(Point::screen()), &cloned) == page::PageError::none);
+    ASSERT_FALSE(node->isCompressed());
+    ASSERT_TRUE('X' == cloned.pages.first->page()->getRowAndCell(3, 2).cell->contentCodepoint());
+    cloned.deinit();
+    free(expected);
+}
+
+TEST(page_list, PageList_compression_uses_temporary_scratch_for_oversized_pages) {
+    const zigstd::Allocator alloc = talloc();
+    ListHolder s(alloc, opts(80, 24));
+
+    Node *node = s->pages.first;
+    while (node->page()->memory_len <= PageList::std_size) {
+        ASSERT_TRUE(s->increaseCapacity(node, PageList::IncreaseCapacity::grapheme_bytes, &node) ==
+                    PageList::IncreaseCapacityError::none);
+    }
+
+    uint8_t *expected = dupeMem(node->page());
+    uint8_t *memory_ptr = node->page()->memory;
+    const size_t memory_len = node->page()->memory_len;
+    const size_t page_size = s->page_size;
+
+    ASSERT_TRUE(s->compressPage(node));
+    ASSERT_TRUE(node->isCompressed());
+    ASSERT_TRUE(page_size == s->page_size);
+    ASSERT_TRUE(memory_ptr == node->metadata()->memory);
+    ASSERT_TRUE(memory_len == node->metadata()->memory_len);
+
+    ASSERT_TRUE(memcmp(expected, node->page()->memory, memory_len) == 0);
+    ASSERT_FALSE(node->isCompressed());
+    ASSERT_TRUE(memory_ptr == node->page()->memory);
+    free(expected);
+}
+
+TEST(page_list, PageList_compression_leaves_incompressible_pages_resident) {
+    const zigstd::Allocator alloc = talloc();
+    ListHolder s(alloc, opts(80, 24));
+
+    Node *node = s->pages.first;
+    uint8_t *original = dupeMem(node->page());
+
+    zigstd::DefaultPrng prng = zigstd::DefaultPrng::init(0x504147454C495354ull);
+    zigstd::Random(&prng).bytes(node->page()->memory, node->page()->memory_len);
+    const size_t page_size = s->page_size;
+
+    ASSERT_FALSE(s->compressPage(node));
+    ASSERT_FALSE(node->isCompressed());
+    ASSERT_TRUE(page_size == s->page_size);
+
+    memcpy(node->page()->memory, original, node->page()->memory_len);
+    free(original);
+}
+
+TEST(page_list, PageList_reset_discards_malformed_compressed_data) {
+    ListHolder s(opts(80, 24));
+
+    Node *node = s->pages.first;
+    ASSERT_TRUE(s->compressPage(node));
+    memset(node->data.compressed.encoded, 0xFF, node->data.compressed.encoded_len);
+
+    s->reset();
+    ASSERT_FALSE(s->pages.first->isCompressed());
+    ASSERT_TRUE(1 == s->totalPages());
+}
+
+TEST(page_list, PageList_deinit_discards_malformed_compressed_data) {
+    PageList s;
+    ASSERT_TRUE(PageList::init(talloc(), opts(80, 24), &s));
+    Node *node = s.pages.first;
+    ASSERT_TRUE(s.compressPage(node));
+    memset(node->data.compressed.encoded, 0xFF, node->data.compressed.encoded_len);
+
+    s.deinit();
+}
+
 /* @@TESTS@@ */
 
 /* Wisp: std.testing.allocator's leak check. Runs last (registration order). */
