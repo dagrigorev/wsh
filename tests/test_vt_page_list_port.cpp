@@ -6465,6 +6465,348 @@ TEST(page_list, PageList_resize_reflow_less_cols_cursor_in_unchanged_row) {
     s->untrackPin(p);
 }
 
+static void cursorBlankSetup(PageList &s) {
+    ASSERT_TRUE(s.pages.first == s.pages.last);
+    fillX(s, s.pages.first->page(), 2);
+}
+
+TEST(page_list, PageList_resize_reflow_less_cols_cursor_in_blank_cell) {
+    ListHolder s(opts(6, 2));
+    cursorBlankSetup(*s);
+
+    /* Put a tracked pin in the history */
+    Pin *p = s->trackPin(s->pin(Point::active(2, 0)).value);
+
+    /* Resize */
+    ASSERT_TRUE(s->resize(rz(4, -1, true)));
+    ASSERT_TRUE(4 == s->cols);
+    ASSERT_TRUE(2 == s->totalRows());
+
+    /* Our cursor should not move */
+    ASSERT_TRUE(activeAt(*s, p, 2, 0));
+    s->untrackPin(p);
+}
+
+TEST(page_list, PageList_resize_reflow_less_cols_cursor_in_final_blank_cell) {
+    ListHolder s(opts(6, 2));
+    cursorBlankSetup(*s);
+
+    /* Put a tracked pin in the history */
+    Pin *p = s->trackPin(s->pin(Point::active(3, 0)).value);
+
+    /* Resize */
+    ASSERT_TRUE(s->resize(rz(4, -1, true)));
+    ASSERT_TRUE(4 == s->cols);
+    ASSERT_TRUE(2 == s->totalRows());
+
+    /* Our cursor should move to the first row */
+    ASSERT_TRUE(activeAt(*s, p, 3, 0));
+    s->untrackPin(p);
+}
+
+TEST(page_list, PageList_resize_reflow_less_cols_cursor_in_wrapped_blank_cell) {
+    ListHolder s(opts(6, 2));
+    cursorBlankSetup(*s);
+
+    /* Put a tracked pin in the history */
+    Pin *p = s->trackPin(s->pin(Point::active(5, 0)).value);
+
+    /* Resize */
+    ASSERT_TRUE(s->resize(rz(4, -1, true)));
+    ASSERT_TRUE(4 == s->cols);
+    ASSERT_TRUE(2 == s->totalRows());
+
+    /* Our cursor should move to the first row */
+    ASSERT_TRUE(activeAt(*s, p, 3, 0));
+    s->untrackPin(p);
+}
+
+TEST(page_list, PageList_resize_reflow_less_cols_blank_lines) {
+    ListHolder s(opts(4, 3, (size_t)0));
+    ASSERT_TRUE(s->pages.first == s->pages.last);
+    Page *page = s->pages.first->page();
+    for (size_t x = 0; x < 4; x++) *page->getRowAndCell(x, 0).cell = page::Cell::init((uint32_t)x);
+
+    /* Resize */
+    ASSERT_TRUE(s->resize(rz(2, -1, true)));
+    ASSERT_TRUE(2 == s->cols);
+    ASSERT_TRUE(3 == s->totalRows());
+
+    PageList::RowIterator it = s->rowIterator(Dir::right_down, Point::active());
+    /* First row should be wrapped */
+    ASSERT_TRUE(nextRowIs(it, true, 2, 0));
+    ASSERT_TRUE(nextRowIs(it, false, 2, 2));
+}
+
+TEST(page_list, PageList_resize_reflow_less_cols_blank_lines_between) {
+    ListHolder s(opts(4, 3, (size_t)0));
+    ASSERT_TRUE(s->pages.first == s->pages.last);
+    Page *page = s->pages.first->page();
+    for (size_t x = 0; x < 4; x++) *page->getRowAndCell(x, 0).cell = page::Cell::init((uint32_t)x);
+    for (size_t x = 0; x < 4; x++) *page->getRowAndCell(x, 2).cell = page::Cell::init((uint32_t)x);
+
+    /* Resize */
+    ASSERT_TRUE(s->resize(rz(2, -1, true)));
+    ASSERT_TRUE(2 == s->cols);
+    ASSERT_TRUE(5 == s->totalRows());
+
+    PageList::RowIterator it = s->rowIterator(Dir::right_down, Point::active());
+    {
+        Pin offset;
+        ASSERT_TRUE(it.next(&offset));
+        ASSERT_FALSE(offset.rowAndCell().row->wrap());
+    }
+    ASSERT_TRUE(nextRowIs(it, true, 2, 0));
+    ASSERT_TRUE(nextRowIs(it, false, 2, 2));
+}
+
+TEST(page_list, PageList_resize_reflow_less_cols_blank_lines_between_no_scrollback) {
+    ListHolder s(opts(5, 3, (size_t)0));
+    ASSERT_TRUE(s->pages.first == s->pages.last);
+    Page *page = s->pages.first->page();
+    *page->getRowAndCell(0, 0).cell = page::Cell::init('A');
+    *page->getRowAndCell(0, 2).cell = page::Cell::init('C');
+
+    /* Resize */
+    ASSERT_TRUE(s->resize(rz(2, -1, true)));
+    ASSERT_TRUE(2 == s->cols);
+    ASSERT_TRUE(3 == s->totalRows());
+
+    PageList::RowIterator it = s->rowIterator(Dir::right_down, Point::active());
+    ASSERT_TRUE(nextRowIs(it, false, 2, 'A'));
+    {
+        Pin offset;
+        ASSERT_TRUE(it.next(&offset));
+        const Page::RowAndCell rac = offset.rowAndCell();
+        ASSERT_TRUE(0 == offset.node->page()->getCells(rac.row)[0].contentCodepoint());
+    }
+    ASSERT_TRUE(nextRowIs(it, false, 2, 'C'));
+}
+
+TEST(page_list, PageList_resize_reflow_less_cols_cursor_not_on_last_line_preserves_location) {
+    ListHolder s(opts(5, 5, (size_t)1));
+    ASSERT_TRUE(s->pages.first == s->pages.last);
+    fillX(*s, s->pages.first->page(), 2);
+
+    /* Grow blank rows to push our rows back into scrollback */
+    ASSERT_TRUE(s->growRows(5));
+    ASSERT_TRUE(10 == s->totalRows());
+
+    /* Put a tracked pin in the history */
+    Pin *p = s->trackPin(s->pin(Point::active(0, 0)).value);
+
+    /* Resize */
+    /* Important: not on last row */
+    ASSERT_TRUE(s->resize(rzc(4, -1, true, 1, 1)));
+    ASSERT_TRUE(4 == s->cols);
+    ASSERT_TRUE(10 == s->totalRows());
+
+    /* Our cursor should move to the first row */
+    ASSERT_TRUE(activeAt(*s, p, 0, 0));
+    s->untrackPin(p);
+}
+
+TEST(page_list, PageList_resize_reflow_less_cols_no_scrollback_pull_blank_active) {
+    ListHolder s(opts(5, 5, (size_t)1));
+    ASSERT_TRUE(s->pages.first == s->pages.last);
+    fillX(*s, s->pages.first->page(), 2);
+
+    /* Grow blank rows to push our rows back into scrollback */
+    ASSERT_TRUE(s->growRows(5));
+    ASSERT_TRUE(10 == s->totalRows());
+
+    Pin *p = s->trackPin(s->pin(Point::active(0, 0)).value);
+
+    /* Resize with no cursor. Normally the trailing blank rows would be
+     * trimmed and the active area would slide up over our history. */
+    PageList::Resize r = rz(4, -1, true);
+    r.pull_scrollback = false;
+    ASSERT_TRUE(s->resize(r));
+    ASSERT_TRUE(4 == s->cols);
+    ASSERT_TRUE(10 == s->totalRows());
+
+    /* The top of the active area should not move */
+    ASSERT_TRUE(activeAt(*s, p, 0, 0));
+    s->untrackPin(p);
+}
+
+TEST(page_list, PageList_resize_reflow_less_cols_copy_style) {
+    ListHolder s(opts(4, 2, (size_t)0));
+    {
+        ASSERT_TRUE(s->pages.first == s->pages.last);
+        Page *page = s->pages.first->page();
+
+        /* Create a style */
+        style::Style st;
+        st.flags.bold = true;
+        style::Id style_id;
+        ASSERT_TRUE(page->styles.add((const void *)page->memory, st, &style_id) == ref_counted_set::AddError::none);
+
+        for (size_t x = 0; x < (size_t)s->cols - 1; x++) {
+            page::Cell c = page::Cell::init((uint32_t)x);
+            c.setStyleId(style_id);
+            *page->getRowAndCell(x, 0).cell = c;
+            page->styles.use((const void *)page->memory, style_id);
+        }
+
+        /* We're over-counted by 1 because `add` implies `use`. */
+        page->styles.release((const void *)page->memory, style_id);
+    }
+
+    /* Resize */
+    ASSERT_TRUE(s->resize(rz(2, -1, true)));
+    ASSERT_TRUE(2 == s->cols);
+    ASSERT_TRUE(2 == s->totalRows());
+
+    PageList::RowIterator it = s->rowIterator(Dir::right_down, Point::active());
+    Pin offset;
+    while (it.next(&offset)) {
+        for (size_t x = 0; x < (size_t)s->cols - 1; x++) {
+            Pin offset_copy = offset;
+            offset_copy.x = (size::CellCountInt)x;
+            const Page::RowAndCell rac = offset_copy.rowAndCell();
+            const style::Id style_id = rac.cell->style_id();
+            ASSERT_TRUE(style_id != 0);
+
+            const style::Style *st =
+                offset.node->page()->styles.get((const void *)offset.node->page()->memory, style_id);
+            ASSERT_TRUE(st->flags.bold);
+
+            ASSERT_TRUE(rac.row->styled());
+        }
+    }
+}
+
+TEST(page_list, PageList_resize_reflow_less_cols_to_eliminate_a_wide_char) {
+    ListHolder s(opts(2, 1, (size_t)0));
+    {
+        ASSERT_TRUE(s->pages.first == s->pages.last);
+        Page *page = s->pages.first->page();
+        *page->getRowAndCell(0, 0).cell = wideCell(0x1F600, Wide::wide);
+        *page->getRowAndCell(1, 0).cell = wideCell(0, Wide::spacer_tail);
+    }
+
+    /* Resize */
+    ASSERT_TRUE(s->resize(rz(1, -1, true)));
+    ASSERT_TRUE(1 == s->cols);
+    ASSERT_TRUE(1 == s->totalRows());
+
+    {
+        ASSERT_TRUE(s->pages.first == s->pages.last);
+        ASSERT_TRUE(cellIs(s->pages.first->page(), 0, 0, 0, Wide::narrow));
+    }
+}
+
+TEST(page_list, PageList_resize_reflow_less_cols_to_wrap_a_wide_char) {
+    ListHolder s(opts(3, 1, (size_t)0));
+    {
+        ASSERT_TRUE(s->pages.first == s->pages.last);
+        Page *page = s->pages.first->page();
+        *page->getRowAndCell(0, 0).cell = page::Cell::init('x');
+        *page->getRowAndCell(1, 0).cell = wideCell(0x1F600, Wide::wide);
+        *page->getRowAndCell(2, 0).cell = wideCell(0, Wide::spacer_tail);
+    }
+
+    /* Resize */
+    ASSERT_TRUE(s->resize(rz(2, -1, true)));
+    ASSERT_TRUE(2 == s->cols);
+    ASSERT_TRUE(2 == s->totalRows());
+
+    {
+        ASSERT_TRUE(s->pages.first == s->pages.last);
+        Page *page = s->pages.first->page();
+
+        ASSERT_TRUE(cellIs(page, 0, 0, 'x', Wide::narrow));
+        ASSERT_TRUE(page->getRowAndCell(0, 0).row->wrap());
+        ASSERT_TRUE(cellIs(page, 1, 0, 0, Wide::spacer_head));
+        ASSERT_TRUE(cellIs(page, 0, 1, 0x1F600, Wide::wide));
+        ASSERT_TRUE(cellIs(page, 1, 1, 0, Wide::spacer_tail));
+    }
+}
+
+static void widePairs(Page *page, size_t n) {
+    for (size_t i = 0; i < n; i++) {
+        *page->getRowAndCell(i * 2, 0).cell = wideCell((uint32_t)(0x4E00 + i), Wide::wide);
+        *page->getRowAndCell(i * 2 + 1, 0).cell = wideCell(0, Wide::spacer_tail);
+    }
+}
+
+static bool pairsAt(Page *page, size_t n) {
+    for (size_t i = 0; i < n; i++) {
+        const size_t y = i / 2;
+        const size_t x = (i % 2) * 2;
+        if (!cellIs(page, x, y, (uint32_t)(0x4E00 + i), Wide::wide)) return false;
+        if (!cellIs(page, x + 1, y, 0, Wide::spacer_tail)) return false;
+    }
+    return true;
+}
+
+TEST(page_list, PageList_resize_reflow_less_cols_wide_char_bulk_run) {
+    ListHolder s(opts(8, 1, (size_t)0));
+    {
+        ASSERT_TRUE(s->pages.first == s->pages.last);
+        /* A full row of wide character pairs so the reflow takes
+         * the bulk run path. */
+        widePairs(s->pages.first->page(), 4);
+    }
+
+    /* Resize to exactly two pairs per row: runs end on the row
+     * boundary with no spacer heads needed. */
+    ASSERT_TRUE(s->resize(rz(4, -1, true)));
+    ASSERT_TRUE(4 == s->cols);
+    ASSERT_TRUE(2 == s->totalRows());
+
+    {
+        ASSERT_TRUE(s->pages.first == s->pages.last);
+        Page *page = s->pages.first->page();
+
+        ASSERT_TRUE(pairsAt(page, 4));
+
+        {
+            const page::Row *row = page->getRowAndCell(0, 0).row;
+            ASSERT_TRUE(row->wrap());
+            ASSERT_FALSE(row->wrap_continuation());
+        }
+        {
+            const page::Row *row = page->getRowAndCell(0, 1).row;
+            ASSERT_FALSE(row->wrap());
+            ASSERT_TRUE(row->wrap_continuation());
+        }
+    }
+}
+
+TEST(page_list, PageList_resize_reflow_less_cols_wide_char_bulk_run_odd_cols_spacer_head) {
+    ListHolder s(opts(8, 1, (size_t)0));
+    {
+        ASSERT_TRUE(s->pages.first == s->pages.last);
+        widePairs(s->pages.first->page(), 4);
+    }
+
+    /* Resize to an odd number of columns: the bulk run must stop a
+     * pair short of the row boundary and the slow path inserts a
+     * spacer head in the final column. */
+    ASSERT_TRUE(s->resize(rz(5, -1, true)));
+    ASSERT_TRUE(5 == s->cols);
+    ASSERT_TRUE(2 == s->totalRows());
+
+    {
+        ASSERT_TRUE(s->pages.first == s->pages.last);
+        Page *page = s->pages.first->page();
+
+        ASSERT_TRUE(pairsAt(page, 4));
+
+        {
+            ASSERT_TRUE(cellIs(page, 4, 0, 0, Wide::spacer_head));
+            ASSERT_TRUE(page->getRowAndCell(4, 0).row->wrap());
+        }
+        {
+            const Page::RowAndCell rac = page->getRowAndCell(4, 1);
+            ASSERT_TRUE(Wide::narrow == rac.cell->wide());
+            ASSERT_TRUE(rac.row->wrap_continuation());
+        }
+    }
+}
+
 /* @@TESTS@@ */
 
 /* Wisp: std.testing.allocator's leak check. Runs last (registration order). */
