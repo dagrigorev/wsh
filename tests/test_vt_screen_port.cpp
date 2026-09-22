@@ -2529,6 +2529,266 @@ TEST(screen, Screen__resize_errors_preserve_state) {
     }
 }
 
+TEST(screen, Screen__resize_cursor_references_when_node_survives) {
+
+    SCREEN(s, 5, 3, (size_t)1000);
+
+    NOERR(s.setAttribute(attr(A::bold)));
+    NOERR(startLink(s, "https://example.com/", "resize"));
+    WRITE(s, "abc");
+
+    PageList::Node *original_node = s.cursor.page_pin->node;
+    const uint64_t original_serial = original_node->serial;
+    {
+        Page *page = original_node->page();
+        ASSERT_TRUE(4 == page->styles.refCount((const void *)page->memory, s.cursor.style_id));
+        ASSERT_TRUE(4 == page->hyperlink_set.refCount((const void *)page->memory, s.cursor.hyperlink_id));
+    }
+
+    /* A row-only resize grows the existing page without replacing the
+     * cursor's node. The temporary resize references must be released from
+     * this page after the cursor state is restored. */
+    ASSERT_TRUE(s.resize(rsz(5, 4)));
+
+    ASSERT_TRUE(original_node == s.cursor.page_pin->node);
+    ASSERT_TRUE(original_serial == s.cursor.page_pin->node->serial);
+    {
+        Page *page = s.cursor.page_pin->node->page();
+        ASSERT_TRUE(4 == page->styles.refCount((const void *)page->memory, s.cursor.style_id));
+        ASSERT_TRUE(4 == page->hyperlink_set.refCount((const void *)page->memory, s.cursor.hyperlink_id));
+    }
+}
+
+TEST(screen, Screen__resize_cursor_references_when_node_is_replaced) {
+
+    SCREEN(s, 5, 3, (size_t)1000);
+
+    NOERR(s.setAttribute(attr(A::bold)));
+    NOERR(startLink(s, "https://example.com/", "resize"));
+    WRITE(s, "abc");
+
+    PageList::Node *original_node = s.cursor.page_pin->node;
+    const uint64_t original_serial = original_node->serial;
+    {
+        Page *page = original_node->page();
+        ASSERT_TRUE(4 == page->styles.refCount((const void *)page->memory, s.cursor.style_id));
+        ASSERT_TRUE(4 == page->hyperlink_set.refCount((const void *)page->memory, s.cursor.hyperlink_id));
+    }
+
+    /* A column resize with reflow replaces the page and remaps the tracked
+     * cursor pin. The old page owns the temporary references, so destroying
+     * it must account for them without attempting to release them afterward. */
+    ASSERT_TRUE(s.resize(rsz(10, 3)));
+
+    ASSERT_TRUE(s.cursor.page_pin->node != original_node || s.cursor.page_pin->node->serial != original_serial);
+    {
+        Page *page = s.cursor.page_pin->node->page();
+        ASSERT_TRUE(4 == page->styles.refCount((const void *)page->memory, s.cursor.style_id));
+        ASSERT_TRUE(4 == page->hyperlink_set.refCount((const void *)page->memory, s.cursor.hyperlink_id));
+    }
+}
+
+TEST(screen, Screen__resize_more_rows_and_cols_with_wrapping) {
+
+    SCREEN(s, 2, 4, (size_t)0);
+    const char *str = "1A2B\n3C4D";
+    WRITE(s, str);
+    EXPECT_DUMP(s, viewport, "1A\n2B\n3C\n4D");
+
+    ASSERT_TRUE(s.resize(rsz(5, 10)));
+
+    /* Cursor should move due to wrapping */
+    ASSERT_TRUE(3 == s.cursor.x);
+    ASSERT_TRUE(1 == s.cursor.y);
+
+    EXPECT_DUMP(s, viewport, str);
+    EXPECT_DUMP(s, screen, str);
+}
+
+TEST(screen, Screen__resize_less_rows_no_scrollback) {
+
+    SCREEN(s, 5, 3, (size_t)0);
+    const char *str = "1ABCD\n2EFGH\n3IJKL";
+    WRITE(s, str);
+
+    s.cursorAbsolute(0, 0);
+    const Screen::Cursor cursor = s.cursor;
+    ASSERT_TRUE(s.resize(rsz(5, 1)));
+
+    /* Cursor should not move */
+    ASSERT_TRUE(cursor.x == s.cursor.x);
+    ASSERT_TRUE(cursor.y == s.cursor.y);
+
+    EXPECT_DUMP(s, viewport, "3IJKL");
+    EXPECT_DUMP(s, screen, "3IJKL");
+}
+
+TEST(screen, Screen__resize_less_rows_moving_cursor) {
+
+    SCREEN(s, 5, 3, (size_t)0);
+    const char *str = "1ABCD\n2EFGH\n3IJKL";
+    WRITE(s, str);
+
+    /* Put our cursor on the last line */
+    s.cursorAbsolute(1, 2);
+    EXPECT_CURSOR_CP(s, 'I');
+
+    /* Resize */
+    ASSERT_TRUE(s.resize(rsz(5, 1)));
+
+    EXPECT_DUMP(s, viewport, "3IJKL");
+    EXPECT_DUMP(s, screen, "3IJKL");
+
+    /* Cursor should be on the last line */
+    ASSERT_TRUE(1 == s.cursor.x);
+    ASSERT_TRUE(0 == s.cursor.y);
+}
+
+TEST(screen, Screen__resize_less_rows_with_empty_scrollback) {
+
+    SCREEN(s, 5, 3, (size_t)10);
+    const char *str = "1ABCD\n2EFGH\n3IJKL";
+    WRITE(s, str);
+    ASSERT_TRUE(s.resize(rsz(5, 1)));
+
+    EXPECT_DUMP(s, screen, str);
+    EXPECT_DUMP(s, viewport, "3IJKL");
+}
+
+TEST(screen, Screen__resize_less_rows_with_populated_scrollback) {
+
+    SCREEN(s, 5, 3, (size_t)5);
+    const char *str = "1ABCD\n2EFGH\n3IJKL\n4ABCD\n5EFGH";
+    WRITE(s, str);
+    EXPECT_DUMP(s, viewport, "3IJKL\n4ABCD\n5EFGH");
+
+    /* Resize */
+    ASSERT_TRUE(s.resize(rsz(5, 1)));
+
+    EXPECT_DUMP(s, screen, str);
+    EXPECT_DUMP(s, viewport, "5EFGH");
+}
+
+TEST(screen, Screen__resize_less_rows_with_full_scrollback) {
+
+    SCREEN(s, 5, 3, (size_t)3);
+    const char *str = "00000\n1ABCD\n2EFGH\n3IJKL\n4ABCD\n5EFGH";
+    WRITE(s, str);
+    EXPECT_DUMP(s, viewport, "3IJKL\n4ABCD\n5EFGH");
+
+    ASSERT_TRUE(4 == s.cursor.x);
+    ASSERT_TRUE(2 == s.cursor.y);
+
+    /* Resize */
+    ASSERT_TRUE(s.resize(rsz(5, 2)));
+
+    /* Cursor should stay in the same relative place (bottom of the
+     * screen, same character). */
+    ASSERT_TRUE(4 == s.cursor.x);
+    ASSERT_TRUE(1 == s.cursor.y);
+
+    EXPECT_DUMP(s, screen, "00000\n1ABCD\n2EFGH\n3IJKL\n4ABCD\n5EFGH");
+    EXPECT_DUMP(s, viewport, "4ABCD\n5EFGH");
+}
+
+TEST(screen, Screen__resize_less_cols_no_reflow) {
+
+    SCREEN(s, 5, 3, (size_t)0);
+    const char *str = "1AB\n2EF\n3IJ";
+    WRITE(s, str);
+
+    s.cursorAbsolute(0, 0);
+    const Screen::Cursor cursor = s.cursor;
+    ASSERT_TRUE(s.resize(rsz(3, 3)));
+
+    /* Cursor should not move */
+    ASSERT_TRUE(cursor.x == s.cursor.x);
+    ASSERT_TRUE(cursor.y == s.cursor.y);
+
+    EXPECT_DUMP(s, viewport, str);
+    EXPECT_DUMP(s, screen, str);
+}
+
+TEST(screen, Screen__resize_less_cols_with_reflow_but_row_space) {
+
+    SCREEN(s, 5, 3, (size_t)1);
+    const char *str = "1ABCD";
+    WRITE(s, str);
+
+    /* Put our cursor on the end */
+    s.cursorAbsolute(4, 0);
+    EXPECT_CURSOR_CP(s, 'D');
+
+    ASSERT_TRUE(s.resize(rsz(3, 3)));
+    EXPECT_DUMP(s, viewport, "1AB\nCD");
+    EXPECT_DUMP(s, screen, "1AB\nCD");
+
+    /* Cursor should be on the last line */
+    ASSERT_TRUE(1 == s.cursor.x);
+    ASSERT_TRUE(1 == s.cursor.y);
+}
+
+TEST(screen, Screen__resize_less_cols_with_reflow_with_trimmed_rows) {
+
+    SCREEN(s, 5, 3, (size_t)0);
+    const char *str = "3IJKL\n4ABCD\n5EFGH";
+    WRITE(s, str);
+    ASSERT_TRUE(s.resize(rsz(3, 3)));
+
+    EXPECT_DUMP(s, viewport, "CD\n5EF\nGH");
+    EXPECT_DUMP(s, screen, "CD\n5EF\nGH");
+}
+
+TEST(screen, Screen__resize_less_cols_with_reflow_with_trimmed_rows_and_scrollback) {
+
+    SCREEN(s, 5, 3, (size_t)1);
+    const char *str = "3IJKL\n4ABCD\n5EFGH";
+    WRITE(s, str);
+    ASSERT_TRUE(s.resize(rsz(3, 3)));
+
+    EXPECT_DUMP(s, viewport, "CD\n5EF\nGH");
+    EXPECT_DUMP(s, screen, "3IJ\nKL\n4AB\nCD\n5EF\nGH");
+}
+
+TEST(screen, Screen__resize_less_cols_with_reflow_previously_wrapped) {
+
+    SCREEN(s, 5, 3, (size_t)0);
+    const char *str = "3IJKL4ABCD5EFGH";
+    WRITE(s, str);
+
+    /* Check */
+    EXPECT_DUMP(s, screen, "3IJKL\n4ABCD\n5EFGH");
+
+    ASSERT_TRUE(s.resize(rsz(3, 3)));
+
+    /* {
+     * const contents = try s.testString(alloc, .viewport);
+     * defer alloc.free(contents);
+     * const expected = "CD\n5EF\nGH";
+     * try testing.expectEqualStrings(expected, contents);
+     * } */
+    EXPECT_DUMP(s, screen, "ABC\nD5E\nFGH");
+}
+
+TEST(screen, Screen__resize_less_cols_with_reflow_and_scrollback) {
+
+    SCREEN(s, 5, 3, (size_t)5);
+    const char *str = "1A\n2B\n3C\n4D\n5E";
+    WRITE(s, str);
+
+    /* Put our cursor on the end */
+    s.cursorAbsolute(1, s.pages.rows - 1);
+    EXPECT_CURSOR_CP(s, 'E');
+
+    ASSERT_TRUE(s.resize(rsz(3, 3)));
+
+    EXPECT_DUMP(s, viewport, "3C\n4D\n5E");
+
+    /* Cursor should be on the last line */
+    ASSERT_TRUE(1 == s.cursor.x);
+    ASSERT_TRUE(2 == s.cursor.y);
+}
+
 /* @@TESTS@@ */
 
 /* Wisp: std.testing.allocator's leak check. Runs last (registration order). */
