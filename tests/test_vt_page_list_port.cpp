@@ -7818,6 +7818,562 @@ TEST(page_list, PageList_split_moves_tracked_pins) {
     s->untrackPin(tracked);
 }
 
+static page::Cell bgPalette(uint8_t idx) {
+    page::Cell c;
+    c.setContentTag(page::Cell::ContentTag::bg_color_palette);
+    c.setContentColorPalette(idx);
+    return c;
+}
+
+static void markRowMeta(page::Row *row) {
+    row->setWrap(true);
+    row->setWrapContinuation(true);
+    row->setSemanticPrompt(SP::prompt);
+}
+
+static bool rowDefaultMeta(const page::Row *row) {
+    return !row->wrap() && !row->wrap_continuation() && row->semantic_prompt() == SP::none;
+}
+
+TEST(page_list, PageList_split_tracked_pin_before_split_point_unchanged) {
+    ListHolder s(opts(10, 10, (size_t)0));
+
+    Node *original_node = s->pages.first;
+
+    /* Track a pin at row 2 (before the split point) */
+    Pin *tracked = s->trackPin(Pin(original_node, 2, 5));
+
+    /* Split at row 5 */
+    ASSERT_TRUE(s->split(Pin(original_node, 5, 0)) == PageList::SplitError::none);
+
+    /* The tracked pin should remain in the original page */
+    ASSERT_TRUE(tracked->node == s->pages.first);
+    /* y and x should be unchanged */
+    ASSERT_TRUE(2 == tracked->y);
+    ASSERT_TRUE(5 == tracked->x);
+    s->untrackPin(tracked);
+}
+
+TEST(page_list, PageList_split_tracked_pin_at_split_point_moves_to_new_page) {
+    ListHolder s(opts(10, 10, (size_t)0));
+
+    Node *original_node = s->pages.first;
+
+    /* Track a pin at the exact split point (row 5) */
+    Pin *tracked = s->trackPin(Pin(original_node, 5, 4));
+
+    /* Split at row 5 */
+    ASSERT_TRUE(s->split(Pin(original_node, 5, 0)) == PageList::SplitError::none);
+
+    /* The tracked pin should be in the new page */
+    ASSERT_TRUE(tracked->node == s->pages.first->next);
+    /* y should be 0 since it was at the split point: 5 - 5 = 0 */
+    ASSERT_TRUE(0 == tracked->y);
+    /* x should remain unchanged */
+    ASSERT_TRUE(4 == tracked->x);
+    s->untrackPin(tracked);
+}
+
+TEST(page_list, PageList_split_multiple_tracked_pins_across_regions) {
+    ListHolder s(opts(10, 10, (size_t)0));
+
+    Node *original_node = s->pages.first;
+
+    /* Track multiple pins in different regions */
+    Pin *pin_before = s->trackPin(Pin(original_node, 1, 0));
+    Pin *pin_at_split = s->trackPin(Pin(original_node, 5, 2));
+    Pin *pin_after1 = s->trackPin(Pin(original_node, 7, 3));
+    Pin *pin_after2 = s->trackPin(Pin(original_node, 9, 8));
+
+    /* Split at row 5 */
+    ASSERT_TRUE(s->split(Pin(original_node, 5, 0)) == PageList::SplitError::none);
+
+    Node *first_page = s->pages.first;
+    Node *second_page = first_page->next;
+
+    /* Pin before split point stays in original page */
+    ASSERT_TRUE(pinAtNode(pin_before, first_page, 1, 0));
+
+    /* Pin at split point moves to new page with y=0 */
+    ASSERT_TRUE(pinAtNode(pin_at_split, second_page, 0, 2));
+
+    /* Pins after split point move to new page with adjusted y */
+    ASSERT_TRUE(pinAtNode(pin_after1, second_page, 2, 3)); /* 7 - 5 = 2 */
+    ASSERT_TRUE(pinAtNode(pin_after2, second_page, 4, 8)); /* 9 - 5 = 4 */
+
+    s->untrackPin(pin_after2);
+    s->untrackPin(pin_after1);
+    s->untrackPin(pin_at_split);
+    s->untrackPin(pin_before);
+}
+
+TEST(page_list, PageList_split_tracked_viewport_pin_in_split_region_moves_correctly) {
+    ListHolder s(opts(10, 10, (size_t)0));
+
+    Node *original_node = s->pages.first;
+
+    /* Set viewport_pin to row 7 (after split point) */
+    s->viewport_pin->node = original_node;
+    s->viewport_pin->y = 7;
+    s->viewport_pin->x = 6;
+
+    /* Split at row 5 */
+    ASSERT_TRUE(s->split(Pin(original_node, 5, 0)) == PageList::SplitError::none);
+
+    /* viewport_pin should be in the new page */
+    ASSERT_TRUE(s->viewport_pin->node == s->pages.first->next);
+    /* y should be adjusted: 7 - 5 = 2 */
+    ASSERT_TRUE(2 == s->viewport_pin->y);
+    /* x should remain unchanged */
+    ASSERT_TRUE(6 == s->viewport_pin->x);
+}
+
+TEST(page_list, PageList_split_middle_page_preserves_linked_list_order) {
+    /* Create a single page with 12 rows */
+    ListHolder s(opts(10, 12, (size_t)0));
+
+    /* Split at row 4 to create: page1 (rows 0-3), page2 (rows 4-11) */
+    Node *first_node = s->pages.first;
+    ASSERT_TRUE(s->split(Pin(first_node, 4, 0)) == PageList::SplitError::none);
+
+    /* Now we have 2 pages */
+    Node *page1 = s->pages.first;
+    Node *page2 = s->pages.first->next;
+    ASSERT_TRUE(4 == page1->rows());
+    ASSERT_TRUE(8 == page2->rows());
+
+    /* Split page2 at row 4 to create: page1 -> page2 (rows 0-3) -> page3 (rows 4-7) */
+    ASSERT_TRUE(s->split(Pin(page2, 4, 0)) == PageList::SplitError::none);
+
+    /* Now we have 3 pages */
+    Node *first = s->pages.first;
+    Node *middle = first->next;
+    Node *last = middle->next;
+
+    /* Verify linked list order: first -> middle -> last */
+    ASSERT_TRUE(page1 == first);
+    ASSERT_TRUE(page2 == middle);
+    ASSERT_TRUE(s->pages.last == last);
+
+    /* Verify prev pointers */
+    ASSERT_TRUE(first->prev == nullptr);
+    ASSERT_TRUE(first == middle->prev);
+    ASSERT_TRUE(middle == last->prev);
+
+    /* Verify next pointers */
+    ASSERT_TRUE(middle == first->next);
+    ASSERT_TRUE(last == middle->next);
+    ASSERT_TRUE(last->next == nullptr);
+
+    /* Verify row counts */
+    ASSERT_TRUE(4 == first->rows());
+    ASSERT_TRUE(4 == middle->rows());
+    ASSERT_TRUE(4 == last->rows());
+}
+
+TEST(page_list, PageList_split_last_page_makes_new_page_the_last) {
+    /* Create a single page with 10 rows */
+    ListHolder s(opts(10, 10, (size_t)0));
+
+    /* Split to create 2 pages first */
+    ASSERT_TRUE(s->split(Pin(s->pages.first, 5, 0)) == PageList::SplitError::none);
+
+    /* Now split the last page */
+    Node *last_before_split = s->pages.last;
+    ASSERT_TRUE(5 == last_before_split->rows());
+
+    ASSERT_TRUE(s->split(Pin(last_before_split, 2, 0)) == PageList::SplitError::none);
+
+    /* The new page should be the new last */
+    Node *new_last = s->pages.last;
+    ASSERT_TRUE(new_last != last_before_split);
+    ASSERT_TRUE(last_before_split == new_last->prev);
+    ASSERT_TRUE(new_last->next == nullptr);
+
+    /* Verify row counts: original last has 2 rows, new last has 3 rows */
+    ASSERT_TRUE(2 == last_before_split->rows());
+    ASSERT_TRUE(3 == new_last->rows());
+}
+
+TEST(page_list, PageList_split_first_page_keeps_original_as_first) {
+    /* Create 2 pages by splitting */
+    ListHolder s(opts(10, 10, (size_t)0));
+
+    Node *original_first = s->pages.first;
+    ASSERT_TRUE(s->split(Pin(original_first, 5, 0)) == PageList::SplitError::none);
+
+    /* Get second page (created by first split) */
+    Node *second_page = s->pages.first->next;
+
+    /* Now split the first page again */
+    ASSERT_TRUE(s->split(Pin(s->pages.first, 2, 0)) == PageList::SplitError::none);
+
+    /* Original first should still be first */
+    ASSERT_TRUE(original_first == s->pages.first);
+    ASSERT_TRUE(s->pages.first->prev == nullptr);
+
+    /* New page should be inserted between first and second */
+    Node *inserted = s->pages.first->next;
+    ASSERT_TRUE(inserted != second_page);
+    ASSERT_TRUE(second_page == inserted->next);
+
+    /* Verify row counts: first has 2, inserted has 3, second has 5 */
+    ASSERT_TRUE(2 == s->pages.first->rows());
+    ASSERT_TRUE(3 == inserted->rows());
+    ASSERT_TRUE(5 == second_page->rows());
+}
+
+TEST(page_list, PageList_split_preserves_wrap_flags) {
+    ListHolder s(opts(10, 10, (size_t)0));
+
+    Page *page = s->pages.first->page();
+
+    /* Set wrap flags on rows that will be in the second page after split
+     * Row 5: wrap = true (this is the start of a wrapped line)
+     * Row 6: wrap_continuation = true (this continues the wrap)
+     * Row 7: wrap = true, wrap_continuation = true (wrapped and continues) */
+    page->getRowAndCell(0, 5).row->setWrap(true);
+    page->getRowAndCell(0, 6).row->setWrapContinuation(true);
+    page->getRowAndCell(0, 7).row->setWrap(true);
+    page->getRowAndCell(0, 7).row->setWrapContinuation(true);
+
+    /* Split at row 5 */
+    ASSERT_TRUE(s->split(Pin(s->pages.first, 5, 0)) == PageList::SplitError::none);
+
+    Page *second_page = s->pages.first->next->page();
+
+    /* Verify wrap flags are preserved in new page
+     * Original row 5 is now row 0 in second page */
+    {
+        const page::Row *r = second_page->getRowAndCell(0, 0).row;
+        ASSERT_TRUE(r->wrap());
+        ASSERT_FALSE(r->wrap_continuation());
+    }
+
+    /* Original row 6 is now row 1 in second page */
+    {
+        const page::Row *r = second_page->getRowAndCell(0, 1).row;
+        ASSERT_FALSE(r->wrap());
+        ASSERT_TRUE(r->wrap_continuation());
+    }
+
+    /* Original row 7 is now row 2 in second page */
+    {
+        const page::Row *r = second_page->getRowAndCell(0, 2).row;
+        ASSERT_TRUE(r->wrap());
+        ASSERT_TRUE(r->wrap_continuation());
+    }
+}
+
+TEST(page_list, PageList_split_preserves_styled_cells) {
+    ListHolder s(opts(10, 10, (size_t)0));
+
+    Page *page = s->pages.first->page();
+
+    /* Create a style and apply it to cells in rows 5-7 (which will be in the second page) */
+    style::Style st;
+    st.flags.bold = true;
+    style::Id style_id;
+    ASSERT_TRUE(page->styles.add((const void *)page->memory, st, &style_id) == ref_counted_set::AddError::none);
+
+    for (size_t y = 5; y < 8; y++) {
+        const Page::RowAndCell rac = page->getRowAndCell(0, y);
+        page::Cell c = page::Cell::init('S');
+        c.setStyleId(style_id);
+        *rac.cell = c;
+        rac.row->setStyled(true);
+        page->styles.use((const void *)page->memory, style_id);
+    }
+    /* Release the extra ref from add */
+    page->styles.release((const void *)page->memory, style_id);
+
+    /* Split at row 5 */
+    ASSERT_TRUE(s->split(Pin(s->pages.first, 5, 0)) == PageList::SplitError::none);
+
+    Page *first_page = s->pages.first->page();
+    Page *second_page = s->pages.first->next->page();
+
+    /* First page should have no styles (all styled rows moved to second page) */
+    ASSERT_TRUE(0 == first_page->styles.count());
+
+    /* Second page should have exactly 1 style (the bold style, used by 3 cells) */
+    ASSERT_TRUE(1 == second_page->styles.count());
+
+    /* Verify styled cells are preserved in new page */
+    for (size_t y = 0; y < 3; y++) {
+        const Page::RowAndCell rac = second_page->getRowAndCell(0, y);
+        ASSERT_TRUE('S' == rac.cell->contentCodepoint());
+        ASSERT_TRUE(rac.cell->style_id() != 0);
+
+        ASSERT_TRUE(second_page->styles.get((const void *)second_page->memory, rac.cell->style_id())->flags.bold);
+        ASSERT_TRUE(rac.row->styled());
+    }
+}
+
+TEST(page_list, PageList_split_preserves_grapheme_clusters) {
+    ListHolder s(opts(10, 10, (size_t)0));
+
+    Page *page = s->pages.first->page();
+
+    /* Add a grapheme cluster to row 6 (will be row 1 in second page after split at 5) */
+    {
+        const Page::RowAndCell rac = page->getRowAndCell(0, 6);
+        *rac.cell = page::Cell::init(0x1F468); /* Man emoji */
+        const uint32_t rest[2] = {
+            0x200D,  /* ZWJ */
+            0x1F469, /* Woman emoji */
+        };
+        ASSERT_TRUE(page->setGraphemes(rac.row, rac.cell, rest, 2) == page::PageError::none);
+    }
+
+    /* Split at row 5 */
+    ASSERT_TRUE(s->split(Pin(s->pages.first, 5, 0)) == PageList::SplitError::none);
+
+    Page *first_page = s->pages.first->page();
+    Page *second_page = s->pages.first->next->page();
+
+    /* First page should have no graphemes (the grapheme row moved to second page) */
+    ASSERT_TRUE(0 == first_page->graphemeCount());
+
+    /* Second page should have exactly 1 grapheme */
+    ASSERT_TRUE(1 == second_page->graphemeCount());
+
+    /* Verify grapheme is preserved in new page (original row 6 is now row 1) */
+    {
+        const Page::RowAndCell rac = second_page->getRowAndCell(0, 1);
+        ASSERT_TRUE(0x1F468 == rac.cell->contentCodepoint());
+        ASSERT_TRUE(rac.row->grapheme());
+
+        size_t len = 0;
+        const uint32_t *cps = second_page->lookupGrapheme(rac.cell, &len);
+        ASSERT_TRUE(2 == len);
+        ASSERT_TRUE(0x200D == cps[0]);
+        ASSERT_TRUE(0x1F469 == cps[1]);
+    }
+}
+
+TEST(page_list, PageList_split_preserves_hyperlinks) {
+    ListHolder s(opts(10, 10, (size_t)0));
+
+    Page *page = s->pages.first->page();
+
+    /* Add a hyperlink to row 7 (will be row 2 in second page after split at 5) */
+    hyperlink::Id hyperlink_id;
+    ASSERT_TRUE(page->insertHyperlink(implicitLink("https://example.com", 0), &hyperlink_id) ==
+                page::PageError::none);
+    {
+        const Page::RowAndCell rac = page->getRowAndCell(0, 7);
+        *rac.cell = page::Cell::init('L');
+        ASSERT_TRUE(page->setHyperlink(rac.row, rac.cell, hyperlink_id) == page::PageError::none);
+    }
+
+    /* Split at row 5 */
+    ASSERT_TRUE(s->split(Pin(s->pages.first, 5, 0)) == PageList::SplitError::none);
+
+    Page *first_page = s->pages.first->page();
+    Page *second_page = s->pages.first->next->page();
+
+    /* First page should have no hyperlinks (the hyperlink row moved to second page) */
+    ASSERT_TRUE(0 == first_page->hyperlink_set.count());
+
+    /* Second page should have exactly 1 hyperlink */
+    ASSERT_TRUE(1 == second_page->hyperlink_set.count());
+
+    /* Verify hyperlink is preserved in new page (original row 7 is now row 2) */
+    {
+        const Page::RowAndCell rac = second_page->getRowAndCell(0, 2);
+        ASSERT_TRUE('L' == rac.cell->contentCodepoint());
+        ASSERT_TRUE(rac.cell->hyperlink());
+
+        hyperlink::Id link_id;
+        ASSERT_TRUE(second_page->lookupHyperlink(rac.cell, &link_id));
+        const hyperlink::PageEntry *link = second_page->hyperlink_set.get((const void *)second_page->memory, link_id);
+        const char *expected = "https://example.com";
+        ASSERT_TRUE(link->uri.len == strlen(expected));
+        ASSERT_TRUE(memcmp(link->uri.slice((const void *)second_page->memory), expected, link->uri.len) == 0);
+    }
+}
+
+TEST(page_list, PageList_eraseRow_recycled_row_has_default_metadata) {
+    ListHolder s(opts(5, 3));
+
+    /* Simulate the top row being part of a soft-wrapped, prompt-marked
+     * line. Erasing it recycles its Row storage as the new blank
+     * bottom row, which must not retain any of this metadata. */
+    markRowMeta(s->getCell(Point::active()).value.row);
+
+    s->eraseRow(Point::active());
+
+    ASSERT_TRUE(rowDefaultMeta(s->getCell(Point::active(0, 2)).value.row));
+}
+
+TEST(page_list, PageList_eraseRowBounded_recycled_row_has_default_metadata) {
+    /* A limit smaller than the remaining rows in the page exercises
+     * the bounded-rotate branch; a larger limit exercises the fallback
+     * branch that clears the final row after a full rotation. */
+    const size_t limits_[] = {1, 10};
+    for (size_t limit : limits_) {
+        ListHolder s(opts(5, 3));
+
+        markRowMeta(s->getCell(Point::active()).value.row);
+
+        s->eraseRowBounded(Point::active(), limit);
+
+        const size_t recycled_y = limit < 2 ? limit : 2;
+        ASSERT_TRUE(rowDefaultMeta(s->getCell(Point::active(0, (uint32_t)recycled_y)).value.row));
+    }
+}
+
+TEST(page_list, PageList_eraseActive_regrown_rows_have_default_metadata) {
+    ListHolder s(opts(5, 3));
+
+    /* Mark the rows that will be erased. eraseActive retires their
+     * storage into unused page capacity and then regrows the active
+     * area, re-exposing the same Row storage via the grow() fast path. */
+    for (uint32_t y = 0; y < 2; y++) markRowMeta(s->getCell(Point::active(0, y)).value.row);
+
+    s->eraseActive(1);
+
+    for (uint32_t y = 0; y < 3; y++) ASSERT_TRUE(rowDefaultMeta(s->getCell(Point::active(0, y)).value.row));
+}
+
+TEST(page_list, PageList_split_retired_rows_have_default_state) {
+    ListHolder s(opts(5, 10));
+
+    /* Put metadata and a background-colored (non-zero, but text-free)
+     * cell on a row that the split will move to the new page. The
+     * retired Row storage on the source page goes back into unused
+     * capacity that grow() re-exposes without clearing. */
+    {
+        const PageList::Cell rac = s->getCell(Point::active(0, 7)).value;
+        rac.row->setWrap(true);
+        rac.row->setSemanticPrompt(SP::prompt);
+        *rac.cell = bgPalette(42);
+    }
+
+    Node *node = s->pages.first;
+    ASSERT_TRUE(s->split(s->pin(Point::active(0, 5)).value) == PageList::SplitError::none);
+
+    /* The source page was truncated to 5 rows; peek at the retired
+     * storage beyond size.rows. */
+    Page *page = node->page();
+    ASSERT_TRUE(5 == page->size.rows);
+    page::Row *rows = page->rows.ptr(page->memory);
+    for (size_t y = 5; y < 10; y++) {
+        const page::Row row = rows[y];
+        ASSERT_TRUE(rowDefaultMeta(&row));
+        const page::Cell *cells = row.cells().ptr(page->memory);
+        for (size_t x = 0; x < page->size.cols; x++) ASSERT_TRUE(cells[x].isZero());
+    }
+}
+
+TEST(page_list, PageList_resize_trimmed_rows_have_default_state) {
+    ListHolder s(opts(5, 5));
+
+    /* A trailing blank row has no text, so shrinking rows trims it,
+     * but it can still carry metadata (e.g. a blank prompt
+     * continuation line) and background-colored cells. Trimming
+     * retires the storage into unused capacity that grow()
+     * re-exposes without clearing. */
+    {
+        const PageList::Cell rac = s->getCell(Point::active(0, 4)).value;
+        rac.row->setWrapContinuation(true);
+        rac.row->setSemanticPrompt(SP::prompt_continuation);
+        *rac.cell = bgPalette(42);
+    }
+
+    ASSERT_TRUE(s->resize(rz(-1, 4, false)));
+    ASSERT_TRUE(s->resize(rz(-1, 5, false)));
+
+    {
+        const PageList::Cell rac = s->getCell(Point::active(0, 4)).value;
+        ASSERT_TRUE(rowDefaultMeta(rac.row));
+        ASSERT_TRUE(rac.cell->isZero());
+    }
+}
+
+TEST(page_list, PageList_memory_pool_never_touches_idle_page_memory) {
+    const size_t preheat = PageList::page_preheat;
+    const size_t std_size = PageList::std_size;
+
+    /* Back the page allocator with memory we can inspect. */
+    uint8_t *backing = (uint8_t *)_aligned_malloc(preheat * std_size, 4096);
+    zigstd::FixedBufferAllocator fba(backing, preheat * std_size);
+
+    PageList::MemoryPool pool;
+    ASSERT_TRUE(PageList::MemoryPool::init(talloc(), fba.allocator(), preheat, &pool));
+
+    /* Preheat allocated exactly the items. */
+    ASSERT_TRUE(preheat * std_size == fba.end_index);
+
+    /* Lay the sentinel down after preheat: allocation itself may write
+     * (the Allocator interface fills fresh memory with undefined in
+     * safe builds, which valgrind also tracks). The sentinel must differ
+     * from Zig's 0xAA undefined pattern so that any write is visible. */
+    const uint8_t sentinel = 0x5A;
+    memset(backing, sentinel, preheat * std_size);
+
+    /* Every preheated item is handed out untouched and without going
+     * back to the page allocator, and destroying it doesn't touch it. */
+    PageList::PagePool::ItemPtr items[PageList::page_preheat];
+    for (size_t i = 0; i < preheat; i++) {
+        items[i] = pool.pages.create();
+        ASSERT_TRUE(preheat * std_size == fba.end_index);
+        bool same = true;
+        for (size_t k = 0; k < std_size; k++)
+            if (items[i]->bytes[k] != sentinel) same = false;
+        ASSERT_TRUE(same);
+    }
+    for (size_t i = 0; i < preheat; i++) pool.pages.destroy(items[i]);
+    bool untouched = true;
+    for (size_t k = 0; k < preheat * std_size; k++)
+        if (backing[k] != sentinel) untouched = false;
+    ASSERT_TRUE(untouched);
+
+    pool.deinit();
+    _aligned_free(backing);
+}
+
+TEST(page_list, PageList_memory_pool_fast_path_does_not_allocate) {
+    zigstd::FailingAllocator counting(talloc(), SIZE_MAX);
+
+    PageList::MemoryPool pool;
+    ASSERT_TRUE(PageList::MemoryPool::init(talloc(), counting.allocator(), PageList::page_preheat, &pool));
+    ASSERT_TRUE(PageList::page_preheat == counting.allocations);
+
+    /* Cycle a few thousand pages through the preheated items. As long
+     * as no more than the preheat are live at once, create is a
+     * free-list pop and never touches the page allocator. */
+    PageList::PagePool::ItemPtr items[PageList::page_preheat];
+    for (int k = 0; k < 1024; k++) {
+        for (size_t i = 0; i < PageList::page_preheat; i++) items[i] = pool.pages.create();
+        for (size_t i = 0; i < PageList::page_preheat; i++) pool.pages.destroy(items[i]);
+    }
+    ASSERT_TRUE(PageList::page_preheat == counting.allocations);
+    ASSERT_TRUE(0 == counting.deallocations);
+
+    /* Going past the preheat allocates the extra items once; they are
+     * recycled from then on. */
+    PageList::PagePool::ItemPtr extra[PageList::page_preheat + 2];
+    const size_t extra_len = PageList::page_preheat + 2;
+    for (int k = 0; k < 1024; k++) {
+        for (size_t i = 0; i < extra_len; i++) extra[i] = pool.pages.create();
+        for (size_t i = 0; i < extra_len; i++) pool.pages.destroy(extra[i]);
+    }
+    ASSERT_TRUE(extra_len == counting.allocations);
+    ASSERT_TRUE(0 == counting.deallocations);
+    pool.deinit();
+}
+
+/* Wisp: upstream's comptime invariant in initialCapacity and the
+ * std_size constant this port hardcodes. */
+TEST(page_list, Wisp_std_size_matches_layout_and_max_cols_fit) {
+    ASSERT_TRUE(Page::layout(page::std_capacity()).total_size == PageList::std_size);
+    Capacity cap = page::std_capacity();
+    cap.cols = 0xFFFF;
+    ASSERT_TRUE(Page::layout(cap).total_size <= size::max_page_size);
+}
+
 /* @@TESTS@@ */
 
 /* Wisp: std.testing.allocator's leak check. Runs last (registration order). */
