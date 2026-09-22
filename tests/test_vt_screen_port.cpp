@@ -2191,6 +2191,344 @@ TEST(screen, Screen__resize_more_cols_perfect_split) {
     EXPECT_DUMP(s, screen, "1ABCD2EFGH\n3IJKL");
 }
 
+/* https://github.com/mitchellh/ghostty/issues/1159 */
+TEST(screen, Screen__resize__no_reflow__more_cols_with_scrollback_scrolled_up) {
+    SCREEN(s, 5, 3, (size_t)5);
+    const char *str = "1\n2\n3\n4\n5\n6\n7\n8";
+    WRITE(s, str);
+
+    /* Cursor at bottom */
+    ASSERT_TRUE(1 == s.cursor.x);
+    ASSERT_TRUE(2 == s.cursor.y);
+
+    s.scroll(Screen::Scroll::deltaRow(-4));
+    EXPECT_DUMP(s, viewport, "2\n3\n4");
+
+    ASSERT_TRUE(s.resize(rsz(8, 3)));
+    EXPECT_DUMP(s, screen, str);
+
+    /* Cursor remains at bottom */
+    ASSERT_TRUE(1 == s.cursor.x);
+    ASSERT_TRUE(2 == s.cursor.y);
+}
+
+/* https://github.com/mitchellh/ghostty/issues/1159 */
+TEST(screen, Screen__resize__no_reflow__less_cols_with_scrollback_scrolled_up) {
+    SCREEN(s, 5, 3, (size_t)5);
+    const char *str = "1\n2\n3\n4\n5\n6\n7\n8";
+    WRITE(s, str);
+
+    /* Cursor at bottom */
+    ASSERT_TRUE(1 == s.cursor.x);
+    ASSERT_TRUE(2 == s.cursor.y);
+
+    s.scroll(Screen::Scroll::deltaRow(-4));
+    EXPECT_DUMP(s, viewport, "2\n3\n4");
+
+    ASSERT_TRUE(s.resize(rsz(4, 3)));
+    EXPECT_DUMP(s, screen, str);
+    EXPECT_DUMP(s, active, "6\n7\n8");
+
+    /* Cursor remains at bottom */
+    ASSERT_TRUE(1 == s.cursor.x);
+    ASSERT_TRUE(2 == s.cursor.y);
+}
+
+typedef Screen::SemanticContentSet SCS;
+typedef terminal::osc::semantic_prompt::PromptKind PromptKind;
+
+TEST(screen, Screen__resize_more_cols_no_reflow_preserves_semantic_prompt) {
+    SCREEN(s, 5, 3, (size_t)0);
+
+    /* Set one of the rows to be a prompt */
+    s.cursorSetSemanticContent(SCS::makeOutput());
+    WRITE(s, "1ABCD\n");
+    s.cursorSetSemanticContent(SCS::makePrompt(PromptKind::initial));
+    WRITE(s, "2EFGH");
+    s.cursorSetSemanticContent(SCS::makeOutput());
+    WRITE(s, "\n3IJKL");
+
+    ASSERT_TRUE(s.resize(rsz(10, 3, false)));
+
+    const char *expected = "1ABCD\n2EFGH\n3IJKL";
+    EXPECT_DUMP(s, viewport, expected);
+    EXPECT_DUMP(s, screen, expected);
+
+    /* Our one row should still be a semantic prompt, the others should not. */
+    ASSERT_TRUE(s.pages.getCell(Point::active(0, 0)).value.row->semantic_prompt() == Row::SemanticPrompt::none);
+    ASSERT_TRUE(s.pages.getCell(Point::active(0, 1)).value.row->semantic_prompt() == Row::SemanticPrompt::prompt);
+    ASSERT_TRUE(s.pages.getCell(Point::active(0, 2)).value.row->semantic_prompt() == Row::SemanticPrompt::none);
+}
+
+#define EXPECT_CURSOR_CP(s, ch)                                                                                        \
+    ASSERT_TRUE((uint32_t)(ch) ==                                                                                      \
+                (s).pages.getCell(Point::active((s).cursor.x, (s).cursor.y)).value.cell->contentCodepoint())
+
+TEST(screen, Screen__resize_more_cols_with_reflow_that_fits_full_width) {
+    SCREEN(s, 5, 3, (size_t)0);
+    const char *str = "1ABCD2EFGH\n3IJKL";
+    WRITE(s, str);
+
+    /* Verify we soft wrapped */
+    EXPECT_DUMP(s, viewport, "1ABCD\n2EFGH\n3IJKL");
+
+    /* Let's put our cursor on row 2, where the soft wrap is */
+    s.cursorAbsolute(0, 1);
+    EXPECT_CURSOR_CP(s, '2');
+
+    /* Resize and verify we undid the soft wrap because we have space now */
+    ASSERT_TRUE(s.resize(rsz(10, 3)));
+    EXPECT_DUMP(s, viewport, str);
+
+    /* Our cursor should've moved */
+    ASSERT_TRUE(5 == s.cursor.x);
+    ASSERT_TRUE(0 == s.cursor.y);
+}
+
+TEST(screen, Screen__resize_more_cols_with_reflow_that_ends_in_newline) {
+    SCREEN(s, 6, 3, (size_t)0);
+    const char *str = "1ABCD2EFGH\n3IJKL";
+    WRITE(s, str);
+
+    /* Verify we soft wrapped */
+    EXPECT_DUMP(s, viewport, "1ABCD2\nEFGH\n3IJKL");
+
+    /* Let's put our cursor on the last row */
+    s.cursorAbsolute(0, 2);
+    EXPECT_CURSOR_CP(s, '3');
+
+    /* Resize and verify we undid the soft wrap because we have space now */
+    ASSERT_TRUE(s.resize(rsz(10, 3)));
+    EXPECT_DUMP(s, viewport, str);
+
+    /* Our cursor should still be on the 3 */
+    EXPECT_CURSOR_CP(s, '3');
+}
+
+TEST(screen, Screen__resize_more_cols_with_reflow_that_forces_more_wrapping) {
+    SCREEN(s, 5, 3, (size_t)0);
+    const char *str = "1ABCD2EFGH\n3IJKL";
+    WRITE(s, str);
+
+    /* Let's put our cursor on row 2, where the soft wrap is */
+    s.cursorAbsolute(0, 1);
+    EXPECT_CURSOR_CP(s, '2');
+
+    /* Verify we soft wrapped */
+    EXPECT_DUMP(s, viewport, "1ABCD\n2EFGH\n3IJKL");
+
+    /* Resize and verify we undid the soft wrap because we have space now */
+    ASSERT_TRUE(s.resize(rsz(7, 3)));
+    EXPECT_DUMP(s, viewport, "1ABCD2E\nFGH\n3IJKL");
+
+    /* Our cursor should've moved */
+    ASSERT_TRUE(5 == s.cursor.x);
+    ASSERT_TRUE(0 == s.cursor.y);
+}
+
+TEST(screen, Screen__resize_more_cols_with_reflow_that_unwraps_multiple_times) {
+    SCREEN(s, 5, 3, (size_t)0);
+    const char *str = "1ABCD2EFGH3IJKL";
+    WRITE(s, str);
+
+    /* Let's put our cursor on row 2, where the soft wrap is */
+    s.cursorAbsolute(0, 2);
+    EXPECT_CURSOR_CP(s, '3');
+
+    /* Verify we soft wrapped */
+    EXPECT_DUMP(s, viewport, "1ABCD\n2EFGH\n3IJKL");
+
+    /* Resize and verify we undid the soft wrap because we have space now */
+    ASSERT_TRUE(s.resize(rsz(15, 3)));
+    EXPECT_DUMP(s, viewport, "1ABCD2EFGH3IJKL");
+
+    /* Our cursor should've moved */
+    ASSERT_TRUE(10 == s.cursor.x);
+    ASSERT_TRUE(0 == s.cursor.y);
+}
+
+TEST(screen, Screen__resize_more_cols_with_populated_scrollback) {
+    SCREEN(s, 5, 3, (size_t)5);
+    const char *str = "1ABCD\n2EFGH\n3IJKL\n4ABCD5EFGH";
+    WRITE(s, str);
+    EXPECT_DUMP(s, viewport, "3IJKL\n4ABCD\n5EFGH");
+
+    /* // Set our cursor to be on the "5" */
+    s.cursorAbsolute(0, 2);
+    EXPECT_CURSOR_CP(s, '5');
+
+    /* Resize */
+    ASSERT_TRUE(s.resize(rsz(10, 3)));
+    EXPECT_DUMP(s, viewport, "2EFGH\n3IJKL\n4ABCD5EFGH");
+
+    /* Cursor should still be on the "5" */
+    EXPECT_CURSOR_CP(s, '5');
+}
+
+TEST(screen, Screen__resize_more_cols_bounded_scrollback_keeps_viewport_valid) {
+    /* Regression test for issue #12298.
+     *
+     * This needs to live at the Screen layer rather than PageList because the
+     * bad state only appears once Screen forwards the active cursor into the
+     * resize path. A direct PageList resize repro does not hit the same bug. */
+    SCREEN(s, 2, 10, (size_t)10000);
+
+    /* Build 30 rows of scrollback on top of our 10-row viewport so we have a
+     * 40-row screen with history above the active area. */
+    for (int i = 0; i < 30; i++) {
+        PageList::Node *n;
+        ASSERT_TRUE(s.pages.grow(&n));
+    }
+    s.cursorReload();
+    ASSERT_TRUE(40 == s.pages.scrollbar().total);
+
+    /* Fill the entire screen with two-row wrapped runs:
+     * - even rows mark the end of a wrapped line
+     * - odd rows mark the continuation
+     *
+     * With 2 columns, each logical line occupies two rows. When we grow to 4
+     * columns with reflow enabled, those pairs unwrap back into single rows.
+     * That cuts the total row count down and is what stresses the viewport pin. */
+    PageList::PageIterator it = s.pages.pageIterator(PageList::Direction::right_down, Point::screen(), Maybe<Point>());
+    PageList::PageIterator::Chunk chunk;
+    while (it.next(&chunk)) {
+        Page *page = chunk.node->page();
+        for (size_t y = chunk.start; y < chunk.end; y++) {
+            const Page::RowAndCell rac = page->getRowAndCell(0, y);
+            if (y % 2 == 0) {
+                rac.row->setWrap(true);
+            } else {
+                rac.row->setWrapContinuation(true);
+            }
+            for (size_t x = 0; x < s.pages.cols; x++) {
+                *page->getRowAndCell(x, y).cell = Cell::init('A');
+            }
+        }
+    }
+
+    /* Pin the viewport to a history row just above the active area.
+     *
+     * Before resize:
+     * - total rows = 40
+     * - active area starts at row 30
+     * - viewport is pinned at row 28
+     *
+     * After unwrap during resize:
+     * - total rows shrinks to 20
+     * - the old row 28 remaps into what is now the active area
+     *
+     * The bug was that resize/grow would temporarily keep the viewport as a
+     * history pin even after reflow had moved it into the active area, leaving
+     * fewer than `rows` visible rows beneath the pin and tripping integrity
+     * checks. */
+    s.pages.scroll(PageList::Scroll::pinAt(pinAt(s, Point::screen(0, 28))));
+    ASSERT_TRUE(s.pages.viewport == PageList::Viewport::pin);
+    ASSERT_TRUE(s.pages.getBottomRight(point::Tag::viewport).has);
+
+    /* Growing columns triggers reflow, which unwraps the synthetic wrapped
+     * rows above. This used to panic during the resize path. */
+    ASSERT_TRUE(s.resize(rsz(4, s.pages.rows, true)));
+
+    /* After the fix, the viewport is normalized back to the active area as
+     * soon as the pinned row lands there, so viewport queries remain valid. */
+    ASSERT_TRUE(4 == s.pages.cols);
+    ASSERT_TRUE(s.pages.scrollbar().total < 40);
+    ASSERT_TRUE(s.pages.viewport == PageList::Viewport::active);
+    ASSERT_TRUE(s.pages.getBottomRight(point::Tag::viewport).has);
+}
+
+TEST(screen, Screen__resize_more_cols_with_reflow) {
+    SCREEN(s, 2, 3, (size_t)5);
+    const char *str = "1ABC\n2DEF\n3ABC\n4DEF";
+    WRITE(s, str);
+
+    /* Let's put our cursor on row 2, where the soft wrap is */
+    s.cursorAbsolute(0, 2);
+    EXPECT_CURSOR_CP(s, 'E');
+
+    /* Verify we soft wrapped */
+    EXPECT_DUMP(s, viewport, "BC\n4D\nEF");
+
+    /* Resize and verify we undid the soft wrap because we have space now */
+    ASSERT_TRUE(s.resize(rsz(7, 3)));
+    EXPECT_DUMP(s, screen, "1ABC\n2DEF\n3ABC\n4DEF");
+
+    /* Our cursor should've moved */
+    ASSERT_TRUE(2 == s.cursor.x);
+    ASSERT_TRUE(2 == s.cursor.y);
+}
+
+/* Wisp: std.meta.eql. The compared values are bitwise copies of each
+ * other, so comparing their bytes is comparing their fields. */
+template <typename T> static bool bytesEq(const T &a, const T &b) { return memcmp(&a, &b, sizeof(T)) == 0; }
+
+TEST(screen, Screen__resize_errors_preserve_state) {
+    typedef Screen::resize_tw tw;
+    const Screen::ResizeTw tags[] = {Screen::ResizeTw::saved_cursor_pin, Screen::ResizeTw::pages};
+    for (size_t ti = 0; ti < 2; ti++) {
+        const Screen::ResizeTw tag = tags[ti];
+        struct TwEnd {
+            ~TwEnd() { (void)tw::end(tripwire::ResetMode::reset); }
+        } tw_end;
+
+        SCREEN(s, 10, 3, (size_t)0);
+
+        s.cursorSetSemanticContent(SCS::makePrompt(PromptKind::initial));
+        WRITE(s, "> ");
+        s.cursorSetSemanticContent(SCS::makeInput(SCS::InputClear::clear_explicit));
+        WRITE(s, "echo");
+        NOERR(s.setAttribute(attr(A::bold)));
+        NOERR(startLink(s, "https://example.com", "resize"));
+        {
+            Screen::SavedCursor sc;
+            memset(&sc, 0, sizeof sc);
+            sc.x = 1;
+            sc.y = 0;
+            sc.style = s.cursor.style;
+            sc.protected_ = s.cursor.protected_;
+            sc.pending_wrap = s.cursor.pending_wrap;
+            sc.origin = false;
+            sc.charset = s.charset;
+            s.saved_cursor = sc;
+        }
+
+        /* Keep a shallow copy for all non-page state and a byte-for-byte
+         * copy of the sole page so reference counts and prompt contents are
+         * covered as well. */
+        ASSERT_TRUE(s.pages.pages.first == s.pages.pages.last);
+        const Screen before = s;
+        const Pin before_viewport_pin = *s.pages.viewport_pin;
+        const size_t before_tracked_pins = s.pages.countTrackedPins();
+        Page *first_page = s.pages.pages.first->page();
+        const std::string before_page((const char *)first_page->memory, first_page->memory_len);
+
+        tw::errorAlways(tag, AllocTw::OutOfMemory);
+        Screen::Resize r(20, 4);
+        r.prompt_redraw = terminal::osc::semantic_prompt::Redraw::true_;
+        ASSERT_TRUE(!s.resize(r));
+
+        ASSERT_TRUE(bytesEq(before.cursor, s.cursor));
+        ASSERT_TRUE(bytesEq(before.saved_cursor, s.saved_cursor));
+        ASSERT_TRUE(bytesEq(before.selection, s.selection));
+        ASSERT_TRUE(bytesEq(before.charset, s.charset));
+        ASSERT_TRUE(before.protected_mode == s.protected_mode);
+        ASSERT_TRUE(bytesEq(before.kitty_keyboard, s.kitty_keyboard));
+        ASSERT_TRUE(bytesEq(before.semantic_prompt, s.semantic_prompt));
+        ASSERT_TRUE(bytesEq(before.dirty, s.dirty));
+        ASSERT_TRUE(before.pages.pages.first == s.pages.pages.first);
+        ASSERT_TRUE(before.pages.pages.last == s.pages.pages.last);
+        ASSERT_TRUE(before.pages.cols == s.pages.cols);
+        ASSERT_TRUE(before.pages.rows == s.pages.rows);
+        ASSERT_TRUE(before.pages.total_rows == s.pages.total_rows);
+        ASSERT_TRUE(before.pages.viewport == s.pages.viewport);
+        ASSERT_TRUE(bytesEq(before_viewport_pin, *s.pages.viewport_pin));
+        ASSERT_TRUE(before_tracked_pins == s.pages.countTrackedPins());
+        first_page = s.pages.pages.first->page();
+        ASSERT_TRUE(before_page.size() == first_page->memory_len);
+        ASSERT_TRUE(memcmp(before_page.data(), first_page->memory, first_page->memory_len) == 0);
+    }
+}
+
 /* @@TESTS@@ */
 
 /* Wisp: std.testing.allocator's leak check. Runs last (registration order). */
