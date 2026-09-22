@@ -21,6 +21,15 @@
 namespace wisp {
 namespace datastruct {
 
+/* std.heap.ArenaAllocator.ResetMode */
+struct PoolResetMode {
+    enum class Tag { free_all, retain_capacity, retain_with_limit } tag;
+    size_t limit;
+    static PoolResetMode free_all() { PoolResetMode m = {Tag::free_all, 0}; return m; }
+    static PoolResetMode retain_capacity() { PoolResetMode m = {Tag::retain_capacity, 0}; return m; }
+    static PoolResetMode retain_with_limit(size_t l) { PoolResetMode m = {Tag::retain_with_limit, l}; return m; }
+};
+
 /* A fixed-size item pool whose bookkeeping never touches item memory.
  *
  * std.heap.MemoryPool keeps its free list inside the items intrusively,
@@ -48,20 +57,14 @@ namespace datastruct {
  * not as cache friendly. But benchmarks show that the cost is minimal
  * and if the tradeoff of not touching the memory is important, then
  * this pays off. */
+
 template <typename Item, size_t alignment>
 struct UntouchedPool {
     static const size_t item_size = sizeof(Item);
     static const size_t item_alignment = alignment > alignof(Item) ? alignment : alignof(Item);
     typedef Item *ItemPtr;
 
-    /* std.heap.ArenaAllocator.ResetMode */
-    struct ResetMode {
-        enum class Tag { free_all, retain_capacity, retain_with_limit } tag;
-        size_t limit;
-        static ResetMode free_all() { ResetMode m = {Tag::free_all, 0}; return m; }
-        static ResetMode retain_capacity() { ResetMode m = {Tag::retain_capacity, 0}; return m; }
-        static ResetMode retain_with_limit(size_t l) { ResetMode m = {Tag::retain_with_limit, l}; return m; }
-    };
+    typedef PoolResetMode ResetMode;
 
     struct FreeList {
         ItemPtr *items;
