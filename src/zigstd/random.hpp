@@ -142,7 +142,7 @@ struct Random {
         if (sizeof(T) < 8) {
             const uint64_t m = (uint64_t)x * (uint64_t)y;
             *lo = (T)m;
-            *hi = (T)(m >> (8 * sizeof(T)));
+            *hi = (T)(m >> ((8 * sizeof(T)) & 63));
         } else {
 #ifdef _MSC_VER
             uint64_t h;
