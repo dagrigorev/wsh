@@ -37,10 +37,7 @@
  * disabled rather than free and later reallocate the resident memory.
  *
  * TRANSLITERATION. Comments are upstream's unless marked "Wisp:".
- * Wisp: the allocator is the C heap. `alloc` keeps upstream's two-word
- * std.mem.Allocator slot so the representation overhead, and therefore
- * which pages are worth compressing, matches upstream. Valgrind hooks are
- * omitted (no Valgrind on Windows).
+ * Wisp: Valgrind hooks are omitted (no Valgrind on Windows).
  */
 
 #pragma once
@@ -53,6 +50,7 @@
 
 #include "../page.hpp"
 #include "lz4.hpp"
+#include "../../zigstd/allocator.hpp"
 
 namespace wisp {
 namespace vt {
@@ -76,9 +74,8 @@ struct Page {
      *
      * The allocator's backing state must outlive this compressed page. Storing
      * the allocator here lets a PageList node restore and discard its compressed
-     * state without needing a reference back to the PageList.
-     * Wisp: see header; unused two-word slot. */
-    void *alloc[2];
+     * state without needing a reference back to the PageList. */
+    zigstd::Allocator alloc;
 
     /* Return the largest scratch buffer that can produce a useful compressed
      * representation for `raw_len` bytes.
@@ -113,7 +110,7 @@ struct Page {
      * Wisp: `(Allocator.Error || lz4.CompressError)!?Page` is InitResult plus
      * out; `ok_null` is the null success. */
     enum class InitResult { ok, ok_null, OutOfMemory, InputTooLarge, OutputTooSmall };
-    static InitResult init(const TerminalPage *source, uint8_t *scratch, size_t scratch_len, lz4::HashTable &table,
+    static InitResult init(zigstd::Allocator alloc, const TerminalPage *source, uint8_t *scratch, size_t scratch_len, lz4::HashTable &table,
                            Page *out);
 
     /* Free the encoded block.
@@ -121,7 +118,7 @@ struct Page {
      * This intentionally does not free `page.memory`. The PageList node which
      * supplied the source page continues to own that pool or heap allocation. */
     void deinit() {
-        free(encoded);
+        alloc.free(encoded, encoded_len);
         encoded = nullptr;
         encoded_len = 0;
     }
@@ -185,7 +182,7 @@ inline lz4::CompressError Page::requiredScratch(size_t raw_len, size_t *out) {
     return lz4::CompressError::none;
 }
 
-inline Page::InitResult Page::init(const TerminalPage *source, uint8_t *scratch, size_t scratch_len,
+inline Page::InitResult Page::init(zigstd::Allocator alloc, const TerminalPage *source, uint8_t *scratch, size_t scratch_len,
                                    lz4::HashTable &table, Page *out) {
     size_t required;
     if (requiredScratch(source->memory_len, &required) != lz4::CompressError::none) return InitResult::InputTooLarge;
@@ -207,15 +204,13 @@ inline Page::InitResult Page::init(const TerminalPage *source, uint8_t *scratch,
      * decommits it. */
     assert(sizeof(Page) + encoded_len < sizeof(TerminalPage) + source->memory_len);
 
-    uint8_t *dup = (uint8_t *)malloc(encoded_len ? encoded_len : 1);
+    uint8_t *dup = alloc.dupe(scratch, encoded_len);
     if (!dup) return InitResult::OutOfMemory;
-    memcpy(dup, scratch, encoded_len);
 
     out->page = *source;
     out->encoded = dup;
     out->encoded_len = encoded_len;
-    out->alloc[0] = nullptr;
-    out->alloc[1] = nullptr;
+    out->alloc = alloc;
     return InitResult::ok;
 }
 

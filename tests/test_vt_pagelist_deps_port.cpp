@@ -423,7 +423,7 @@ TEST(compress_page, compressed_Page_retained_mapping_round_trip) {
     uint8_t *scratch = (uint8_t *)malloc(required);
     static lz4::HashTable table;
     CPage compressed;
-    ASSERT_TRUE(CPage::init(&resident, scratch, required, table, &compressed) == CPage::InitResult::ok);
+    ASSERT_TRUE(CPage::init(zigstd::testing_allocator(), &resident, scratch, required, table, &compressed) == CPage::InitResult::ok);
 
     ASSERT_TRUE(memory_ptr == compressed.page.memory);
     ASSERT_TRUE(memory_len == compressed.page.memory_len);
@@ -492,7 +492,7 @@ TEST(compress_page, compressed_Page_requires_the_maximum_useful_scratch) {
     uint8_t *scratch = (uint8_t *)malloc(required - 1);
     static lz4::HashTable table;
     CPage compressed;
-    ASSERT_TRUE(CPage::init(&resident, scratch, required - 1, table, &compressed) ==
+    ASSERT_TRUE(CPage::init(zigstd::testing_allocator(), &resident, scratch, required - 1, table, &compressed) ==
                 CPage::InitResult::OutputTooSmall);
     ASSERT_TRUE(memcmp(expected, resident.memory, resident.memory_len) == 0);
     free(scratch);
@@ -519,7 +519,7 @@ TEST(compress_page, compressed_Page_rejects_a_representation_without_savings) {
     /* Wisp: upstream also passes a FailingAllocator(fail_index = 0) to prove
      * that no allocation is attempted; ok_null returns before malloc. */
     CPage compressed;
-    ASSERT_TRUE(CPage::init(&resident, scratch, required, table, &compressed) == CPage::InitResult::ok_null);
+    ASSERT_TRUE(CPage::init(zigstd::testing_allocator(), &resident, scratch, required, table, &compressed) == CPage::InitResult::ok_null);
     free(scratch);
     resident.deinit();
 }
@@ -534,7 +534,7 @@ TEST(compress_page, compressed_Page_can_retry_after_malformed_encoded_data) {
     uint8_t *scratch = (uint8_t *)malloc(required);
     static lz4::HashTable table;
     CPage compressed;
-    ASSERT_TRUE(CPage::init(&resident, scratch, required, table, &compressed) == CPage::InitResult::ok);
+    ASSERT_TRUE(CPage::init(zigstd::testing_allocator(), &resident, scratch, required, table, &compressed) == CPage::InitResult::ok);
 
     const size_t full_len = compressed.encoded_len;
     const uint8_t first_byte = compressed.encoded[0];

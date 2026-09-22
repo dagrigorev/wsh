@@ -140,7 +140,7 @@ struct PageList {
             data.compressed.page = p;
             data.compressed.encoded = nullptr;
             data.compressed.encoded_len = 0;
-            data.compressed.alloc[0] = data.compressed.alloc[1] = nullptr;
+            data.compressed.alloc = zigstd::c_allocator();
             serial = serial_;
             owned = owned_;
         }
@@ -4874,7 +4874,7 @@ struct PageList {
             size_t dirty_len = required;
 
             static lz4::HashTable table;
-            const compress::Page::InitResult r = compress::Page::init(page, scratch.bytes(), required, table, &compressed);
+            const compress::Page::InitResult r = compress::Page::init(pool.alloc, page, scratch.bytes(), required, table, &compressed);
             if (r == compress::Page::InitResult::ok) dirty_len = compressed.encoded_len;
             scratch.deinit(&pool, dirty_len);
             /* Null means compression crossed the break-even point. The node and its
