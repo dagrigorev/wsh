@@ -6807,6 +6807,451 @@ TEST(page_list, PageList_resize_reflow_less_cols_wide_char_bulk_run_odd_cols_spa
     }
 }
 
+TEST(page_list, PageList_resize_reflow_less_cols_wide_char_bulk_run_mixed_narrow_round_trip) {
+    /* The emoji-in-prose shape: single wide pairs separated by
+     * narrow cells, which must all share a single bulk run. */
+    struct Shape {
+        uint32_t cp;
+        Wide wide;
+    };
+    const Shape shape[] = {
+        {0x4E00, Wide::wide}, {0, Wide::spacer_tail}, {'x', Wide::narrow},
+        {0x4E01, Wide::wide}, {0, Wide::spacer_tail}, {'y', Wide::narrow},
+        {0x4E02, Wide::wide}, {0, Wide::spacer_tail}, {'z', Wide::narrow},
+    };
+
+    ListHolder s(opts(9, 1, (size_t)0));
+    {
+        ASSERT_TRUE(s->pages.first == s->pages.last);
+        Page *page = s->pages.first->page();
+        for (size_t x = 0; x < 9; x++) *page->getRowAndCell(x, 0).cell = wideCell(shape[x].cp, shape[x].wide);
+    }
+
+    /* Shrink: the run ends exactly on the row boundary after the
+     * second narrow cell. */
+    ASSERT_TRUE(s->resize(rz(6, -1, true)));
+    ASSERT_TRUE(6 == s->cols);
+    ASSERT_TRUE(2 == s->totalRows());
+
+    {
+        ASSERT_TRUE(s->pages.first == s->pages.last);
+        Page *page = s->pages.first->page();
+        for (size_t x = 0; x < 6; x++) ASSERT_TRUE(cellIs(page, x, 0, shape[x].cp, shape[x].wide));
+        for (size_t x = 0; x < 3; x++) ASSERT_TRUE(cellIs(page, x, 1, shape[6 + x].cp, shape[6 + x].wide));
+        ASSERT_TRUE(page->getRowAndCell(0, 0).row->wrap());
+        ASSERT_TRUE(page->getRowAndCell(0, 1).row->wrap_continuation());
+    }
+
+    /* Grow back: the wrapped rows must rejoin into the original
+     * single-row layout. */
+    ASSERT_TRUE(s->resize(rz(9, -1, true)));
+    ASSERT_TRUE(9 == s->cols);
+    ASSERT_TRUE(1 == s->totalRows());
+
+    {
+        ASSERT_TRUE(s->pages.first == s->pages.last);
+        Page *page = s->pages.first->page();
+        for (size_t x = 0; x < 9; x++) ASSERT_TRUE(cellIs(page, x, 0, shape[x].cp, shape[x].wide));
+        ASSERT_FALSE(page->getRowAndCell(0, 0).row->wrap());
+    }
+}
+
+TEST(page_list, PageList_resize_reflow_less_cols_wide_char_bulk_run_styled) {
+    ListHolder s(opts(8, 1, (size_t)0));
+    {
+        ASSERT_TRUE(s->pages.first == s->pages.last);
+        Page *page = s->pages.first->page();
+
+        /* Create a style */
+        style::Style st;
+        st.flags.bold = true;
+        style::Id style_id;
+        ASSERT_TRUE(page->styles.add((const void *)page->memory, st, &style_id) == ref_counted_set::AddError::none);
+
+        /* Styled pairs: the tail shares the wide cell's style, as
+         * the print path writes them. */
+        for (size_t i = 0; i < 4; i++) {
+            page::Cell w = wideCell((uint32_t)(0x4E00 + i), Wide::wide);
+            w.setStyleId(style_id);
+            *page->getRowAndCell(i * 2, 0).cell = w;
+            page->styles.use((const void *)page->memory, style_id);
+            page::Cell t = wideCell(0, Wide::spacer_tail);
+            t.setStyleId(style_id);
+            *page->getRowAndCell(i * 2 + 1, 0).cell = t;
+            page->styles.use((const void *)page->memory, style_id);
+        }
+
+        /* We're over-counted by 1 because `add` implies `use`. */
+        page->styles.release((const void *)page->memory, style_id);
+    }
+
+    /* Resize */
+    ASSERT_TRUE(s->resize(rz(4, -1, true)));
+    ASSERT_TRUE(4 == s->cols);
+    ASSERT_TRUE(2 == s->totalRows());
+
+    {
+        ASSERT_TRUE(s->pages.first == s->pages.last);
+        Page *page = s->pages.first->page();
+
+        for (size_t y = 0; y < 2; y++) {
+            for (size_t x = 0; x < 4; x++) {
+                const Page::RowAndCell rac = page->getRowAndCell(x, y);
+                const style::Id style_id = rac.cell->style_id();
+                ASSERT_TRUE(style_id != 0);
+
+                ASSERT_TRUE(page->styles.get((const void *)page->memory, style_id)->flags.bold);
+                ASSERT_TRUE(rac.row->styled());
+                ASSERT_TRUE((x % 2 == 0 ? Wide::wide : Wide::spacer_tail) == rac.cell->wide());
+            }
+        }
+    }
+}
+
+TEST(page_list, PageList_resize_reflow_less_cols_wide_char_bulk_run_degenerate_spacer_tail_style) {
+    ListHolder s(opts(4, 1, (size_t)0));
+    {
+        ASSERT_TRUE(s->pages.first == s->pages.last);
+        Page *page = s->pages.first->page();
+
+        /* A styled wide cell whose tail does NOT share its style.
+         * This can't come from the print path, but the run scan must
+         * reject the pair (slow path) rather than rewrite the tail
+         * to the wide cell's style. */
+        style::Style st;
+        st.flags.bold = true;
+        style::Id style_id;
+        ASSERT_TRUE(page->styles.add((const void *)page->memory, st, &style_id) == ref_counted_set::AddError::none);
+
+        page::Cell w = wideCell(0x4E00, Wide::wide);
+        w.setStyleId(style_id);
+        *page->getRowAndCell(0, 0).cell = w;
+        *page->getRowAndCell(1, 0).cell = wideCell(0, Wide::spacer_tail);
+        *page->getRowAndCell(2, 0).cell = page::Cell::init('x');
+    }
+
+    /* Resize */
+    ASSERT_TRUE(s->resize(rz(3, -1, true)));
+    ASSERT_TRUE(3 == s->cols);
+    ASSERT_TRUE(1 == s->totalRows());
+
+    {
+        ASSERT_TRUE(s->pages.first == s->pages.last);
+        Page *page = s->pages.first->page();
+
+        {
+            const Page::RowAndCell rac = page->getRowAndCell(0, 0);
+            ASSERT_TRUE(0x4E00 == rac.cell->contentCodepoint());
+            ASSERT_TRUE(Wide::wide == rac.cell->wide());
+            ASSERT_TRUE(rac.cell->style_id() != 0);
+            ASSERT_TRUE(page->styles.get((const void *)page->memory, rac.cell->style_id())->flags.bold);
+        }
+        {
+            const Page::RowAndCell rac = page->getRowAndCell(1, 0);
+            ASSERT_TRUE(Wide::spacer_tail == rac.cell->wide());
+            ASSERT_TRUE(style::default_id == rac.cell->style_id());
+        }
+        ASSERT_TRUE(cellIs(page, 2, 0, 'x', Wide::narrow));
+    }
+}
+
+static bool familyGrapheme(Page *page, size_t x, size_t y) {
+    const Page::RowAndCell rac = page->getRowAndCell(x, y);
+    if (rac.cell->contentCodepoint() != 0x1F468 || rac.cell->wide() != Wide::wide) return false;
+    size_t len = 0;
+    const uint32_t *cps = page->lookupGrapheme(rac.cell, &len);
+    const uint32_t expected[6] = {0x200D, 0x1F468, 0x200D, 0x1F466, 0x200D, 0x1F466};
+    if (!cps || len != 6) return false;
+    for (size_t i = 0; i < 6; i++)
+        if (cps[i] != expected[i]) return false;
+    return true;
+}
+
+TEST(page_list, PageList_resize_reflow_less_cols_to_wrap_a_multi_codepoint_grapheme_with_a_spacer_head) {
+    ListHolder s(opts(4, 2, (size_t)0));
+    {
+        ASSERT_TRUE(s->pages.first == s->pages.last);
+        Page *page = s->pages.first->page();
+
+        /* We want to make the screen look like this:
+         *
+         * 👨‍👨‍👦‍👦👨‍👨‍👦‍👦 */
+        const uint32_t rest[6] = {0x200D, 0x1F468, 0x200D, 0x1F466, 0x200D, 0x1F466};
+
+        /* First family emoji at (0, 0) */
+        {
+            const Page::RowAndCell rac = page->getRowAndCell(0, 0);
+            *rac.cell = wideCell(0x1F468, Wide::wide); /* First codepoint of the grapheme */
+            ASSERT_TRUE(page->setGraphemes(rac.row, rac.cell, rest, 6) == page::PageError::none);
+        }
+        *page->getRowAndCell(1, 0).cell = wideCell(0, Wide::spacer_tail);
+        /* Second family emoji at (2, 0) */
+        {
+            const Page::RowAndCell rac = page->getRowAndCell(2, 0);
+            *rac.cell = wideCell(0x1F468, Wide::wide); /* First codepoint of the grapheme */
+            ASSERT_TRUE(page->setGraphemes(rac.row, rac.cell, rest, 6) == page::PageError::none);
+        }
+        *page->getRowAndCell(3, 0).cell = wideCell(0, Wide::spacer_tail);
+    }
+
+    /* Resize */
+    ASSERT_TRUE(s->resize(rz(3, -1, true)));
+    ASSERT_TRUE(3 == s->cols);
+    ASSERT_TRUE(2 == s->totalRows());
+
+    {
+        ASSERT_TRUE(s->pages.first == s->pages.last);
+        Page *page = s->pages.first->page();
+
+        ASSERT_TRUE(familyGrapheme(page, 0, 0));
+        /* Row should be wrapped */
+        ASSERT_TRUE(page->getRowAndCell(0, 0).row->wrap());
+        ASSERT_TRUE(cellIs(page, 1, 0, 0, Wide::spacer_tail));
+        ASSERT_TRUE(cellIs(page, 2, 0, 0, Wide::spacer_head));
+
+        ASSERT_TRUE(familyGrapheme(page, 0, 0));
+        ASSERT_TRUE(cellIs(page, 1, 1, 0, Wide::spacer_tail));
+    }
+}
+
+static void placeholders(PageList &s, Page *page, size_t x0, size_t x1) {
+    (void)s;
+    for (size_t x = x0; x < x1; x++) {
+        const Page::RowAndCell rac = page->getRowAndCell(x, 0);
+        rac.row->setKittyVirtualPlaceholder(true);
+        *rac.cell = page::Cell::init(kitty_placeholder);
+    }
+}
+
+TEST(page_list, PageList_resize_reflow_less_cols_copy_kitty_placeholder) {
+    ListHolder s(opts(4, 2, (size_t)0));
+    {
+        ASSERT_TRUE(s->pages.first == s->pages.last);
+        /* Write unicode placeholders */
+        placeholders(*s, s->pages.first->page(), 0, (size_t)s->cols - 1);
+    }
+
+    /* Resize */
+    ASSERT_TRUE(s->resize(rz(2, -1, true)));
+    ASSERT_TRUE(2 == s->cols);
+    ASSERT_TRUE(2 == s->totalRows());
+
+    PageList::RowIterator it = s->rowIterator(Dir::right_down, Point::active());
+    Pin offset;
+    while (it.next(&offset)) {
+        for (size_t x = 0; x < (size_t)s->cols - 1; x++) {
+            Pin offset_copy = offset;
+            offset_copy.x = (size::CellCountInt)x;
+            ASSERT_TRUE(offset_copy.rowAndCell().row->kitty_virtual_placeholder());
+        }
+    }
+}
+
+TEST(page_list, PageList_resize_reflow_more_cols_clears_kitty_placeholder) {
+    ListHolder s(opts(4, 2, (size_t)0));
+    {
+        ASSERT_TRUE(s->pages.first == s->pages.last);
+        /* Write unicode placeholders */
+        placeholders(*s, s->pages.first->page(), 0, (size_t)s->cols - 1);
+    }
+
+    /* Resize smaller then larger */
+    ASSERT_TRUE(s->resize(rz(2, -1, true)));
+    ASSERT_TRUE(s->resize(rz(4, -1, true)));
+    ASSERT_TRUE(4 == s->cols);
+    ASSERT_TRUE(2 == s->totalRows());
+
+    PageList::RowIterator it = s->rowIterator(Dir::right_down, Point::active());
+    Pin row;
+    ASSERT_TRUE(it.next(&row));
+    ASSERT_TRUE(row.rowAndCell().row->kitty_virtual_placeholder());
+    ASSERT_TRUE(it.next(&row));
+    ASSERT_FALSE(row.rowAndCell().row->kitty_virtual_placeholder());
+    ASSERT_FALSE(it.next(&row));
+}
+
+TEST(page_list, PageList_resize_reflow_wrap_moves_kitty_placeholder) {
+    ListHolder s(opts(4, 2, (size_t)0));
+    {
+        ASSERT_TRUE(s->pages.first == s->pages.last);
+        /* Write unicode placeholders */
+        placeholders(*s, s->pages.first->page(), 2, (size_t)s->cols - 1);
+    }
+
+    ASSERT_TRUE(s->resize(rz(2, -1, true)));
+    ASSERT_TRUE(2 == s->cols);
+    ASSERT_TRUE(2 == s->totalRows());
+
+    PageList::RowIterator it = s->rowIterator(Dir::right_down, Point::active());
+    Pin row;
+    ASSERT_TRUE(it.next(&row));
+    ASSERT_FALSE(row.rowAndCell().row->kitty_virtual_placeholder());
+    ASSERT_TRUE(it.next(&row));
+    ASSERT_TRUE(row.rowAndCell().row->kitty_virtual_placeholder());
+    ASSERT_FALSE(it.next(&row));
+}
+
+TEST(page_list, PageList_reset) {
+    ListHolder s(opts(80, 24));
+    s->reset();
+    ASSERT_TRUE(s->viewport == Viewport::active);
+    ASSERT_TRUE(s->pages.first != nullptr);
+    ASSERT_TRUE((size_t)s->rows == s->totalRows());
+
+    /* Active area should be the top */
+    ASSERT_TRUE(pinEq(Pin(s->pages.first, 0, 0), s->getTopLeft(point::Tag::active)));
+}
+
+TEST(page_list, PageList_reset_invalidates_stale_untracked_refs_even_if_node_memory_is_reused) {
+    ListHolder s(opts(80, 24));
+
+    const size_t cap = PageList::page_preheat * 4;
+    Node *stale_nodes[PageList::page_preheat * 4];
+    uint64_t stale_serials[PageList::page_preheat * 4];
+    size_t stale_len = 0;
+    bool reused = false;
+    Node *old_node = nullptr;
+    uint64_t old_serial = 0;
+
+    while (stale_len < cap && !reused) {
+        Node *n = s->pages.first;
+        const uint64_t ser = n->serial;
+        ASSERT_TRUE(ser >= s->page_serial_epoch);
+        ASSERT_TRUE(ser < s->page_serial);
+        stale_nodes[stale_len] = n;
+        stale_serials[stale_len] = ser;
+        stale_len += 1;
+
+        s->reset();
+
+        Node *new_node = s->pages.first;
+        for (size_t i = 0; i < stale_len; i++) {
+            if (stale_nodes[i] == new_node) {
+                reused = true;
+                old_node = stale_nodes[i];
+                old_serial = stale_serials[i];
+                break;
+            }
+        }
+    }
+
+    ASSERT_TRUE(reused);
+    Node *new_node = s->pages.first;
+    const uint64_t new_serial = new_node->serial;
+
+    /* Reset advances the epoch before rebuilding from the node pool. Reject
+     * the stale generation before inspecting its pointer, even when that exact
+     * address now belongs to a new live generation. */
+    ASSERT_TRUE(old_node == new_node);
+    ASSERT_TRUE(old_serial < s->page_serial_epoch);
+    ASSERT_FALSE(s->nodeIsValid(old_node, old_serial));
+    ASSERT_TRUE(s->nodeIsValid(new_node, new_serial));
+    ASSERT_TRUE(new_serial >= s->page_serial_epoch);
+    ASSERT_TRUE(new_serial < s->page_serial);
+}
+
+TEST(page_list, PageList_reset_across_two_pages) {
+    /* Find a cap that makes it so that rows don't fit on one page. */
+    const size::CellCountInt rows = 100;
+    Capacity cap = stdAdjust(50);
+    while (cap.rows >= rows) cap = stdAdjust((size::CellCountInt)(cap.cols + 50));
+
+    /* Init */
+    ListHolder s(opts(cap.cols, rows));
+    s->reset();
+    ASSERT_TRUE(s->viewport == Viewport::active);
+    ASSERT_TRUE(s->pages.first != nullptr);
+    ASSERT_TRUE((size_t)s->rows == s->totalRows());
+}
+
+TEST(page_list, PageList_reset_moves_tracked_pins_and_marks_them_as_garbage) {
+    ListHolder s(opts(80, 24));
+
+    /* Create a tracked pin into the active area */
+    Pin *p = s->trackPin(s->pin(Point::active(42, 12)).value);
+
+    s->reset();
+
+    /* Our added pin should now be garbage */
+    ASSERT_TRUE(p->garbage);
+
+    /* Viewport pin should not be garbage because it makes sense. */
+    ASSERT_FALSE(s->viewport_pin->garbage);
+    s->untrackPin(p);
+}
+
+TEST(page_list, PageList_clears_history) {
+    ListHolder s(opts(80, 24));
+    ASSERT_TRUE(s->growRows(30));
+    s->reset();
+    ASSERT_TRUE(s->viewport == Viewport::active);
+    ASSERT_TRUE(s->pages.first != nullptr);
+    ASSERT_TRUE((size_t)s->rows == s->totalRows());
+
+    /* Active area should be the top */
+    ASSERT_TRUE(pinEq(Pin(s->pages.first, 0, 0), s->getTopLeft(point::Tag::active)));
+}
+
+TEST(page_list, PageList_resize_reflow_grapheme_map_capacity_exceeded) {
+    /* This test verifies that when reflowing content with many graphemes,
+     * the grapheme map capacity is correctly increased when needed. */
+    ListHolder s(opts(4, 10, (size_t)0));
+    ASSERT_TRUE(1 == s->totalPages());
+
+    /* Get the grapheme capacity from the page. We need more than this many
+     * graphemes in a single destination page to trigger capacity increase
+     * during reflow. Since each source page can only hold this many graphemes,
+     * we create two source pages with graphemes that will merge into one
+     * destination page. */
+    const size_t grapheme_capacity = s->pages.first->page()->graphemeCapacity();
+    /* Use slightly more than half the capacity per page, so combined they
+     * exceed the capacity of a single destination page. */
+    const size_t graphemes_per_page = grapheme_capacity / 2 + grapheme_capacity / 4;
+
+    /* Grow to the capacity of the first page and add more rows
+     * so that we have two pages total. */
+    ASSERT_TRUE(growFirstPageThen(*s, graphemes_per_page));
+    ASSERT_TRUE(s->pages.first != s->pages.last);
+    ASSERT_TRUE(s->pages.last == s->pages.first->next);
+
+    /* Add graphemes to both pages. We add graphemes to rows at the END of the
+     * first page, and graphemes to rows at the START of the second page.
+     * When reflowing to 2 columns, these rows will wrap and stay together
+     * on the same destination page, requiring capacity increase. */
+
+    /* Add graphemes to the end of the first page (last rows) */
+    {
+        Page *page = s->pages.first->page();
+        const size_t start_row = page->size.rows - graphemes_per_page;
+        for (size_t i = 0; i < graphemes_per_page; i++) {
+            const Page::RowAndCell rac = page->getRowAndCell(0, start_row + i);
+            *rac.cell = page::Cell::init('A');
+            ASSERT_TRUE(page->appendGrapheme(rac.row, rac.cell, 0x0301) == page::PageError::none);
+        }
+    }
+
+    /* Add graphemes to the beginning of the second page */
+    {
+        Page *page = s->pages.last->page();
+        const size_t count = graphemes_per_page < page->size.rows ? graphemes_per_page : page->size.rows;
+        for (size_t y = 0; y < count; y++) {
+            const Page::RowAndCell rac = page->getRowAndCell(0, y);
+            *rac.cell = page::Cell::init('B');
+            ASSERT_TRUE(page->appendGrapheme(rac.row, rac.cell, 0x0302) == page::PageError::none);
+        }
+    }
+
+    /* Resize to fewer columns to trigger reflow.
+     * The graphemes from both pages will be copied to destination pages.
+     * They will all end up in a contiguous region of the destination.
+     * If the bug exists (hyperlink_bytes increased instead of grapheme_bytes),
+     * this will fail with GraphemeMapOutOfMemory when we exceed capacity. */
+    ASSERT_TRUE(s->resize(rz(2, -1, true)));
+
+    /* Verify the resize succeeded */
+    ASSERT_TRUE(2 == s->cols);
+}
+
 /* @@TESTS@@ */
 
 /* Wisp: std.testing.allocator's leak check. Runs last (registration order). */
