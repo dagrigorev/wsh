@@ -2445,6 +2445,443 @@ TEST(page_list, PageList_set_max_bytes_zero_preserves_active_boundary) {
     ASSERT_TRUE(s->viewport == Viewport::active);
 }
 
+typedef PageList::Limits Limits;
+static const size_t kItem = PageList::PagePool::item_size;
+
+/* Wisp: `.{ .cols = c, .rows = r, .reflow = f }` (negative = null). */
+static PageList::Resize rz(int cols = -1, int rows = -1, bool reflow = true) {
+    PageList::Resize r;
+    if (cols >= 0) r.cols = (size::CellCountInt)cols;
+    if (rows >= 0) r.rows = (size::CellCountInt)rows;
+    r.reflow = reflow;
+    return r;
+}
+
+static bool limitsEq(const Limits &a, const Limits &b) {
+    return a.bytes.explicit_ == b.bytes.explicit_ && a.bytes.min == b.bytes.min &&
+           a.lines.explicit_ == b.lines.explicit_ && a.lines.min == b.lines.min;
+}
+
+/* Wisp: grow `n` rows, tracking the most recently allocated page. */
+static void growTracking(PageList &s, size_t n) {
+    for (size_t i = 0; i < n; i++) (void)growNode(&s);
+}
+
+TEST(page_list, PageList_set_max_lines_prunes_immediately_and_can_be_raised) {
+    const size::CellCountInt cols = 80;
+    const size_t page_rows = PageList::initialCapacity(cols).rows;
+    const size_t lowered_lines = page_rows + page_rows / 2;
+
+    ListHolder s(opts(cols, 1));
+
+    ASSERT_TRUE(s->growRows(4 * page_rows));
+    ASSERT_TRUE(5 == s->totalPages());
+
+    Node *removed = s->pages.first;
+    Node *retained = s->pages.last->prev;
+    Pin *removed_pin = s->trackPin(Pin(removed));
+    Pin *retained_pin = s->trackPin(Pin(retained));
+
+    s->scroll(Scroll::pinAt(*retained_pin));
+    ASSERT_TRUE(3 * page_rows == s->scrollbar().offset);
+
+    /* Whole-page enforcement undershoots a non-page-aligned line limit. */
+    s->setMaxLines(lowered_lines);
+    ASSERT_TRUE(lowered_lines == s->limits.lines.explicit_);
+    ASSERT_TRUE(lowered_lines == s->limits.max(Limits::Key::lines));
+    ASSERT_TRUE(page_rows == s->total_rows - s->rows);
+    ASSERT_TRUE(2 == s->totalPages());
+    ASSERT_TRUE(retained == s->pages.first);
+    ASSERT_TRUE(retained == removed_pin->node);
+    ASSERT_TRUE(removed_pin->garbage);
+    ASSERT_TRUE(retained == retained_pin->node);
+    ASSERT_FALSE(retained_pin->garbage);
+    ASSERT_TRUE(0 == s->scrollbar().offset);
+
+    const size_t limited_size = s->page_size;
+    const size_t limited_rows = s->total_rows;
+    s->setMaxLines(4 * page_rows);
+    ASSERT_TRUE(limited_size == s->page_size);
+    ASSERT_TRUE(limited_rows == s->total_rows);
+    ASSERT_TRUE(s->growRows(2 * page_rows));
+    ASSERT_TRUE(s->total_rows - s->rows > lowered_lines);
+
+    const size_t raised_size = s->page_size;
+    const size_t raised_rows = s->total_rows;
+    s->setMaxLines(Maybe<size_t>());
+    ASSERT_TRUE(SIZE_MAX == s->limits.lines.explicit_);
+    ASSERT_TRUE(raised_size == s->page_size);
+    ASSERT_TRUE(raised_rows == s->total_rows);
+    ASSERT_TRUE(s->growRows(3 * page_rows));
+    ASSERT_TRUE(s->total_rows - s->rows > 4 * page_rows);
+
+    s->untrackPin(retained_pin);
+    s->untrackPin(removed_pin);
+}
+
+TEST(page_list, PageList_set_max_limits_remain_independent) {
+    const size::CellCountInt cols = 80;
+    const size_t page_rows = PageList::initialCapacity(cols).rows;
+    const size_t byte_limit = 3 * kItem;
+    const size_t line_limit = page_rows / 2;
+
+    ListHolder s(opts(cols, 1));
+
+    ASSERT_TRUE(s->growRows(4 * page_rows));
+
+    /* The byte setter leaves the line limit unlimited. */
+    s->setMaxBytes(byte_limit);
+    ASSERT_TRUE(byte_limit == s->limits.bytes.explicit_);
+    ASSERT_TRUE(SIZE_MAX == s->limits.lines.explicit_);
+    ASSERT_TRUE(3 == s->totalPages());
+    ASSERT_TRUE(2 * page_rows == s->total_rows - s->rows);
+
+    /* The smaller runtime line limit prunes one more complete page without
+     * changing the configured byte limit. Its effective value is raised to
+     * the existing one-page minimum. */
+    s->setMaxLines(line_limit);
+    ASSERT_TRUE(byte_limit == s->limits.bytes.explicit_);
+    ASSERT_TRUE(line_limit == s->limits.lines.explicit_);
+    ASSERT_TRUE(page_rows == s->limits.max(Limits::Key::lines));
+    ASSERT_TRUE(2 == s->totalPages());
+    ASSERT_TRUE(page_rows == s->total_rows - s->rows);
+
+    /* Removing only the line limit leaves byte enforcement in effect. */
+    s->setMaxLines(Maybe<size_t>());
+    ASSERT_TRUE(s->growRows(3 * page_rows));
+    ASSERT_TRUE(byte_limit == s->page_size);
+    ASSERT_TRUE(3 == s->totalPages());
+    ASSERT_TRUE(s->total_rows - s->rows > page_rows);
+}
+
+TEST(page_list, PageList_max_lines_uses_one_page_minimum) {
+    const size::CellCountInt cols = 80;
+    const size_t page_rows = PageList::initialCapacity(cols).rows;
+
+    ListHolder s(opts(cols, 1, Maybe<size_t>(), page_rows / 2));
+
+    ASSERT_TRUE(page_rows == s->limits.max(Limits::Key::lines));
+
+    /* The requested limit is below one page, so a complete page of history
+     * remains valid. */
+    ASSERT_TRUE(s->growRows(page_rows));
+    ASSERT_TRUE(page_rows == s->total_rows - s->rows);
+    ASSERT_TRUE(2 == s->totalPages());
+
+    Node *first = s->pages.first;
+    const size_t old_page_size = s->page_size;
+
+    /* One more row puts us over the effective limit. The now-complete
+     * historical page is removed rather than partially trimmed. */
+    (void)growNode(&*s);
+    ASSERT_TRUE(1 == s->total_rows - s->rows);
+    ASSERT_TRUE(1 == s->totalPages());
+    ASSERT_TRUE(s->pages.first != first);
+    ASSERT_TRUE(old_page_size - kItem == s->page_size);
+}
+
+TEST(page_list, PageList_max_lines_does_not_round_larger_limits) {
+    const size::CellCountInt cols = 80;
+    const size_t page_rows = PageList::initialCapacity(cols).rows;
+    const size_t max_lines = page_rows + page_rows / 2;
+
+    ListHolder s(opts(cols, 1, Maybe<size_t>(), max_lines));
+
+    ASSERT_TRUE(max_lines == s->limits.max(Limits::Key::lines));
+    ASSERT_TRUE(s->growRows(max_lines));
+    ASSERT_TRUE(max_lines == s->total_rows - s->rows);
+
+    Node *first = s->pages.first;
+    Node *retained = first->next;
+    Pin *removed_pin = s->trackPin(Pin(first));
+    Pin *retained_pin = s->trackPin(Pin(retained));
+
+    s->scroll(Scroll::pinAt(*retained_pin));
+    ASSERT_TRUE(page_rows == s->scrollbar().offset);
+
+    const size_t old_page_size = s->page_size;
+    (void)growNode(&*s);
+
+    /* Whole-page pruning undershoots the requested limit without rounding it. */
+    ASSERT_TRUE(max_lines + 1 - page_rows == s->total_rows - s->rows);
+    ASSERT_TRUE(retained == s->pages.first);
+    ASSERT_TRUE(retained == removed_pin->node);
+    ASSERT_TRUE(removed_pin->garbage);
+    ASSERT_TRUE(retained == retained_pin->node);
+    ASSERT_FALSE(retained_pin->garbage);
+    ASSERT_TRUE(0 == s->scrollbar().offset);
+    ASSERT_TRUE(old_page_size - kItem == s->page_size);
+
+    s->untrackPin(retained_pin);
+    s->untrackPin(removed_pin);
+}
+
+TEST(page_list, PageList_max_lines_and_max_size_enforce_the_smaller_limit) {
+    const size::CellCountInt cols = 80;
+    const size_t page_rows = PageList::initialCapacity(cols).rows;
+
+    /* A line limit of one page keeps the logical allocation below a much
+     * larger byte limit. */
+    {
+        ListHolder s(opts(cols, 1, 8 * kItem, page_rows));
+
+        ASSERT_TRUE(s->growRows(4 * page_rows));
+        ASSERT_TRUE(s->total_rows - s->rows <= s->limits.max(Limits::Key::lines));
+        ASSERT_TRUE(s->totalPages() <= 2);
+        ASSERT_TRUE(s->page_size < s->limits.max(Limits::Key::bytes));
+    }
+
+    /* A two-page byte limit prunes before the larger line limit is reached. */
+    {
+        ListHolder s(opts(cols, 1, kItem, 4 * page_rows));
+
+        ASSERT_TRUE(s->growRows(2 * page_rows));
+        ASSERT_TRUE(s->total_rows - s->rows < s->limits.max(Limits::Key::lines));
+        ASSERT_TRUE(s->limits.max(Limits::Key::bytes) == s->page_size);
+    }
+}
+
+TEST(page_list, PageList_max_lines_applies_to_resize_and_clone) {
+    const size::CellCountInt cols = 80;
+    const size_t page_rows = PageList::initialCapacity(cols).rows;
+
+    ListHolder s(opts(cols, 2, Maybe<size_t>(), page_rows));
+
+    ASSERT_TRUE(s->growRows(page_rows));
+    ASSERT_TRUE(page_rows == s->total_rows - s->rows);
+
+    /* Prevent row shrinking from trimming the trailing active row instead of
+     * turning it into history. */
+    *s->getCell(Point::active(0, 1)).value.cell = page::Cell::init('A');
+
+    ASSERT_TRUE(s->resize(rz(-1, 1, false)));
+    ASSERT_TRUE(1 == s->total_rows - s->rows);
+
+    const size::CellCountInt new_cols = cols + 1;
+    ASSERT_TRUE(s->resize(rz(new_cols, -1, true)));
+    ASSERT_TRUE(Limits::minMaxLines(new_cols) == s->limits.lines.min);
+
+    /* Exercise the same active-row shrink through the reflow path. Reflow
+     * completes before the newly historical complete page is pruned. */
+    {
+        ListHolder reflowed(opts(cols, 2, Maybe<size_t>(), page_rows));
+
+        ASSERT_TRUE(reflowed->growRows(page_rows));
+        *reflowed->getCell(Point::active(0, 1)).value.cell = page::Cell::init('A');
+
+        ASSERT_TRUE(reflowed->resize(rz(new_cols, 1, true)));
+        ASSERT_TRUE(Limits::minMaxLines(new_cols) == reflowed->limits.lines.min);
+        ASSERT_TRUE(reflowed->total_rows - reflowed->rows <= reflowed->limits.max(Limits::Key::lines) ||
+                    reflowed->pages.first == reflowed->getTopLeft(point::Tag::active).node);
+    }
+
+    PageList cloned;
+    ASSERT_TRUE(s->clone(talloc(), PageList::Clone(Point::screen()), &cloned) == page::PageError::none);
+
+    ASSERT_TRUE(limitsEq(s->limits, cloned.limits));
+
+    ASSERT_TRUE(cloned.growRows(2 * cloned.limits.max(Limits::Key::lines)));
+    ASSERT_TRUE(cloned.total_rows - cloned.rows <= cloned.limits.max(Limits::Key::lines) ||
+                cloned.pages.first == cloned.getTopLeft(point::Tag::active).node);
+    cloned.deinit();
+}
+
+TEST(page_list, PageList_grow_prune_scrollback) {
+    /* Use std_size to limit scrollback so pruning is triggered. */
+    ListHolder s(opts(80, 24, PageList::std_size));
+
+    /* Grow to capacity */
+    Node *page1_node = s->pages.last;
+    Page *page1 = page1_node->page();
+    {
+        const size_t n = (size_t)page1->capacity.rows - page1->size.rows;
+        for (size_t i = 0; i < n; i++) ASSERT_TRUE(growNode(&*s) == nullptr);
+    }
+
+    /* Grow and allocate one more page. Then fill that page up. */
+    Node *page2_node = growNode(&*s);
+    ASSERT_TRUE(page2_node != nullptr);
+    Page *page2 = page2_node->page();
+    {
+        const size_t n = (size_t)page2->capacity.rows - page2->size.rows;
+        for (size_t i = 0; i < n; i++) ASSERT_TRUE(growNode(&*s) == nullptr);
+    }
+
+    /* Get our page size */
+    const size_t old_page_size = s->page_size;
+
+    /* Create a tracked pin in the first page */
+    Pin *p = s->trackPin(s->pin(Point::screen()).value);
+    ASSERT_TRUE(p->node == s->pages.first);
+
+    /* Scroll back to create a pinned viewport (not active) */
+    const size_t pin_y = page1->capacity.rows / 2;
+    s->scroll(Scroll::pinAt(s->pin(Point::screen(0, (uint32_t)pin_y)).value));
+    ASSERT_TRUE(s->viewport == Viewport::pin);
+
+    /* Get the scrollbar state to populate the cache */
+    const Scrollbar scrollbar_before = s->scrollbar();
+    ASSERT_TRUE(pin_y == scrollbar_before.offset);
+
+    /* Next should create a new page, but it should reuse our first
+     * page since we're at max size. */
+    Node *new_ = growNode(&*s);
+    ASSERT_TRUE(new_ != nullptr);
+    ASSERT_TRUE(s->pages.last == new_);
+    ASSERT_TRUE(s->page_size == old_page_size);
+
+    /* Our first should now be page2 and our last should be page1 */
+    ASSERT_TRUE(page2_node == s->pages.first);
+    ASSERT_TRUE(page1_node == s->pages.last);
+
+    /* Our tracked pin should point to the top-left of the first page */
+    ASSERT_TRUE(p->node == s->pages.first);
+    ASSERT_TRUE(p->x == 0);
+    ASSERT_TRUE(p->y == 0);
+    ASSERT_TRUE(p->garbage);
+
+    /* Verify the viewport offset cache was invalidated. After pruning,
+     * the offset should have changed because we removed rows from
+     * the beginning. */
+    {
+        const Scrollbar scrollbar_after = s->scrollbar();
+        const size_t rows_pruned = page1->capacity.rows;
+        const size_t expected_offset = pin_y >= rows_pruned ? pin_y - rows_pruned : 0;
+        ASSERT_TRUE(expected_offset == scrollbar_after.offset);
+    }
+    s->untrackPin(p);
+}
+
+TEST(page_list, PageList_grow_prune_scrollback_with_viewport_pin_not_in_pruned_page) {
+    /* Use std_size to limit scrollback so pruning is triggered. */
+    ListHolder s(opts(80, 24, PageList::std_size));
+
+    /* Grow to capacity of first page */
+    Node *page1_node = s->pages.last;
+    Page *page1 = page1_node->page();
+    {
+        const size_t n = (size_t)page1->capacity.rows - page1->size.rows;
+        for (size_t i = 0; i < n; i++) ASSERT_TRUE(growNode(&*s) == nullptr);
+    }
+
+    /* Grow and allocate second page, then fill it up */
+    Node *page2_node = growNode(&*s);
+    ASSERT_TRUE(page2_node != nullptr);
+    Page *page2 = page2_node->page();
+    {
+        const size_t n = (size_t)page2->capacity.rows - page2->size.rows;
+        for (size_t i = 0; i < n; i++) ASSERT_TRUE(growNode(&*s) == nullptr);
+    }
+
+    /* Get our page size */
+    const size_t old_page_size = s->page_size;
+
+    /* Scroll back to create a pinned viewport in page2 (NOT page1)
+     * This is the key difference from the previous test - the viewport
+     * pin is NOT in the page that will be pruned. */
+    const size_t pin_y = (size_t)page1->capacity.rows + 5;
+    s->scroll(Scroll::pinAt(s->pin(Point::screen(0, (uint32_t)pin_y)).value));
+    ASSERT_TRUE(s->viewport == Viewport::pin);
+    ASSERT_TRUE(s->viewport_pin->node == page2_node);
+
+    /* Get the scrollbar state to populate the cache */
+    const Scrollbar scrollbar_before = s->scrollbar();
+    ASSERT_TRUE(pin_y == scrollbar_before.offset);
+
+    /* Next grow will trigger pruning of the first page.
+     * The viewport_pin.node is page2, not page1, so it won't be moved
+     * by the pin update loop, but the cached offset still needs to be
+     * invalidated because rows were removed from the beginning. */
+    Node *new_ = growNode(&*s);
+    ASSERT_TRUE(new_ != nullptr);
+    ASSERT_TRUE(s->pages.last == new_);
+    ASSERT_TRUE(s->page_size == old_page_size);
+
+    /* Our first should now be page2 (page1 was pruned) */
+    ASSERT_TRUE(page2_node == s->pages.first);
+
+    /* The viewport pin should still be on page2, unchanged */
+    ASSERT_TRUE(s->viewport_pin->node == page2_node);
+
+    /* Verify the viewport offset cache was invalidated/updated.
+     * After pruning, the offset should have decreased by the number
+     * of rows that were pruned. */
+    const Scrollbar scrollbar_after = s->scrollbar();
+    const size_t rows_pruned = page1->capacity.rows;
+    const size_t expected_offset = pin_y - rows_pruned;
+    ASSERT_TRUE(expected_offset == scrollbar_after.offset);
+}
+
+TEST(page_list, PageList_eraseRows_invalidates_viewport_offset_cache) {
+    ListHolder s(opts(80, 24));
+
+    /* Grow so we take up several pages worth of history */
+    Page *page = s->pages.last->page();
+    const size_t cap_rows = page->capacity.rows;
+    growTracking(*s, cap_rows * 3);
+
+    /* Scroll back to create a pinned viewport somewhere in the middle
+     * of the scrollback */
+    const size_t pin_y = cap_rows;
+    s->scroll(Scroll::pinAt(s->pin(Point::screen(0, (uint32_t)pin_y)).value));
+    ASSERT_TRUE(s->viewport == Viewport::pin);
+    ASSERT_TRUE(sbEq(s->scrollbar(), s->total_rows, pin_y, s->rows));
+
+    /* Erase some history rows BEFORE the viewport pin.
+     * This removes rows from before our pin, which changes its absolute
+     * offset from the top, but the cache is not invalidated. */
+    const size_t rows_to_erase = cap_rows / 2;
+    s->eraseHistory(Point::history(0, (uint32_t)(rows_to_erase - 1)));
+
+    ASSERT_TRUE(sbEq(s->scrollbar(), s->total_rows, pin_y - rows_to_erase, s->rows));
+}
+
+TEST(page_list, PageList_eraseRow_invalidates_viewport_offset_cache) {
+    ListHolder s(opts(80, 24));
+
+    /* Grow so we take up several pages worth of history */
+    Page *page = s->pages.last->page();
+    const size_t cap_rows = page->capacity.rows;
+    growTracking(*s, cap_rows * 3);
+
+    /* Scroll back to create a pinned viewport somewhere in the middle
+     * of the scrollback */
+    const size_t pin_y = cap_rows;
+    s->scroll(Scroll::pinAt(s->pin(Point::screen(0, (uint32_t)pin_y)).value));
+    ASSERT_TRUE(s->viewport == Viewport::pin);
+    ASSERT_TRUE(sbEq(s->scrollbar(), s->total_rows, pin_y, s->rows));
+
+    /* Erase a single row from the history BEFORE the viewport pin.
+     * This removes one row from before our pin, which changes its absolute
+     * offset from the top by 1, but the cache is not invalidated. */
+    s->eraseRow(Point::history(0, 0));
+
+    ASSERT_TRUE(sbEq(s->scrollbar(), s->total_rows, pin_y - 1, s->rows));
+}
+
+TEST(page_list, PageList_eraseRowBounded_invalidates_viewport_offset_cache) {
+    ListHolder s(opts(80, 24));
+
+    /* Grow so we take up several pages worth of history */
+    Page *page = s->pages.last->page();
+    growTracking(*s, (size_t)page->capacity.rows * 3);
+
+    /* Scroll back to create a pinned viewport somewhere in the middle
+     * of the scrollback */
+    const uint16_t pin_y = 4;
+    s->scroll(Scroll::pinAt(s->pin(Point::screen(0, pin_y)).value));
+    ASSERT_TRUE(s->viewport == Viewport::pin);
+    ASSERT_TRUE(sbEq(s->scrollbar(), s->total_rows, pin_y, s->rows));
+
+    /* Erase a row from the history BEFORE the viewport pin with a bounded
+     * shift. This removes one row from before our pin, which changes its
+     * absolute offset from the top by 1, but the cache is not invalidated. */
+    s->eraseRowBounded(Point::history(0, 0), 10);
+
+    /* Verify the scrollbar reflects the change (offset decreased by 1) */
+    ASSERT_TRUE(sbEq(s->scrollbar(), s->total_rows, pin_y - 1, s->rows));
+}
+
 /* @@TESTS@@ */
 
 /* Wisp: std.testing.allocator's leak check. Runs last (registration order). */
