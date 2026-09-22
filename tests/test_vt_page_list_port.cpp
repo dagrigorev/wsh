@@ -4081,6 +4081,456 @@ TEST(page_list, PageList_highlightSemanticContent_output_skips_empty_cells) {
     ASSERT_TRUE(screenAt(*s, hl.end, 4, 8));
 }
 
+/* Wisp: upstream's "grow so we take up at least 5 pages" loop. */
+static void growFivePages(PageList &s) {
+    Page *page = s.pages.last->page();
+    growPagesPaused(s, (size_t)page->capacity.rows * 5);
+}
+
+static bool pinAtNode(const Pin *p, Node *node, size_t y, size_t x) { return p->node == node && p->y == y && p->x == x; }
+
+TEST(page_list, PageList_erase) {
+    ListHolder s(opts(80, 24));
+    ASSERT_TRUE(1 == s->totalPages());
+
+    /* Grow so we take up at least 5 pages. */
+    growFivePages(*s);
+    ASSERT_TRUE(6 == s->totalPages());
+
+    /* Our total rows should be large */
+    ASSERT_TRUE(s->total_rows > s->rows);
+
+    /* Erase the entire history, we should be back to just our active set. */
+    s->eraseHistory(Maybe<Point>());
+    ASSERT_TRUE(s->rows == s->total_rows);
+
+    /* We should be back to just one page */
+    ASSERT_TRUE(1 == s->totalPages());
+    ASSERT_TRUE(s->pages.first == s->pages.last);
+}
+
+TEST(page_list, PageList_erase_reaccounts_page_size) {
+    ListHolder s(opts(80, 24));
+    const size_t start_size = s->page_size;
+
+    /* Grow so we take up at least 5 pages. */
+    growFivePages(*s);
+    ASSERT_TRUE(s->page_size > start_size);
+
+    /* Erase the entire history, we should be back to just our active set. */
+    s->eraseHistory(Maybe<Point>());
+    ASSERT_TRUE(start_size == s->page_size);
+}
+
+TEST(page_list, PageList_erase_row_with_tracked_pin_resets_to_top_left) {
+    ListHolder s(opts(80, 24));
+
+    /* Grow so we take up at least 5 pages. */
+    growFivePages(*s);
+
+    /* Our total rows should be large */
+    ASSERT_TRUE(s->total_rows > s->rows);
+
+    /* Put a tracked pin in the history */
+    Pin *p = s->trackPin(s->pin(Point::history()).value);
+
+    /* Erase the entire history, we should be back to just our active set. */
+    s->eraseHistory(Maybe<Point>());
+    ASSERT_TRUE(s->rows == s->total_rows);
+
+    /* Our pin should move to the first page */
+    ASSERT_TRUE(pinAtNode(p, s->pages.first, 0, 0));
+    s->untrackPin(p);
+}
+
+TEST(page_list, PageList_erase_row_with_tracked_pin_shifts) {
+    ListHolder s(opts(80, 24));
+
+    /* Put a tracked pin in the history */
+    Pin *p = s->trackPin(s->pin(Point::active(2, 4)).value);
+
+    /* Erase only a few rows in our active */
+    s->eraseActive(3);
+    ASSERT_TRUE(s->rows == s->total_rows);
+
+    /* Our pin should move to the first page */
+    ASSERT_TRUE(pinAtNode(p, s->pages.first, 0, 2));
+    s->untrackPin(p);
+}
+
+TEST(page_list, PageList_erase_row_with_tracked_pin_is_erased) {
+    ListHolder s(opts(80, 24));
+
+    /* Put a tracked pin in the history */
+    Pin *p = s->trackPin(s->pin(Point::active(2, 2)).value);
+
+    /* Erase the entire history, we should be back to just our active set. */
+    s->eraseActive(3);
+    ASSERT_TRUE(s->rows == s->total_rows);
+
+    /* Our pin should move to the first page */
+    ASSERT_TRUE(pinAtNode(p, s->pages.first, 0, 0));
+    s->untrackPin(p);
+}
+
+TEST(page_list, PageList_erase_resets_viewport_to_active_if_moves_within_active) {
+    ListHolder s(opts(80, 24));
+
+    /* Grow so we take up at least 5 pages. */
+    growFivePages(*s);
+
+    /* Move our viewport to the top */
+    s->scroll(Scroll::deltaRow(-(ptrdiff_t)s->total_rows));
+    ASSERT_TRUE(s->viewport == Viewport::top);
+
+    /* Erase the entire history, we should be back to just our active set. */
+    s->eraseHistory(Maybe<Point>());
+    ASSERT_TRUE(s->viewport == Viewport::active);
+}
+
+TEST(page_list, PageList_erase_resets_viewport_if_inside_erased_page_but_not_active) {
+    ListHolder s(opts(80, 24));
+
+    /* Grow so we take up at least 5 pages. */
+    growFivePages(*s);
+
+    /* Move our viewport to the top */
+    s->scroll(Scroll::deltaRow(-(ptrdiff_t)s->total_rows));
+    ASSERT_TRUE(s->viewport == Viewport::top);
+
+    /* Erase the entire history, we should be back to just our active set. */
+    s->eraseHistory(Point::history(0, 2));
+    ASSERT_TRUE(s->viewport == Viewport::top);
+}
+
+TEST(page_list, PageList_erase_resets_viewport_to_active_if_top_is_inside_active) {
+    ListHolder s(opts(80, 24));
+
+    /* Grow so we take up at least 5 pages. */
+    growFivePages(*s);
+
+    /* Move our viewport to the top */
+    s->scroll(Scroll::top());
+
+    /* Erase the entire history, we should be back to just our active set. */
+    s->eraseHistory(Maybe<Point>());
+    ASSERT_TRUE(s->viewport == Viewport::active);
+}
+
+TEST(page_list, PageList_erase_active_regrows_automatically) {
+    ListHolder s(opts(80, 24));
+    ASSERT_TRUE(s->totalRows() == s->rows);
+    s->eraseActive(10);
+    ASSERT_TRUE(s->totalRows() == s->rows);
+}
+
+TEST(page_list, PageList_erase_a_one_row_active) {
+    ListHolder s(opts(10, 1));
+    ASSERT_TRUE(1 == s->totalPages());
+
+    /* Write our letter */
+    Page *page = s->pages.first->page();
+    for (size_t y = 0; y < s->rows; y++) *page->getRowAndCell(0, y).cell = page::Cell::init('A');
+
+    s->eraseActive(0);
+    ASSERT_TRUE(s->rows == s->total_rows);
+
+    /* The row should be empty */
+    ASSERT_TRUE(0 == s->getCell(Point::active(0, 0)).value.cell->contentCodepoint());
+}
+
+TEST(page_list, PageList_eraseRowBounded_less_than_full_row) {
+    ListHolder s(opts(80, 10));
+
+    /* Pins */
+    Pin *p_top = s->trackPin(s->pin(Point::active(0, 5)).value);
+    Pin *p_bot = s->trackPin(s->pin(Point::active(0, 8)).value);
+    Pin *p_out = s->trackPin(s->pin(Point::active(0, 9)).value);
+
+    /* Erase only a few rows in our active */
+    s->eraseRowBounded(Point::active(0, 5), 3);
+    ASSERT_TRUE(s->rows == s->totalRows());
+
+    /* The erased rows should be dirty */
+    ASSERT_TRUE(s->isDirty(Point::active(0, 5)));
+    ASSERT_TRUE(s->isDirty(Point::active(0, 6)));
+    ASSERT_TRUE(s->isDirty(Point::active(0, 7)));
+
+    ASSERT_TRUE(pinAtNode(p_top, s->pages.first, 4, 0));
+    ASSERT_TRUE(pinAtNode(p_bot, s->pages.first, 7, 0));
+    ASSERT_TRUE(pinAtNode(p_out, s->pages.first, 9, 0));
+    s->untrackPin(p_out);
+    s->untrackPin(p_bot);
+    s->untrackPin(p_top);
+}
+
+TEST(page_list, PageList_eraseRowBounded_with_pin_at_top) {
+    ListHolder s(opts(80, 10));
+
+    /* Pins */
+    Pin *p_top = s->trackPin(s->pin(Point::active(5, 0)).value);
+
+    /* Erase only a few rows in our active */
+    s->eraseRowBounded(Point::active(0, 0), 3);
+    ASSERT_TRUE(s->rows == s->totalRows());
+
+    /* The erased rows should be dirty */
+    ASSERT_TRUE(s->isDirty(Point::active(0, 0)));
+    ASSERT_TRUE(s->isDirty(Point::active(0, 1)));
+    ASSERT_TRUE(s->isDirty(Point::active(0, 2)));
+
+    ASSERT_TRUE(pinAtNode(p_top, s->pages.first, 0, 0));
+    s->untrackPin(p_top);
+}
+
+TEST(page_list, PageList_eraseRowBounded_full_rows_single_page) {
+    ListHolder s(opts(80, 10));
+
+    /* Pins */
+    Pin *p_in = s->trackPin(s->pin(Point::active(0, 7)).value);
+    Pin *p_out = s->trackPin(s->pin(Point::active(0, 9)).value);
+
+    /* Erase only a few rows in our active */
+    s->eraseRowBounded(Point::active(0, 5), 10);
+    ASSERT_TRUE(s->rows == s->totalRows());
+
+    /* The erased rows should be dirty */
+    for (uint32_t y = 5; y < 10; y++) ASSERT_TRUE(s->isDirty(Point::active(0, y)));
+
+    /* Our pin should move to the first page */
+    ASSERT_TRUE(pinAtNode(p_in, s->pages.first, 6, 0));
+    ASSERT_TRUE(pinAtNode(p_out, s->pages.first, 8, 0));
+    s->untrackPin(p_out);
+    s->untrackPin(p_in);
+}
+
+/* Wisp: "Grow to two pages so our active area straddles". */
+static bool growToStraddle(PageList &s) {
+    Page *page = s.pages.last->page();
+    page->pauseIntegrityChecks(true);
+    const size_t n = (size_t)page->capacity.rows - page->size.rows;
+    for (size_t i = 0; i < n; i++) (void)growNode(&s);
+    page->pauseIntegrityChecks(false);
+    if (!s.growRows(5)) return false;
+    return 2 == s.totalPages() && 5 == s.pages.last->rows();
+}
+
+TEST(page_list, PageList_eraseRowBounded_full_rows_two_pages) {
+    ListHolder s(opts(80, 10));
+
+    /* Grow to two pages so our active area straddles */
+    ASSERT_TRUE(growToStraddle(*s));
+
+    /* Pins */
+    Pin *p_first = s->trackPin(s->pin(Point::active(0, 4)).value);
+    Pin *p_first_out = s->trackPin(s->pin(Point::active(0, 3)).value);
+    Pin *p_in = s->trackPin(s->pin(Point::active(0, 8)).value);
+    Pin *p_out = s->trackPin(s->pin(Point::active(0, 9)).value);
+
+    {
+        ASSERT_TRUE(pinAtNode(p_first, s->pages.last->prev, p_first->node->rows() - 1, 0));
+        ASSERT_TRUE(pinAtNode(p_first_out, s->pages.last->prev, p_first_out->node->rows() - 2, 0));
+        ASSERT_TRUE(pinAtNode(p_in, s->pages.last, 3, 0));
+        ASSERT_TRUE(pinAtNode(p_out, s->pages.last, 4, 0));
+    }
+
+    /* Erase only a few rows in our active */
+    s->eraseRowBounded(Point::active(0, 4), 4);
+
+    /* The erased rows should be dirty */
+    for (uint32_t y = 4; y < 8; y++) ASSERT_TRUE(s->isDirty(Point::active(0, y)));
+
+    /* In page in first page is shifted */
+    ASSERT_TRUE(pinAtNode(p_first, s->pages.last->prev, p_first->node->rows() - 2, 0));
+
+    /* Out page in first page should not be shifted */
+    ASSERT_TRUE(pinAtNode(p_first_out, s->pages.last->prev, p_first_out->node->rows() - 2, 0));
+
+    /* In page is shifted */
+    ASSERT_TRUE(pinAtNode(p_in, s->pages.last, 2, 0));
+
+    /* Out page is not shifted */
+    ASSERT_TRUE(pinAtNode(p_out, s->pages.last, 4, 0));
+    s->untrackPin(p_out);
+    s->untrackPin(p_in);
+    s->untrackPin(p_first_out);
+    s->untrackPin(p_first);
+}
+
+static hyperlink::Hyperlink implicitLink(const char *uri, uint32_t implicit) {
+    hyperlink::Hyperlink l;
+    l.uri = (const uint8_t *)uri;
+    l.uri_len = strlen(uri);
+    l.id = hyperlink::Hyperlink::Id::makeImplicit(implicit);
+    return l;
+}
+
+/* Shared setup of the two "hyperlink-dense row crosses page boundary" tests. */
+static bool denseHyperlinkSetup(PageList &s, size_t link_count) {
+    /* Grow to two pages so our active area straddles them: the first
+     * page is exactly full and the second page holds the last 5 rows
+     * of the active area. */
+    if (!growToStraddle(s)) return false;
+
+    /* Mark each active row with a codepoint so we can verify the
+     * shift afterwards. Row y gets codepoint '0' + y at x = 0. */
+    for (uint32_t y = 0; y < 10; y++) {
+        const Pin row_pin = s.pin(Point::active(0, y)).value;
+        *row_pin.rowAndCell().cell = page::Cell::init('0' + y);
+    }
+
+    /* Fill the top row of the second page (active y=5) with more
+     * unique hyperlinks ('A' through 'J') than the first page's
+     * default hyperlink capacity can hold. We must increase the
+     * second page's capacity to even create such a row; the first
+     * page keeps its default capacity. */
+    while (s.pages.last->page()->hyperlink_set.layout.cap <= link_count) {
+        (void)incCap(s, s.pages.last, IncCap::hyperlink_bytes);
+    }
+    if (!(s.pages.first->page()->hyperlink_set.layout.cap < link_count)) return false;
+    {
+        Page *page = s.pages.last->page();
+        for (size_t x = 0; x < link_count; x++) {
+            char buf[64];
+            snprintf(buf, sizeof buf, "http://example.com/%zu", x);
+            hyperlink::Id id;
+            if (page->insertHyperlink(implicitLink(buf, (uint32_t)x), &id) != page::PageError::none) return false;
+            const Page::RowAndCell rac = page->getRowAndCell(x, 0);
+            *rac.cell = page::Cell::init((uint32_t)('A' + x));
+            if (page->setHyperlink(rac.row, rac.cell, id) != page::PageError::none) return false;
+            page->hyperlink_set.use((const void *)page->memory, id);
+        }
+    }
+    return true;
+}
+
+static bool denseRowIntact(PageList &s, size_t link_count) {
+    /* Every cell of the dense row must still resolve to a real
+     * hyperlink entry with the correct URI. A half-applied erase
+     * leaves cells whose hyperlink flag is set but that have no map
+     * entry, which aborts in clearCells later. */
+    for (size_t x = 0; x < link_count; x++) {
+        const PageList::Cell list_cell = s.getCell(Point::active((size::CellCountInt)x, 4)).value;
+        if (!list_cell.cell->hyperlink()) return false;
+        Page *page = list_cell.node->page();
+        hyperlink::Id id;
+        if (!page->lookupHyperlink(list_cell.cell, &id)) return false;
+        const hyperlink::PageEntry *link = page->hyperlink_set.get((const void *)page->memory, id);
+        char buf[64];
+        snprintf(buf, sizeof buf, "http://example.com/%zu", x);
+        if (link->uri.len != strlen(buf)) return false;
+        if (memcmp(link->uri.slice((const void *)page->memory), buf, link->uri.len) != 0) return false;
+    }
+
+    /* All pages must pass integrity checks. */
+    for (Node *node = s.pages.first; node; node = node->next) node->page()->assertIntegrity();
+    return true;
+}
+
+TEST(page_list, PageList_eraseRow_hyperlink_dense_row_crosses_page_boundary) {
+    /* Regression test: when eraseRow shifts rows up across a page
+     * boundary, the top row of the next page is cloned into the last
+     * row of the previous page. If the previous page doesn't have
+     * enough capacity for the managed memory of that row (hyperlinks,
+     * styles, etc.) the error propagated out AFTER the previous page
+     * had already been rotated and its tracked pins moved, leaving
+     * the page list half-mutated.
+     *
+     * eraseRow must instead increase the destination page's capacity
+     * and retry, the same way insertLines/deleteLines and
+     * cursorScrollAbove handle their cross-page copies. */
+    ListHolder s(opts(80, 10));
+    const size_t link_count = 10;
+    ASSERT_TRUE(denseHyperlinkSetup(*s, link_count));
+
+    /* Track a pin in the shifted region of the first page to verify
+     * it survives the capacity change of its node. */
+    Pin *p = s->trackPin(s->pin(Point::active(3, 1)).value);
+
+    /* Erase the first active row. The dense hyperlink row must cross
+     * the page boundary into the first page, which requires growing
+     * the first page's hyperlink capacity. */
+    s->eraseRow(Point::active(0, 0));
+
+    /* Every remaining row shifted up by one: the '0' marker row was
+     * erased, the dense row moved up across the page boundary to
+     * row 4, and the last row was cleared. */
+    const uint32_t expected[10] = {'1', '2', '3', '4', 'A', '6', '7', '8', '9', 0};
+    for (uint32_t y = 0; y < 10; y++) {
+        ASSERT_TRUE(expected[y] == s->getCell(Point::active(0, y)).value.cell->contentCodepoint());
+    }
+
+    ASSERT_TRUE(denseRowIntact(*s, link_count));
+
+    /* Our tracked pin shifted up by one row and still points into
+     * the (possibly replaced) first page. */
+    ASSERT_TRUE(s->pages.first == p->node);
+    const Point p_pt = s->pointFromPin(point::Tag::active, *p).value;
+    ASSERT_TRUE(3 == p_pt.c.x);
+    ASSERT_TRUE(0 == p_pt.c.y);
+    s->untrackPin(p);
+}
+
+TEST(page_list, PageList_eraseRowBounded_hyperlink_dense_row_crosses_page_boundary) {
+    /* Same as the eraseRow variant above but for eraseRowBounded,
+     * which has the same rotate-then-clone structure and had the
+     * same bug: a cross-page row clone failure propagated out after
+     * the first page had already been rotated. */
+    ListHolder s(opts(80, 10));
+    const size_t link_count = 10;
+    ASSERT_TRUE(denseHyperlinkSetup(*s, link_count));
+
+    /* Erase the first active row with a limit that extends into the
+     * second page (5 rows remain in the first page, so a limit of 6
+     * forces the cross-page path). The dense hyperlink row must cross
+     * the page boundary into the first page. */
+    s->eraseRowBounded(Point::active(0, 0), 6);
+
+    /* Rows within the limit shifted up by one: the '0' marker row was
+     * erased, the dense row moved up across the page boundary to
+     * row 4, row 6 is the new blank row, and rows past the limit are
+     * unchanged. */
+    const uint32_t expected[10] = {'1', '2', '3', '4', 'A', '6', 0, '7', '8', '9'};
+    for (uint32_t y = 0; y < 10; y++) {
+        ASSERT_TRUE(expected[y] == s->getCell(Point::active(0, y)).value.cell->contentCodepoint());
+    }
+
+    ASSERT_TRUE(denseRowIntact(*s, link_count));
+}
+
+TEST(page_list, PageList_clone) {
+    ListHolder s(opts(80, 24));
+    ASSERT_TRUE((size_t)s->rows == s->totalRows());
+
+    PageList s2;
+    ASSERT_TRUE(s->clone(talloc(), PageList::Clone(Point::screen()), &s2) == page::PageError::none);
+    ASSERT_TRUE((size_t)s->rows == s2.totalRows());
+    s2.deinit();
+}
+
+TEST(page_list, PageList_clone_partial_trimmed_right) {
+    ListHolder s(opts(80, 20));
+    ASSERT_TRUE((size_t)s->rows == s->totalRows());
+    ASSERT_TRUE(s->growRows(30));
+
+    PageList s2;
+    ASSERT_TRUE(s->clone(talloc(), PageList::Clone(Point::screen(), Point::screen(0, 39)), &s2) ==
+                page::PageError::none);
+    ASSERT_TRUE(40 == s2.totalRows());
+    s2.deinit();
+}
+
+TEST(page_list, PageList_clone_partial_trimmed_left) {
+    ListHolder s(opts(80, 20));
+    ASSERT_TRUE((size_t)s->rows == s->totalRows());
+    ASSERT_TRUE(s->growRows(30));
+
+    PageList s2;
+    ASSERT_TRUE(s->clone(talloc(), PageList::Clone(Point::screen(0, 10)), &s2) == page::PageError::none);
+    ASSERT_TRUE(40 == s2.totalRows());
+    s2.deinit();
+}
+
 /* @@TESTS@@ */
 
 /* Wisp: std.testing.allocator's leak check. Runs last (registration order). */
