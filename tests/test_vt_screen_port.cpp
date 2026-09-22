@@ -67,6 +67,12 @@ struct SelDeinit {
 };
 #define SEL(var, scr, e)                                                                                                   const Maybe<Selection> var##_maybe = (e);                                                                              ASSERT_TRUE(var##_maybe.has);                                                                                          Selection var = var##_maybe.value;                                                                                     SelDeinit var##_deinit = {&var, &(scr)};                                                                               (void)var##_deinit
 
+/* Wisp: defer s.pages.pauseIntegrityChecks(false); */
+struct PauseGuard {
+    PageList *pl;
+    ~PauseGuard() { pl->pauseIntegrityChecks(false); }
+};
+
 /* Wisp: .{ .pin = p, .whitespace = null, .semantic_prompt_boundary = b } */
 static Screen::SelectLine selLine(const Pin &p, bool whitespace_null = false, bool semantic_prompt_boundary = true) {
     Screen::SelectLine l(p);
@@ -3571,6 +3577,373 @@ TEST(screen, Screen__selectLine_semantic_boundary_disabled) {
     {
         SEL(sel, s, s.selectLine(selLine(pinAt(s, Point::active(0, 0)), false, false)));
         EXPECT_STR("$ command", s.selectionString(Screen::SelectionString(sel, false)));
+    }
+}
+
+TEST(screen, Screen__selectLine_semantic_boundary_first_cell_of_row) {
+
+    SCREEN(s, 5, 5, (size_t)0);
+
+    /* Row 0: input that soft-wraps
+     * Row 1: output starts at first cell */
+    s.cursorSetSemanticContent(SCS::makeInput(SCS::InputClear::clear_explicit));
+    WRITE(s, "12345");
+    s.cursorSetSemanticContent(SCS::makeOutput());
+    WRITE(s, "ABCDE");
+
+    /* Verify soft-wrap happened */
+    {
+        const Pin pin = pinAt(s, Point::active(0, 0));
+        Row *row = pin.rowAndCell().row;
+        ASSERT_TRUE(row->wrap());
+    }
+
+    /* Selecting from input should stop before output on row 1 */
+    {
+        SEL(sel, s, s.selectLine(selLine(pinAt(s, Point::active(2, 0)))));
+        ASSERT_TRUE(ptEq(s.pages.pointFromPin(point::Tag::active, sel.start()), Point::active(0, 0)));
+        ASSERT_TRUE(ptEq(s.pages.pointFromPin(point::Tag::active, sel.end()), Point::active(4, 0)));
+    }
+
+    /* Selecting from output should only get output */
+    {
+        SEL(sel, s, s.selectLine(selLine(pinAt(s, Point::active(2, 1)))));
+        ASSERT_TRUE(ptEq(s.pages.pointFromPin(point::Tag::active, sel.start()), Point::active(0, 1)));
+        ASSERT_TRUE(ptEq(s.pages.pointFromPin(point::Tag::active, sel.end()), Point::active(4, 1)));
+    }
+}
+
+TEST(screen, Screen__selectLine_semantic_boundary_across_mixed_width_pages) {
+
+    SCREEN(s, 4, 2, (size_t)0);
+
+    s.cursorSetSemanticContent(SCS::makeInput(SCS::InputClear::clear_explicit));
+    WRITE(s, "ABCD");
+    s.cursorSetSemanticContent(SCS::makeOutput());
+    WRITE(s, "E");
+
+    PageList::Node *first = s.pages.pages.first;
+    ASSERT_TRUE(s.pages.split(Pin(first, 1, 0)) == PageList::SplitError::none);
+    PageList::Node *second = first->next;
+    first->page()->size.cols = 2;
+    s.pages.pauseIntegrityChecks(true);
+    PauseGuard pause_guard = {&s.pages};
+
+    ASSERT_TRUE(2 == first->cols());
+    ASSERT_TRUE(4 == second->cols());
+
+    SEL(sel, s, s.selectLine(selLine(Pin(first, 0, 1))));
+    ASSERT_TRUE(Pin(first, 0, 0).eql(sel.start()));
+    ASSERT_TRUE(Pin(first, 0, 1).eql(sel.end()));
+}
+
+TEST(screen, Screen__selectLine_semantic_all_same_content) {
+
+    SCREEN(s, 5, 5, (size_t)0);
+
+    /* All prompt content that soft-wraps */
+    s.cursorSetSemanticContent(SCS::makePrompt(PromptKind::initial));
+    WRITE(s, "prompt text");
+
+    /* Verify soft-wrap */
+    EXPECT_DUMP(s, screen, "promp\nt tex\nt");
+
+    /* Should select all prompt content across soft-wraps */
+    {
+        SEL(sel, s, s.selectLine(selLine(pinAt(s, Point::active(2, 1)))));
+        EXPECT_STR("prompt text", s.selectionString(Screen::SelectionString(sel, false)));
+    }
+}
+
+TEST(screen, Screen__selectWord) {
+
+    SCREEN(s, 10, 10, (size_t)0);
+    WRITE(s, "ABC  DEF\n 123\n456");
+
+    /* Default boundary codepoints for word selection */
+    static const uint32_t boundary_codepoints[] = {0,   ' ', '\t', '\'', '"', 0x2502, '`', '|', ':',  ';',  ',', '(', ')', '[',  ']',  '{', '}', '<', '>',  '$'};
+    const size_t boundary_codepoints_len = sizeof(boundary_codepoints) / sizeof(boundary_codepoints[0]);
+
+    /* Outside of active area
+     * try testing.expect(s.selectWord(.{ .x = 9, .y = 0 }) == null);
+     * try testing.expect(s.selectWord(.{ .x = 0, .y = 5 }) == null); */
+
+    /* Going forward */
+    {
+        SEL(sel, s, s.selectWord(pinAt(s, Point::active(0, 0)), boundary_codepoints, boundary_codepoints_len));
+        ASSERT_TRUE(ptEq(s.pages.pointFromPin(point::Tag::screen, sel.start()), Point::screen(0, 0)));
+        ASSERT_TRUE(ptEq(s.pages.pointFromPin(point::Tag::screen, sel.end()), Point::screen(2, 0)));
+    }
+
+    /* Going backward */
+    {
+        SEL(sel, s, s.selectWord(pinAt(s, Point::active(2, 0)), boundary_codepoints, boundary_codepoints_len));
+        ASSERT_TRUE(ptEq(s.pages.pointFromPin(point::Tag::screen, sel.start()), Point::screen(0, 0)));
+        ASSERT_TRUE(ptEq(s.pages.pointFromPin(point::Tag::screen, sel.end()), Point::screen(2, 0)));
+    }
+
+    /* Going forward and backward */
+    {
+        SEL(sel, s, s.selectWord(pinAt(s, Point::active(1, 0)), boundary_codepoints, boundary_codepoints_len));
+        ASSERT_TRUE(ptEq(s.pages.pointFromPin(point::Tag::screen, sel.start()), Point::screen(0, 0)));
+        ASSERT_TRUE(ptEq(s.pages.pointFromPin(point::Tag::screen, sel.end()), Point::screen(2, 0)));
+    }
+
+    /* Whitespace */
+    {
+        SEL(sel, s, s.selectWord(pinAt(s, Point::active(3, 0)), boundary_codepoints, boundary_codepoints_len));
+        ASSERT_TRUE(ptEq(s.pages.pointFromPin(point::Tag::screen, sel.start()), Point::screen(3, 0)));
+        ASSERT_TRUE(ptEq(s.pages.pointFromPin(point::Tag::screen, sel.end()), Point::screen(4, 0)));
+    }
+
+    /* Whitespace single char */
+    {
+        SEL(sel, s, s.selectWord(pinAt(s, Point::active(0, 1)), boundary_codepoints, boundary_codepoints_len));
+        ASSERT_TRUE(ptEq(s.pages.pointFromPin(point::Tag::screen, sel.start()), Point::screen(0, 1)));
+        ASSERT_TRUE(ptEq(s.pages.pointFromPin(point::Tag::screen, sel.end()), Point::screen(0, 1)));
+    }
+
+    /* End of screen */
+    {
+        SEL(sel, s, s.selectWord(pinAt(s, Point::active(1, 2)), boundary_codepoints, boundary_codepoints_len));
+        ASSERT_TRUE(ptEq(s.pages.pointFromPin(point::Tag::screen, sel.start()), Point::screen(0, 2)));
+        ASSERT_TRUE(ptEq(s.pages.pointFromPin(point::Tag::screen, sel.end()), Point::screen(2, 2)));
+    }
+}
+
+TEST(screen, Screen__selectWord_across_soft_wrap) {
+
+    SCREEN(s, 5, 10, (size_t)0);
+    WRITE(s, " 1234012\n 123");
+
+    /* Default boundary codepoints for word selection */
+    static const uint32_t boundary_codepoints[] = {0,   ' ', '\t', '\'', '"', 0x2502, '`', '|', ':',  ';',  ',', '(', ')', '[',  ']',  '{', '}', '<', '>',  '$'};
+    const size_t boundary_codepoints_len = sizeof(boundary_codepoints) / sizeof(boundary_codepoints[0]);
+
+    EXPECT_DUMP(s, screen, " 1234\n012\n 123");
+
+    /* Going forward */
+    {
+        SEL(sel, s, s.selectWord(pinAt(s, Point::active(1, 0)), boundary_codepoints, boundary_codepoints_len));
+        ASSERT_TRUE(ptEq(s.pages.pointFromPin(point::Tag::screen, sel.start()), Point::screen(1, 0)));
+        ASSERT_TRUE(ptEq(s.pages.pointFromPin(point::Tag::screen, sel.end()), Point::screen(2, 1)));
+    }
+
+    /* Going backward */
+    {
+        SEL(sel, s, s.selectWord(pinAt(s, Point::active(1, 1)), boundary_codepoints, boundary_codepoints_len));
+        ASSERT_TRUE(ptEq(s.pages.pointFromPin(point::Tag::screen, sel.start()), Point::screen(1, 0)));
+        ASSERT_TRUE(ptEq(s.pages.pointFromPin(point::Tag::screen, sel.end()), Point::screen(2, 1)));
+    }
+
+    /* Going forward and backward */
+    {
+        SEL(sel, s, s.selectWord(pinAt(s, Point::active(3, 0)), boundary_codepoints, boundary_codepoints_len));
+        ASSERT_TRUE(ptEq(s.pages.pointFromPin(point::Tag::screen, sel.start()), Point::screen(1, 0)));
+        ASSERT_TRUE(ptEq(s.pages.pointFromPin(point::Tag::screen, sel.end()), Point::screen(2, 1)));
+    }
+}
+
+TEST(screen, Screen__selectWord_whitespace_across_soft_wrap) {
+
+    SCREEN(s, 5, 10, (size_t)0);
+    WRITE(s, "1       1\n 123");
+
+    /* Default boundary codepoints for word selection */
+    static const uint32_t boundary_codepoints[] = {0,   ' ', '\t', '\'', '"', 0x2502, '`', '|', ':',  ';',  ',', '(', ')', '[',  ']',  '{', '}', '<', '>',  '$'};
+    const size_t boundary_codepoints_len = sizeof(boundary_codepoints) / sizeof(boundary_codepoints[0]);
+
+    /* Going forward */
+    {
+        SEL(sel, s, s.selectWord(pinAt(s, Point::active(1, 0)), boundary_codepoints, boundary_codepoints_len));
+        ASSERT_TRUE(ptEq(s.pages.pointFromPin(point::Tag::screen, sel.start()), Point::screen(1, 0)));
+        ASSERT_TRUE(ptEq(s.pages.pointFromPin(point::Tag::screen, sel.end()), Point::screen(2, 1)));
+    }
+
+    /* Going backward */
+    {
+        SEL(sel, s, s.selectWord(pinAt(s, Point::active(1, 1)), boundary_codepoints, boundary_codepoints_len));
+        ASSERT_TRUE(ptEq(s.pages.pointFromPin(point::Tag::screen, sel.start()), Point::screen(1, 0)));
+        ASSERT_TRUE(ptEq(s.pages.pointFromPin(point::Tag::screen, sel.end()), Point::screen(2, 1)));
+    }
+
+    /* Going forward and backward */
+    {
+        SEL(sel, s, s.selectWord(pinAt(s, Point::active(3, 0)), boundary_codepoints, boundary_codepoints_len));
+        ASSERT_TRUE(ptEq(s.pages.pointFromPin(point::Tag::screen, sel.start()), Point::screen(1, 0)));
+        ASSERT_TRUE(ptEq(s.pages.pointFromPin(point::Tag::screen, sel.end()), Point::screen(2, 1)));
+    }
+}
+
+TEST(screen, Screen__selectWord_with_character_boundary) {
+
+    /* Default boundary codepoints for word selection */
+    static const uint32_t boundary_codepoints[] = {0,   ' ', '\t', '\'', '"', 0x2502, '`', '|', ':',  ';',  ',', '(', ')', '[',  ']',  '{', '}', '<', '>',  '$'};
+    const size_t boundary_codepoints_len = sizeof(boundary_codepoints) / sizeof(boundary_codepoints[0]);
+
+    static const char *const cases[] = {
+        " 'abc' \n123",
+        " \"abc\" \n123",
+        " \xE2\x94\x82" "abc\xE2\x94\x82 \n123",
+        " `abc` \n123",
+        " |abc| \n123",
+        " :abc: \n123",
+        " ;abc; \n123",
+        " ,abc, \n123",
+        " (abc( \n123", " )abc) \n123",
+        " [abc[ \n123",
+        " ]abc] \n123",
+        " {abc{ \n123",
+        " }abc} \n123",
+        " <abc< \n123",
+        " >abc> \n123",
+        " $abc$ \n123",
+    };
+
+    for (size_t case_i = 0; case_i < sizeof(cases) / sizeof(cases[0]); case_i++) {
+        const char *case_ = cases[case_i];
+        SCREEN(s, 20, 10, (size_t)0);
+        WRITE(s, case_);
+
+        /* Inside character forward */
+        {
+            SEL(sel, s, s.selectWord(pinAt(s, Point::active(2, 0)), boundary_codepoints, boundary_codepoints_len));
+            ASSERT_TRUE(ptEq(s.pages.pointFromPin(point::Tag::screen, sel.start()), Point::screen(2, 0)));
+            ASSERT_TRUE(ptEq(s.pages.pointFromPin(point::Tag::screen, sel.end()), Point::screen(4, 0)));
+        }
+
+        /* Inside character backward */
+        {
+            SEL(sel, s, s.selectWord(pinAt(s, Point::active(4, 0)), boundary_codepoints, boundary_codepoints_len));
+            ASSERT_TRUE(ptEq(s.pages.pointFromPin(point::Tag::screen, sel.start()), Point::screen(2, 0)));
+            ASSERT_TRUE(ptEq(s.pages.pointFromPin(point::Tag::screen, sel.end()), Point::screen(4, 0)));
+        }
+
+        /* Inside character bidirectional */
+        {
+            SEL(sel, s, s.selectWord(pinAt(s, Point::active(3, 0)), boundary_codepoints, boundary_codepoints_len));
+            ASSERT_TRUE(ptEq(s.pages.pointFromPin(point::Tag::screen, sel.start()), Point::screen(2, 0)));
+            ASSERT_TRUE(ptEq(s.pages.pointFromPin(point::Tag::screen, sel.end()), Point::screen(4, 0)));
+        }
+
+        /* On quote
+         * NOTE: this behavior is not ideal, so we can change this one day,
+         * but I think its also not that important compared to the above. */
+        {
+            SEL(sel, s, s.selectWord(pinAt(s, Point::active(1, 0)), boundary_codepoints, boundary_codepoints_len));
+            ASSERT_TRUE(ptEq(s.pages.pointFromPin(point::Tag::screen, sel.start()), Point::screen(0, 0)));
+            ASSERT_TRUE(ptEq(s.pages.pointFromPin(point::Tag::screen, sel.end()), Point::screen(1, 0)));
+        }
+    }
+}
+
+TEST(screen, Screen__selectOutput) {
+
+    SCREEN(s, 10, 15, (size_t)0);
+
+    /* Build content with cell-level semantic content:
+     * Row 0-1: output1 (output)
+     * Row 2: prompt2 (prompt)
+     * Row 3: input2 (input)
+     * Row 4-7: output2 (output, with overflow causing wrap)
+     * Row 8: "$ " (prompt) + "input3" (input)
+     * Row 9-11: output3 (output) */
+    s.cursorSetSemanticContent(SCS::makeOutput());
+    WRITE(s, "output1\n");
+    WRITE(s, "output1\n");
+    s.cursorSetSemanticContent(SCS::makePrompt(PromptKind::initial));
+    WRITE(s, "prompt2\n");
+    s.cursorSetSemanticContent(SCS::makeInput(SCS::InputClear::clear_explicit));
+    WRITE(s, "input2\n");
+    s.cursorSetSemanticContent(SCS::makeOutput());
+    WRITE(s, "output2output2output2output2\n");
+    WRITE(s, "output2\n");
+    s.cursorSetSemanticContent(SCS::makePrompt(PromptKind::initial));
+    WRITE(s, "$ ");
+    s.cursorSetSemanticContent(SCS::makeInput(SCS::InputClear::clear_explicit));
+    WRITE(s, "input3\n");
+    s.cursorSetSemanticContent(SCS::makeOutput());
+    WRITE(s, "output3\n");
+    WRITE(s, "output3\n");
+    WRITE(s, "output3");
+
+    /* First output block (rows 0-1), should select those rows */
+    {
+        SEL(sel, s, s.selectOutput(pinAt(s, Point::active(1, 1))));
+        EXPECT_STR("output1\noutput1", s.selectionString(Screen::SelectionString(sel, false)));
+    }
+    /* Second output block (rows 4-7) */
+    {
+        SEL(sel, s, s.selectOutput(pinAt(s, Point::active(3, 7))));
+        EXPECT_STR("output2output2output2output2\noutput2", s.selectionString(Screen::SelectionString(sel, false)));
+    }
+    /* Third output block (rows 9-11) */
+    {
+        SEL(sel, s, s.selectOutput(pinAt(s, Point::active(2, 10))));
+        ASSERT_TRUE(ptEq(s.pages.pointFromPin(point::Tag::active, sel.start()), Point::active(0, 9)));
+        ASSERT_TRUE(ptEq(s.pages.pointFromPin(point::Tag::active, sel.end()), Point::active(6, 11)));
+    }
+    /* Click on prompt should return null */
+    {
+        ASSERT_TRUE(!s.selectOutput(pinAt(s, Point::active(1, 8))).has);
+    }
+    /* Click on input should return null */
+    {
+        ASSERT_TRUE(!s.selectOutput(pinAt(s, Point::active(5, 8))).has);
+    }
+}
+
+TEST(screen, Screen__selectionString_basic) {
+
+    SCREEN(s, 5, 3, (size_t)0);
+    const char *str = "1ABCD\n2EFGH\n3IJKL";
+    WRITE(s, str);
+
+    {
+        const Selection sel = Selection::init(pinAt(s, Point::screen(0, 1)), pinAt(s, Point::screen(2, 2)), false);
+        EXPECT_STR("2EFGH\n3IJ", s.selectionString(Screen::SelectionString(sel, true)));
+    }
+}
+
+TEST(screen, Screen__selectionString_start_outside_of_written_area) {
+
+    SCREEN(s, 5, 10, (size_t)0);
+    const char *str = "1ABCD\n2EFGH\n3IJKL";
+    WRITE(s, str);
+
+    {
+        const Selection sel = Selection::init(pinAt(s, Point::screen(0, 5)), pinAt(s, Point::screen(2, 6)), false);
+        EXPECT_STR("", s.selectionString(Screen::SelectionString(sel, true)));
+    }
+}
+
+TEST(screen, Screen__selectionString_end_outside_of_written_area) {
+
+    SCREEN(s, 5, 10, (size_t)0);
+    const char *str = "1ABCD\n2EFGH\n3IJKL";
+    WRITE(s, str);
+
+    {
+        const Selection sel = Selection::init(pinAt(s, Point::screen(0, 2)), pinAt(s, Point::screen(2, 6)), false);
+        EXPECT_STR("3IJKL", s.selectionString(Screen::SelectionString(sel, true)));
+    }
+}
+
+TEST(screen, Screen__selectionString_trim_space) {
+
+    SCREEN(s, 5, 3, (size_t)0);
+    const char *str = "1AB  \n2EFGH\n3IJKL";
+    WRITE(s, str);
+
+    const Selection sel = Selection::init(pinAt(s, Point::screen(0, 0)), pinAt(s, Point::screen(2, 1)), false);
+
+    {
+        EXPECT_STR("1AB\n2EF", s.selectionString(Screen::SelectionString(sel, true)));
+    }
+
+    /* No trim */
+    {
+        EXPECT_STR("1AB  \n2EF", s.selectionString(Screen::SelectionString(sel, false)));
     }
 }
 
