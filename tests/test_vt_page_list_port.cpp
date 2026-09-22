@@ -4935,6 +4935,403 @@ TEST(page_list, PageList_resize_no_reflow_more_rows_contains_viewport) {
     ASSERT_TRUE(Viewport::top == s->viewport);
 }
 
+/* Wisp: `page.getCells(row).len` is the page's column count. */
+static bool allRowsHaveCols(PageList &s, size_t cols) {
+    PageList::RowIterator it = s.rowIterator(Dir::right_down, Point::screen());
+    Pin offset;
+    while (it.next(&offset)) {
+        (void)offset.rowAndCell();
+        if (offset.node->page()->size.cols != cols) return false;
+    }
+    return true;
+}
+
+static PageList::Resize rzc(int cols, int rows, bool reflow, size::CellCountInt cx, size::CellCountInt cy,
+                            Pin *pin = nullptr) {
+    PageList::Resize r = rz(cols, rows, reflow);
+    r.cursor = PageList::Resize::Cursor(cx, cy, pin);
+    return r;
+}
+
+static page::Cell wideCell(uint32_t cp, page::Cell::Wide w) {
+    page::Cell c = page::Cell::init(cp);
+    c.setWide(w);
+    return c;
+}
+
+TEST(page_list, PageList_resize_no_reflow_less_cols) {
+    ListHolder s(opts(10, 10, (size_t)0));
+
+    /* Resize */
+    ASSERT_TRUE(s->resize(rz(5, -1, false)));
+    ASSERT_TRUE(5 == s->cols);
+    ASSERT_TRUE(10 == s->totalRows());
+
+    ASSERT_TRUE(allRowsHaveCols(*s, 5));
+}
+
+TEST(page_list, PageList_resize_no_reflow_less_cols_pin_in_trimmed_cols) {
+    ListHolder s(opts(10, 10, (size_t)0));
+
+    /* Put a tracked pin in the history */
+    Pin *p = s->trackPin(s->pin(Point::active(8, 2)).value);
+
+    /* Resize */
+    ASSERT_TRUE(s->resize(rz(5, -1, false)));
+    ASSERT_TRUE(5 == s->cols);
+    ASSERT_TRUE(10 == s->totalRows());
+
+    ASSERT_TRUE(allRowsHaveCols(*s, 5));
+
+    ASSERT_TRUE(activeAt(*s, p, 4, 2));
+    s->untrackPin(p);
+}
+
+TEST(page_list, PageList_resize_no_reflow_less_cols_clears_graphemes) {
+    ListHolder s(opts(10, 10, (size_t)0));
+
+    /* Add a grapheme. */
+    Page *page = s->pages.first->page();
+    {
+        const Page::RowAndCell rac = page->getRowAndCell(9, 0);
+        *rac.cell = page::Cell::init('A');
+        ASSERT_TRUE(page->appendGrapheme(rac.row, rac.cell, 'A') == page::PageError::none);
+    }
+    ASSERT_TRUE(1 == page->graphemeCount());
+
+    /* Resize */
+    ASSERT_TRUE(s->resize(rz(5, -1, false)));
+    ASSERT_TRUE(5 == s->cols);
+    ASSERT_TRUE(10 == s->totalRows());
+
+    PageList::PageIterator it = s->pageIterator(Dir::right_down, Point::screen());
+    PageList::Chunk chunk;
+    while (it.next(&chunk)) {
+        ASSERT_TRUE(0 == chunk.node->page()->graphemeCount());
+    }
+}
+
+TEST(page_list, PageList_resize_no_reflow_more_cols) {
+    ListHolder s(opts(5, 3, (size_t)0));
+
+    /* Resize */
+    ASSERT_TRUE(s->resize(rz(10, -1, false)));
+    ASSERT_TRUE(10 == s->cols);
+    ASSERT_TRUE(3 == s->totalRows());
+
+    ASSERT_TRUE(allRowsHaveCols(*s, 10));
+}
+
+TEST(page_list, PageList_resize_no_reflow_more_cols_with_spacer_head) {
+    typedef page::Cell::Wide Wide;
+    ListHolder s(opts(2, 3, (size_t)0));
+    {
+        ASSERT_TRUE(s->pages.first == s->pages.last);
+        Page *page = s->pages.first->page();
+
+        {
+            const Page::RowAndCell rac = page->getRowAndCell(0, 0);
+            rac.row->setWrap(true);
+            *rac.cell = page::Cell::init('x');
+        }
+        *page->getRowAndCell(1, 0).cell = wideCell(0, Wide::spacer_head);
+        *page->getRowAndCell(0, 1).cell = wideCell(0x1F600, Wide::wide);
+        *page->getRowAndCell(1, 1).cell = wideCell(0, Wide::spacer_tail);
+    }
+
+    /* Resize */
+    ASSERT_TRUE(s->resize(rz(3, -1, false)));
+    ASSERT_TRUE(3 == s->cols);
+    ASSERT_TRUE(3 == s->totalRows());
+
+    {
+        ASSERT_TRUE(s->pages.first == s->pages.last);
+        Page *page = s->pages.first->page();
+
+        {
+            const Page::RowAndCell rac = page->getRowAndCell(0, 0);
+            ASSERT_TRUE('x' == rac.cell->contentCodepoint());
+            ASSERT_TRUE(Wide::narrow == rac.cell->wide());
+            /* try testing.expect(!rac.row.wrap); */
+        }
+        {
+            const Page::RowAndCell rac = page->getRowAndCell(1, 0);
+            ASSERT_TRUE(0 == rac.cell->contentCodepoint());
+            ASSERT_TRUE(Wide::narrow == rac.cell->wide());
+        }
+        {
+            const Page::RowAndCell rac = page->getRowAndCell(2, 0);
+            ASSERT_TRUE(0 == rac.cell->contentCodepoint());
+            ASSERT_TRUE(Wide::narrow == rac.cell->wide());
+        }
+    }
+}
+
+/* Regression test for fuzz crash. When we shrink cols and then
+ * grow back, the page retains capacity from the original size so the grow
+ * takes the fast path (just bumps page.size.cols). If any row has a
+ * spacer_head at the old last column, that cell is no longer at the end
+ * of the wider row, violating page integrity. */
+TEST(page_list, PageList_resize_no_reflow_grow_cols_fast_path_with_spacer_head) {
+    typedef page::Cell::Wide Wide;
+    ListHolder s(opts(10, 3, (size_t)0));
+
+    /* Shrink to 5 cols. The page keeps capacity for 10 cols. */
+    ASSERT_TRUE(s->resize(rz(5, -1, false)));
+    ASSERT_TRUE(5 == s->cols);
+
+    /* Place a spacer_head at the last column (col 4) on two rows
+     * to simulate a wide character that didn't fit at the right edge. */
+    {
+        Page *page = s->pages.first->page();
+
+        /* Row 0: 'x' at col 0..3, spacer_head at col 4, wrap = true */
+        *page->getRowAndCell(0, 0).cell = page::Cell::init('x');
+        {
+            const Page::RowAndCell rac = page->getRowAndCell(4, 0);
+            *rac.cell = wideCell(0, Wide::spacer_head);
+            rac.row->setWrap(true);
+        }
+
+        /* Row 1: spacer_head at col 4, wrap = true */
+        {
+            const Page::RowAndCell rac = page->getRowAndCell(4, 1);
+            *rac.cell = wideCell(0, Wide::spacer_head);
+            rac.row->setWrap(true);
+        }
+    }
+
+    /* Grow back to 10 cols. This must not leave stale spacer_head
+     * cells at col 4 (which is no longer the last column). */
+    ASSERT_TRUE(s->resize(rz(10, -1, false)));
+    ASSERT_TRUE(10 == s->cols);
+
+    /* Verify the old spacer_head positions are now narrow. */
+    {
+        Page *page = s->pages.first->page();
+        {
+            const Page::RowAndCell rac = page->getRowAndCell(4, 0);
+            ASSERT_TRUE(Wide::narrow == rac.cell->wide());
+            ASSERT_FALSE(rac.row->wrap());
+        }
+        {
+            const Page::RowAndCell rac = page->getRowAndCell(4, 1);
+            ASSERT_TRUE(Wide::narrow == rac.cell->wide());
+            ASSERT_FALSE(rac.row->wrap());
+        }
+    }
+}
+
+/* This test is a bit convoluted so I want to explain: what we are trying
+ * to verify here is that when we increase cols such that our rows per page
+ * shrinks, we don't fragment our rows across many pages because this ends
+ * up wasting a lot of memory.
+ *
+ * This is particularly important for alternate screen buffers where we
+ * don't have scrollback so our max size is very small. If we don't do this,
+ * we end up pruning our pages and that causes resizes to fail! */
+TEST(page_list, PageList_resize_no_reflow_more_cols_forces_less_rows_per_page) {
+    /* This test requires initially that our rows fit into one page. */
+    const size::CellCountInt cols = 5;
+    const size::CellCountInt rows = 150;
+    ASSERT_TRUE(stdAdjust(cols).rows >= rows);
+    ListHolder s(opts(cols, rows, (size_t)0));
+
+    /* Then we need to resize our cols so that our rows per page shrinks.
+     * This will force our resize to split our rows across two pages. */
+    {
+        size::CellCountInt new_cols = 50;
+        Capacity cap = stdAdjust(new_cols);
+        while (cap.rows >= rows) {
+            new_cols += 50;
+            cap = stdAdjust(new_cols);
+        }
+        ASSERT_TRUE(s->resize(rz(new_cols, -1, false)));
+        ASSERT_TRUE(new_cols == s->cols);
+        ASSERT_TRUE(rows == s->totalRows());
+    }
+
+    /* Every page except the last should be full */
+    for (Node *page = s->pages.first; page; page = page->next) {
+        if (page == s->pages.last) break;
+        ASSERT_TRUE(page->capacity().rows == page->rows());
+    }
+
+    /* Now we need to resize again to a col size that further shrinks
+     * our last capacity. */
+    {
+        Page *page = s->pages.first->page();
+        ASSERT_TRUE(page->size.rows == page->capacity.rows);
+        size::CellCountInt new_cols = (size::CellCountInt)(page->size.cols + 50);
+        Capacity cap = stdAdjust(new_cols);
+        while (cap.rows >= page->size.rows) {
+            new_cols += 50;
+            cap = stdAdjust(new_cols);
+        }
+
+        ASSERT_TRUE(s->resize(rz(new_cols, -1, false)));
+        ASSERT_TRUE(new_cols == s->cols);
+        ASSERT_TRUE(rows == s->totalRows());
+    }
+
+    /* Every page except the last should be full */
+    for (Node *page = s->pages.first; page; page = page->next) {
+        if (page == s->pages.last) break;
+        ASSERT_TRUE(page->capacity().rows == page->rows());
+    }
+}
+
+TEST(page_list, PageList_resize_no_reflow_less_cols_then_more_cols) {
+    ListHolder s(opts(5, 3, (size_t)0));
+
+    /* Resize less */
+    ASSERT_TRUE(s->resize(rz(2, -1, false)));
+    ASSERT_TRUE(2 == s->cols);
+
+    /* Resize */
+    ASSERT_TRUE(s->resize(rz(5, -1, false)));
+    ASSERT_TRUE(5 == s->cols);
+    ASSERT_TRUE(3 == s->totalRows());
+
+    ASSERT_TRUE(allRowsHaveCols(*s, 5));
+}
+
+TEST(page_list, PageList_resize_no_reflow_less_rows_and_cols) {
+    ListHolder s(opts(10, 10, (size_t)0));
+
+    /* Resize less */
+    ASSERT_TRUE(s->resize(rz(5, 7, false)));
+    ASSERT_TRUE(5 == s->cols);
+    ASSERT_TRUE(7 == s->rows);
+
+    ASSERT_TRUE(allRowsHaveCols(*s, 5));
+}
+
+TEST(page_list, PageList_resize_less_rows_and_cols_cursor_at_bottom) {
+    ListHolder s(opts(80, 24, (size_t)0));
+
+    Pin *cursor_pin = s->trackPin(s->pin(Point::active(0, (uint32_t)(s->rows - 1))).value);
+
+    /* Shrink both axes such that the original cursor.y is strictly past the
+     * new row count, so resizeWithoutReflow leaves self.rows < c.y + 1. */
+    ASSERT_TRUE(s->resize(rzc(79, 20, true, 0, 23, cursor_pin)));
+    ASSERT_TRUE(79 == s->cols);
+    ASSERT_TRUE(20 == s->rows);
+
+    /* remaining_rows saturates to 0, so the cursor lands on the new bottom row. */
+    ASSERT_TRUE(activeAt(*s, cursor_pin, 0, (uint32_t)(s->rows - 1)));
+    s->untrackPin(cursor_pin);
+}
+
+TEST(page_list, PageList_resize_less_rows_and_cols_cursor_near_top_pushed_to_scrollback) {
+    ListHolder s(opts(80, 24));
+
+    /* Fill every active row with non-blank content so that shrinking rows
+     * can't trim trailing blank lines and instead pushes the top rows into
+     * scrollback. */
+    {
+        PageList::RowIterator it = s->rowIterator(Dir::right_down, Point::active());
+        Pin p;
+        while (it.next(&p)) {
+            const Page::RowAndCell rac = p.rowAndCell();
+            page::Cell *cells = p.node->page()->getCells(rac.row);
+            const size_t n = p.node->page()->size.cols;
+            for (size_t x = 0; x < n; x++) cells[x] = page::Cell::init((uint32_t)('A' + (x % 26)));
+        }
+    }
+
+    /* Cursor near the top of the active area. After we shrink rows the active
+     * area top moves down past this pin, so it ends up in scrollback. */
+    Pin *cursor_pin = s->trackPin(s->pin(Point::active(0, 0)).value);
+
+    /* Shrink both axes with reflow. resizeWithoutReflow shrinks self.rows
+     * first, leaving the cursor pin above the new active area, then resizeCols
+     * walks .left_up from the cursor pin toward the active-area top. */
+    ASSERT_TRUE(s->resize(rzc(79, 20, true, 0, 0, cursor_pin)));
+    ASSERT_TRUE(79 == s->cols);
+    ASSERT_TRUE(20 == s->rows);
+
+    /* The active area is anchored to the bottom, so shrinking rows pushed the
+     * top-of-screen cursor into scrollback: it no longer resolves to an
+     * active-area coordinate, but it remains a valid screen pin. */
+    ASSERT_FALSE(s->pointFromPin(point::Tag::active, *cursor_pin).has);
+    ASSERT_TRUE(s->pointFromPin(point::Tag::screen, *cursor_pin).has);
+
+    /* Integrity must hold after the resize. */
+    s->assertIntegrity();
+    s->untrackPin(cursor_pin);
+}
+
+TEST(page_list, PageList_resize_no_reflow_more_rows_and_less_cols) {
+    ListHolder s(opts(10, 10, (size_t)0));
+
+    /* Resize less */
+    ASSERT_TRUE(s->resize(rz(5, 20, false)));
+    ASSERT_TRUE(5 == s->cols);
+    ASSERT_TRUE(20 == s->rows);
+    ASSERT_TRUE(20 == s->totalRows());
+
+    ASSERT_TRUE(allRowsHaveCols(*s, 5));
+}
+
+TEST(page_list, PageList_resize_more_rows_and_cols_doesnt_fit_in_single_std_page) {
+    ListHolder s(opts(10, 10, (size_t)0));
+
+    /* Resize to a size that requires more than one page to fit our rows. */
+    const int new_cols = 600;
+    const int new_rows = 600;
+    const Capacity cap = stdAdjust(new_cols);
+    ASSERT_TRUE(cap.rows < new_rows);
+
+    ASSERT_TRUE(s->resize(rz(new_cols, new_rows, true)));
+    ASSERT_TRUE(new_cols == s->cols);
+    ASSERT_TRUE(new_rows == s->rows);
+    ASSERT_TRUE((size_t)new_rows == s->totalRows());
+}
+
+TEST(page_list, PageList_resize_no_reflow_empty_screen) {
+    ListHolder s(opts(5, 5, (size_t)0));
+
+    /* Resize */
+    ASSERT_TRUE(s->resize(rz(10, 10, false)));
+    ASSERT_TRUE(10 == s->cols);
+    ASSERT_TRUE(10 == s->rows);
+    ASSERT_TRUE(10 == s->totalRows());
+
+    ASSERT_TRUE(allRowsHaveCols(*s, 10));
+}
+
+TEST(page_list, PageList_resize_no_reflow_more_cols_forces_smaller_cap) {
+    /* We want a cap that forces us to have less rows */
+    const Capacity cap = stdAdjust(100);
+    const Capacity cap2 = stdAdjust(500);
+    ASSERT_TRUE(500 == cap2.cols);
+    ASSERT_TRUE(cap2.rows < cap.rows);
+
+    /* Create initial cap, fits in one page */
+    ListHolder s(opts(cap.cols, cap.rows));
+    ASSERT_TRUE(s->pages.first == s->pages.last);
+    Page *page = s->pages.first->page();
+    for (size_t y = 0; y < s->rows; y++) {
+        for (size_t x = 0; x < s->cols; x++) *page->getRowAndCell(x, y).cell = page::Cell::init('A');
+    }
+
+    /* Resize to our large cap */
+    const size_t rows = s->totalRows();
+    ASSERT_TRUE(s->resize(rz(cap2.cols, -1, false)));
+
+    /* Our total rows should be the same, and contents should be the same. */
+    ASSERT_TRUE(rows == s->totalRows());
+    PageList::RowIterator it = s->rowIterator(Dir::right_down, Point::screen());
+    Pin offset;
+    while (it.next(&offset)) {
+        const Page::RowAndCell rac = offset.rowAndCell();
+        const page::Cell *cells = offset.node->page()->getCells(rac.row);
+        ASSERT_TRUE(cap2.cols == offset.node->page()->size.cols);
+        ASSERT_TRUE('A' == cells[0].contentCodepoint());
+    }
+}
+
 /* @@TESTS@@ */
 
 /* Wisp: std.testing.allocator's leak check. Runs last (registration order). */
