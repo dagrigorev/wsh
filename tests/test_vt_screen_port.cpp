@@ -18,6 +18,8 @@ using namespace wisp::vt;
 
 typedef PageList::Pin Pin;
 typedef page::Page Page;
+typedef page::Row Row;
+typedef page::Cell Cell;
 typedef point::Point Point;
 
 static zigstd::Allocator talloc() { return zigstd::testing_allocator(); }
@@ -30,6 +32,40 @@ struct ScreenHolder {
         if (ok) s.deinit();
     }
 };
+
+/* Wisp: shorthands for upstream's repeated test scaffolding.
+ *   var s = try Screen.init(io, alloc, .{...}); defer s.deinit();   SCREEN(s, cols, rows, sb)
+ *   try s.testWriteString(str)                                        WRITE(s, str)
+ *   expectEqualStrings(str, dumpStringAlloc(alloc, .{ .tag = .{} }))  EXPECT_DUMP(s, tag, str) */
+#define SCREEN_OPTS(var, opts)                                                                                             ScreenHolder var##_holder(opts);                                                                                       ASSERT_TRUE(var##_holder.ok);                                                                                          Screen &var = var##_holder.s
+#define SCREEN(var, c, r, sb) SCREEN_OPTS(var, Screen::Options((c), (r), (sb)))
+#define WRITE(s, str) ASSERT_TRUE((s).testWriteString(str))
+#define EXPECT_STR(expected, actual)                                                                                       do {                                                                                                                       const std::string _actual = (actual);                                                                                  ASSERT_STR_EQ(expected, _actual.c_str());                                                                          } while (0)
+#define EXPECT_DUMP(s, tag, expected) EXPECT_STR(expected, (s).dumpStringAlloc(Point::tag()))
+#define EXPECT_DUMP_UNWRAPPED(s, tag, expected) EXPECT_STR(expected, (s).dumpStringAllocUnwrapped(Point::tag()))
+#define NOERR(e) ASSERT_TRUE((e) == PageList::IncreaseCapacityError::none)
+
+static const size_t unlimited = SIZE_MAX;
+
+static terminal::sgr::Attribute attr(terminal::sgr::Attribute::Tag t) { return terminal::sgr::Attribute::make(t); }
+typedef terminal::sgr::Attribute::Tag A;
+
+static PageList::IncreaseCapacityError startLink(Screen &s, const char *uri, const char *id = nullptr) {
+    return s.startHyperlink((const uint8_t *)uri, strlen(uri), (const uint8_t *)id, id ? strlen(id) : 0);
+}
+
+/* Wisp: expectEqual(point.Point{...}, pointFromPin(...).?) */
+static bool ptEq(const Maybe<Point> &m, const Point &p) { return m.has && m.value.eql(p); }
+static bool rgbEq(const Cell::RGB &a, uint8_t r, uint8_t g, uint8_t b) { return a.r == r && a.g == g && a.b == b; }
+static Pin pinAt(const Screen &s, const Point &p) { return s.pages.pin(p).value; }
+
+TEST(screen, Screen_forwards_optional_scrollback_limits) {
+    const size_t max_lines = 123;
+    SCREEN_OPTS(s, Screen::Options(80, 24, Maybe<size_t>(), max_lines));
+    ASSERT_TRUE(SIZE_MAX == s.pages.limits.bytes.explicit_);
+    ASSERT_TRUE(max_lines == s.pages.limits.lines.explicit_);
+    ASSERT_TRUE(!s.no_scrollback);
+}
 
 TEST(screen, Screen_reset_cursor_pin_is_not_garbage) {
     ScreenHolder h(Screen::Options(80, 24, (size_t)1000));
@@ -86,6 +122,1436 @@ TEST(screen, Screen_read_and_write_no_scrollback_large) {
     }
     ASSERT_TRUE(s.testWriteString("1000"));
     ASSERT_TRUE(s.dumpStringAlloc(Point::screen()) == "999\n1000");
+}
+
+TEST(screen, Screen_cursorCopy_x_y) {
+    SCREEN(s, 10, 10, (size_t)0);
+    s.cursorAbsolute(2, 3);
+    ASSERT_TRUE(s.cursor.x == 2);
+    ASSERT_TRUE(s.cursor.y == 3);
+
+    SCREEN(s2, 10, 10, (size_t)0);
+    NOERR(s2.cursorCopy(s.cursor));
+    ASSERT_TRUE(s2.cursor.x == 2);
+    ASSERT_TRUE(s2.cursor.y == 3);
+    WRITE(s2, "Hello");
+
+    EXPECT_DUMP(s2, screen, "\n\n\n  Hello");
+}
+
+TEST(screen, Screen_cursorCopy_style_deref) {
+    SCREEN(s, 10, 10, (size_t)0);
+
+    SCREEN(s2, 10, 10, (size_t)0);
+    Page *page = s2.cursor.page_pin->node->page();
+
+    /* Bold should create our style */
+    NOERR(s2.setAttribute(attr(A::bold)));
+    ASSERT_TRUE(1 == page->styles.count());
+    ASSERT_TRUE(s2.cursor.style.flags.bold);
+
+    /* Copy default style, should release our style */
+    NOERR(s2.cursorCopy(s.cursor));
+    ASSERT_TRUE(!s2.cursor.style.flags.bold);
+    ASSERT_TRUE(0 == page->styles.count());
+}
+
+/* Wisp: shared setup of the "new page" cursorCopy tests. Fill the
+ * scrollback with blank lines until there are only 5 rows left on the
+ * first page, then write 10 lines. */
+static bool fillToSecondPage(Screen &s2) {
+    const size_t first_page_size = s2.pages.pages.first->capacity().rows;
+    s2.pages.pages.first->page()->pauseIntegrityChecks(true);
+    for (size_t i = 0; i < first_page_size - 5; i++) {
+        if (!s2.testWriteString("\n")) return false;
+    }
+    s2.pages.pages.first->page()->pauseIntegrityChecks(false);
+    return s2.testWriteString("1\n2\n3\n4\n5\n6\n7\n8\n9\n10");
+}
+
+TEST(screen, Screen_cursorCopy_style_deref_new_page) {
+    SCREEN(s, 10, 10, (size_t)0);
+    SCREEN(s2, 10, 10, (size_t)2048);
+
+    /* We need to get the cursor on a new page. */
+    ASSERT_TRUE(fillToSecondPage(s2));
+
+    /* This should be PAGE 1 */
+    Page *page = s2.cursor.page_pin->node->page();
+
+    /* It should be the last page in the list. */
+    ASSERT_TRUE(s2.pages.pages.last->page() == page);
+    /* It should have a previous page. */
+    ASSERT_TRUE(s2.cursor.page_pin->node->prev != nullptr);
+
+    /* The cursor should be at 2, 9 */
+    ASSERT_TRUE(s2.cursor.x == 2);
+    ASSERT_TRUE(s2.cursor.y == 9);
+
+    /* Bold should create our style in page 1. */
+    NOERR(s2.setAttribute(attr(A::bold)));
+    ASSERT_TRUE(1 == page->styles.count());
+    ASSERT_TRUE(s2.cursor.style.flags.bold);
+
+    /* Copy the cursor for the first screen. This should release
+     * the style from page 1 and move the cursor back to page 0. */
+    NOERR(s2.cursorCopy(s.cursor));
+    ASSERT_TRUE(!s2.cursor.style.flags.bold);
+    ASSERT_TRUE(0 == page->styles.count());
+    /* The page after the page the cursor is now in should be page 1. */
+    ASSERT_TRUE(page == s2.cursor.page_pin->node->next->page());
+    /* The cursor should be at 0, 0 */
+    ASSERT_TRUE(s2.cursor.x == 0);
+    ASSERT_TRUE(s2.cursor.y == 0);
+}
+
+TEST(screen, Screen_cursorCopy_style_copy) {
+    SCREEN(s, 10, 10, (size_t)0);
+    NOERR(s.setAttribute(attr(A::bold)));
+
+    SCREEN(s2, 10, 10, (size_t)0);
+    Page *page = s2.cursor.page_pin->node->page();
+    NOERR(s2.cursorCopy(s.cursor));
+    ASSERT_TRUE(s2.cursor.style.flags.bold);
+    ASSERT_TRUE(1 == page->styles.count());
+}
+
+TEST(screen, Screen_cursorCopy_hyperlink_deref) {
+    SCREEN(s, 10, 10, (size_t)0);
+
+    SCREEN(s2, 10, 10, (size_t)0);
+    Page *page = s2.cursor.page_pin->node->page();
+
+    /* Create a hyperlink for the cursor. */
+    NOERR(startLink(s2, "https://example.com/"));
+    ASSERT_TRUE(1 == page->hyperlink_set.count());
+    ASSERT_TRUE(s2.cursor.hyperlink_id != 0);
+
+    /* Copy a cursor with no hyperlink, should release our hyperlink. */
+    NOERR(s2.cursorCopy(s.cursor));
+    ASSERT_TRUE(0 == page->hyperlink_set.count());
+    ASSERT_TRUE(s2.cursor.hyperlink_id == 0);
+}
+
+TEST(screen, Screen_write_regrows_compacted_page_capacity) {
+    SCREEN(s, 80, 24, (size_t)0);
+
+    /* Compact the active page so every managed capacity dimension is
+     * zero, then reload the cursor since its cached row/cell pointers
+     * point into the replaced page. */
+    {
+        PageList::Node *node = nullptr;
+        ASSERT_TRUE(s.pages.compact(s.cursor.page_pin->node, &node));
+        ASSERT_TRUE(node != nullptr);
+        ASSERT_TRUE(0 == node->capacity().styles);
+        ASSERT_TRUE(0 == node->capacity().grapheme_bytes);
+        ASSERT_TRUE(0 == node->capacity().string_bytes);
+        ASSERT_TRUE(0 == node->capacity().hyperlink_bytes);
+        s.cursorReload();
+    }
+
+    /* Styled write: exercises the manualStyleUpdate single-retry
+     * path. Prior to increaseCapacity handling zero dimensions, the
+     * retry would fail and the style would be dropped. */
+    NOERR(s.setAttribute(attr(A::bold)));
+    WRITE(s, "A");
+
+    /* Grapheme write: exercises the appendGrapheme single-retry path.
+     * We can't use testWriteString here because it appends graphemes
+     * directly on the page without the capacity retry. */
+    WRITE(s, "a");
+    NOERR(s.appendGrapheme(s.cursorCellLeft(1), 0x0301));
+
+    /* Hyperlink: exercises the startHyperlink retry loop, which used
+     * to loop forever when capacity growth from zero didn't grow. */
+    NOERR(startLink(s, "https://example.com/"));
+    WRITE(s, "B");
+    s.endHyperlink();
+
+    /* Verify the content landed on the page. */
+    Page *page = s.cursor.page_pin->node->page();
+    ASSERT_TRUE(page->styles.count() >= 1);
+    ASSERT_TRUE(page->hyperlink_set.count() >= 1);
+    ASSERT_TRUE(page->graphemeCount() >= 1);
+}
+
+/* The cursor style and hyperlink IDs are only meaningful within the page
+ * the cursor pin points at. scrollClear can move the active area onto a
+ * later page while the cursor pin stays with its content on an earlier
+ * page (now scrollback), so the reset in cursorReload must migrate both
+ * references to the destination page. It previously replaced the pin
+ * directly and then released the old style ID on the new page. */
+TEST(screen, Screen_scrollClear_across_pages_migrates_cursor_style_and_hyperlink) {
+    SCREEN(s, 10, 10, unlimited);
+
+    /* Fill the first page so the active area spans two pages. */
+    ASSERT_TRUE(fillToSecondPage(s));
+    ASSERT_TRUE(s.pages.pages.first != s.pages.pages.last);
+
+    /* Move the cursor to the top of the active area, which is on the
+     * first page, and give it a style and a hyperlink there. */
+    s.cursorAbsolute(0, 0);
+    ASSERT_TRUE(s.cursor.page_pin->node == s.pages.pages.first);
+    NOERR(s.setAttribute(attr(A::bold)));
+    NOERR(startLink(s, "https://example.com/"));
+
+    Page *old_page = s.cursor.page_pin->node->page();
+    const style::Id old_style_id = s.cursor.style_id;
+    const hyperlink::Id old_hyperlink_id = s.cursor.hyperlink_id;
+    ASSERT_TRUE(old_style_id != style::default_id);
+    ASSERT_TRUE(old_hyperlink_id != 0);
+
+    /* All ten active rows are non-empty, so this moves the active area
+     * fully onto the second page while the cursor pin stays with its
+     * old row, which is now scrollback. */
+    ASSERT_TRUE(s.scrollClear());
+
+    /* The cursor was moved to the new active top-left on the second
+     * page with its style and hyperlink references rebuilt there. */
+    Page *new_page = s.cursor.page_pin->node->page();
+    ASSERT_TRUE(new_page != old_page);
+    ASSERT_TRUE(s.cursor.style_id != style::default_id);
+    ASSERT_TRUE(s.cursor.hyperlink_id != 0);
+    ASSERT_TRUE(new_page->styles.refCount((const void *)new_page->memory, s.cursor.style_id) > 0);
+    ASSERT_TRUE(new_page->hyperlink_set.refCount((const void *)new_page->memory, s.cursor.hyperlink_id) > 0);
+
+    /* The cursor's references on the old page were released. Nothing
+     * else referenced either entry, so both are dead there now. */
+    ASSERT_TRUE(0 == old_page->styles.refCount((const void *)old_page->memory, old_style_id));
+    ASSERT_TRUE(0 == old_page->hyperlink_set.refCount((const void *)old_page->memory, old_hyperlink_id));
+
+    /* Printing attaches the migrated style and hyperlink to a cell. */
+    WRITE(s, "B");
+}
+
+TEST(screen, Screen_cursorCopy_hyperlink_deref_new_page) {
+    SCREEN(s, 10, 10, (size_t)0);
+    SCREEN(s2, 10, 10, (size_t)2048);
+
+    /* We need to get the cursor on a new page. */
+    ASSERT_TRUE(fillToSecondPage(s2));
+
+    /* This should be PAGE 1 */
+    Page *page = s2.cursor.page_pin->node->page();
+
+    /* It should be the last page in the list. */
+    ASSERT_TRUE(s2.pages.pages.last->page() == page);
+    /* It should have a previous page. */
+    ASSERT_TRUE(s2.cursor.page_pin->node->prev != nullptr);
+
+    /* The cursor should be at 2, 9 */
+    ASSERT_TRUE(s2.cursor.x == 2);
+    ASSERT_TRUE(s2.cursor.y == 9);
+
+    /* Create a hyperlink for the cursor, should be in page 1. */
+    NOERR(startLink(s2, "https://example.com/"));
+    ASSERT_TRUE(1 == page->hyperlink_set.count());
+    ASSERT_TRUE(s2.cursor.hyperlink_id != 0);
+
+    /* Copy the cursor for the first screen. This should release
+     * the hyperlink from page 1 and move the cursor back to page 0. */
+    NOERR(s2.cursorCopy(s.cursor));
+    ASSERT_TRUE(0 == page->hyperlink_set.count());
+    ASSERT_TRUE(s2.cursor.hyperlink_id == 0);
+    /* The page after the page the cursor is now in should be page 1. */
+    ASSERT_TRUE(page == s2.cursor.page_pin->node->next->page());
+    /* The cursor should be at 0, 0 */
+    ASSERT_TRUE(s2.cursor.x == 0);
+    ASSERT_TRUE(s2.cursor.y == 0);
+}
+
+TEST(screen, Screen_cursorCopy_hyperlink_copy) {
+    SCREEN(s, 10, 10, (size_t)0);
+
+    /* Create a hyperlink for the cursor. */
+    NOERR(startLink(s, "https://example.com/"));
+    ASSERT_TRUE(1 == s.cursor.page_pin->node->page()->hyperlink_set.count());
+    ASSERT_TRUE(s.cursor.hyperlink_id != 0);
+
+    SCREEN(s2, 10, 10, (size_t)0);
+    Page *page = s2.cursor.page_pin->node->page();
+
+    ASSERT_TRUE(0 == page->hyperlink_set.count());
+    ASSERT_TRUE(s2.cursor.hyperlink_id == 0);
+
+    /* Copy the cursor with the hyperlink. */
+    NOERR(s2.cursorCopy(s.cursor));
+    ASSERT_TRUE(1 == page->hyperlink_set.count());
+    ASSERT_TRUE(s2.cursor.hyperlink_id != 0);
+}
+
+TEST(screen, Screen_cursorCopy_hyperlink_copy_disabled) {
+    SCREEN(s, 10, 10, (size_t)0);
+
+    /* Create a hyperlink for the cursor. */
+    NOERR(startLink(s, "https://example.com/"));
+    ASSERT_TRUE(1 == s.cursor.page_pin->node->page()->hyperlink_set.count());
+    ASSERT_TRUE(s.cursor.hyperlink_id != 0);
+
+    SCREEN(s2, 10, 10, (size_t)0);
+    Page *page = s2.cursor.page_pin->node->page();
+
+    ASSERT_TRUE(0 == page->hyperlink_set.count());
+    ASSERT_TRUE(s2.cursor.hyperlink_id == 0);
+
+    /* Copy the cursor with the hyperlink. */
+    NOERR(s2.cursorCopy(s.cursor, false));
+    ASSERT_TRUE(0 == page->hyperlink_set.count());
+    ASSERT_TRUE(s2.cursor.hyperlink_id == 0);
+}
+
+TEST(screen, Screen_style_basics) {
+    SCREEN(s, 80, 24, (size_t)1000);
+    Page *page = s.cursor.page_pin->node->page();
+    ASSERT_TRUE(0 == page->styles.count());
+
+    /* Set a new style */
+    NOERR(s.setAttribute(attr(A::bold)));
+    ASSERT_TRUE(s.cursor.style_id != 0);
+    ASSERT_TRUE(1 == page->styles.count());
+    ASSERT_TRUE(s.cursor.style.flags.bold);
+
+    /* Set another style, we should still only have one since it was unused */
+    NOERR(s.setAttribute(attr(A::italic)));
+    ASSERT_TRUE(s.cursor.style_id != 0);
+    ASSERT_TRUE(1 == page->styles.count());
+    ASSERT_TRUE(s.cursor.style.flags.italic);
+}
+
+TEST(screen, Screen_style_reset_to_default) {
+    SCREEN(s, 80, 24, (size_t)1000);
+    Page *page = s.cursor.page_pin->node->page();
+    ASSERT_TRUE(0 == page->styles.count());
+
+    /* Set a new style */
+    NOERR(s.setAttribute(attr(A::bold)));
+    ASSERT_TRUE(s.cursor.style_id != 0);
+    ASSERT_TRUE(1 == page->styles.count());
+
+    /* Reset to default */
+    NOERR(s.setAttribute(attr(A::reset_bold)));
+    ASSERT_TRUE(s.cursor.style_id == 0);
+    ASSERT_TRUE(0 == page->styles.count());
+}
+
+TEST(screen, Screen_style_reset_with_unset) {
+    SCREEN(s, 80, 24, (size_t)1000);
+    Page *page = s.cursor.page_pin->node->page();
+    ASSERT_TRUE(0 == page->styles.count());
+
+    /* Set a new style */
+    NOERR(s.setAttribute(attr(A::bold)));
+    ASSERT_TRUE(s.cursor.style_id != 0);
+    ASSERT_TRUE(1 == page->styles.count());
+
+    /* Reset to default */
+    NOERR(s.setAttribute(attr(A::unset)));
+    ASSERT_TRUE(s.cursor.style_id == 0);
+    ASSERT_TRUE(0 == page->styles.count());
+}
+
+TEST(screen, Screen_clearRows_active_one_line) {
+    SCREEN(s, 80, 24, (size_t)1000);
+
+    WRITE(s, "hello, world");
+    s.clearRows(Point::active(), Maybe<Point>(), false);
+    ASSERT_TRUE(s.pages.isDirty(Point::active(0, 0)));
+    EXPECT_DUMP(s, screen, "");
+}
+
+TEST(screen, Screen_clearRows_active_multi_line) {
+    SCREEN(s, 80, 24, (size_t)1000);
+
+    WRITE(s, "hello\nworld");
+    s.clearRows(Point::active(), Maybe<Point>(), false);
+    ASSERT_TRUE(s.pages.isDirty(Point::active(0, 0)));
+    ASSERT_TRUE(s.pages.isDirty(Point::active(0, 1)));
+    EXPECT_DUMP(s, screen, "");
+}
+
+TEST(screen, Screen_clearRows_active_styled_line) {
+    SCREEN(s, 80, 24, (size_t)1000);
+
+    NOERR(s.setAttribute(attr(A::bold)));
+    WRITE(s, "hello world");
+    NOERR(s.setAttribute(attr(A::unset)));
+
+    /* We should have one style */
+    Page *page = s.cursor.page_pin->node->page();
+    ASSERT_TRUE(1 == page->styles.count());
+
+    s.clearRows(Point::active(), Maybe<Point>(), false);
+
+    /* We should have none because active cleared it */
+    ASSERT_TRUE(0 == page->styles.count());
+
+    EXPECT_DUMP(s, screen, "");
+}
+
+TEST(screen, Screen_clearCells_empty_range) {
+    SCREEN_OPTS(s, Screen::Options::default_());
+
+    Page *page = s.cursor.page_pin->node->page();
+    Row *row = s.cursor.page_row;
+    Cell *cells = page->getCells(row);
+    s.clearCells(page, row, cells, 0);
+}
+
+TEST(screen, Screen_clearRows_uses_stored_page_width) {
+    SCREEN(s, 2, 1, (size_t)0);
+
+    WRITE(s, "AB");
+    PageList::Node *node = s.pages.pages.first;
+    s.pages.cols = 4;
+
+    s.clearRows(Point::screen(), Maybe<Point>(), false);
+    Page *page = node->page();
+    const Cell *cells = page->getCells(&page->rows.ptr(page->memory)[0]);
+    ASSERT_TRUE(2 == page->size.cols);
+    for (size_t i = 0; i < page->size.cols; i++) ASSERT_TRUE(cells[i].isEmpty());
+}
+
+TEST(screen, Screen_clearRows_protected) {
+    SCREEN(s, 80, 24, (size_t)1000);
+
+    WRITE(s, "UNPROTECTED");
+    s.cursor.protected_ = true;
+    WRITE(s, "PROTECTED");
+    s.cursor.protected_ = false;
+    WRITE(s, "UNPROTECTED");
+    WRITE(s, "\n");
+    s.cursor.protected_ = true;
+    WRITE(s, "PROTECTED");
+    s.cursor.protected_ = false;
+    WRITE(s, "UNPROTECTED");
+    s.cursor.protected_ = true;
+    WRITE(s, "PROTECTED");
+    s.cursor.protected_ = false;
+
+    s.clearRows(Point::active(), Maybe<Point>(), true);
+
+    EXPECT_DUMP(s, screen, "           PROTECTED\nPROTECTED           PROTECTED");
+}
+
+TEST(screen, Screen_eraseRows_history) {
+    SCREEN(s, 5, 5, (size_t)1000);
+
+    WRITE(s, "1\n2\n3\n4\n5\n6");
+
+    EXPECT_DUMP(s, active, "2\n3\n4\n5\n6");
+    EXPECT_DUMP(s, screen, "1\n2\n3\n4\n5\n6");
+
+    s.eraseHistory(Maybe<Point>());
+
+    EXPECT_DUMP(s, active, "2\n3\n4\n5\n6");
+    EXPECT_DUMP(s, screen, "2\n3\n4\n5\n6");
+}
+
+TEST(screen, Screen_eraseRows_history_with_more_lines) {
+    SCREEN(s, 5, 5, (size_t)1000);
+
+    WRITE(s, "A\nB\nC\n1\n2\n3\n4\n5\n6");
+
+    EXPECT_DUMP(s, active, "2\n3\n4\n5\n6");
+    EXPECT_DUMP(s, screen, "A\nB\nC\n1\n2\n3\n4\n5\n6");
+
+    s.eraseHistory(Maybe<Point>());
+
+    EXPECT_DUMP(s, active, "2\n3\n4\n5\n6");
+    EXPECT_DUMP(s, screen, "2\n3\n4\n5\n6");
+}
+
+TEST(screen, Screen_eraseRows_active_partial) {
+    SCREEN(s, 5, 5, (size_t)0);
+
+    WRITE(s, "1\n2\n3");
+
+    EXPECT_DUMP(s, active, "1\n2\n3");
+
+    s.eraseActive(1);
+
+    EXPECT_DUMP(s, active, "3");
+    EXPECT_DUMP(s, screen, "3");
+}
+
+TEST(screen, Screen__cursorCellEndOfPrev_across_mixed_width_pages) {
+    SCREEN(s, 4, 2, (size_t)0);
+
+    WRITE(s, "ABCDE");
+    PageList::Node *first = s.pages.pages.first;
+    ASSERT_TRUE(s.pages.split(Pin(first, 1)) == PageList::SplitError::none);
+    s.cursorReload();
+    PageList::Node *second = first->next;
+    first->page()->size.cols = 2;
+
+    ASSERT_TRUE(second == s.cursor.page_pin->node);
+    const Cell *expected = Pin(first, 0, 1).rowAndCell().cell;
+    ASSERT_TRUE(expected == s.cursorCellEndOfPrev());
+}
+
+/* Wisp: shared setup of the "across pages" cursor tests. Scroll down
+ * enough to go to another page. */
+static bool scrollToNewPage(Screen &s, Page *start_page) {
+    const size_t rem = start_page->capacity.rows;
+    start_page->pauseIntegrityChecks(true);
+    for (size_t i = 0; i < rem; i++)
+        if (!s.cursorDownOrScroll()) return false;
+    start_page->pauseIntegrityChecks(false);
+    return true;
+}
+
+TEST(screen, Screen__cursorDown_across_pages_preserves_style) {
+    SCREEN(s, 10, 3, (size_t)1);
+
+    /* Scroll down enough to go to another page */
+    Page *start_page = s.pages.pages.last->page();
+    ASSERT_TRUE(scrollToNewPage(s, start_page));
+
+    /* We need our page to change for this test o make sense. If this
+     * assertion fails then the bug is in the test: we should be scrolling
+     * above enough for a new page to show up. */
+    {
+        Page *page = s.cursor.page_pin->node->page();
+        ASSERT_TRUE(start_page != page);
+    }
+
+    /* Scroll back to the previous page */
+    s.cursorUp(1);
+    {
+        Page *page = s.cursor.page_pin->node->page();
+        ASSERT_TRUE(start_page == page);
+    }
+
+    /* Go back up, set a style */
+    NOERR(s.setAttribute(attr(A::bold)));
+    {
+        Page *page = s.cursor.page_pin->node->page();
+        const style::Style *styleval = page->styles.get((const void *)page->memory, s.cursor.style_id);
+        ASSERT_TRUE(styleval->flags.bold);
+    }
+
+    /* Go back down into the next page and we should have that style */
+    s.cursorDown(1);
+    {
+        Page *page = s.cursor.page_pin->node->page();
+        const style::Style *styleval = page->styles.get((const void *)page->memory, s.cursor.style_id);
+        ASSERT_TRUE(styleval->flags.bold);
+    }
+}
+
+TEST(screen, Screen__cursorUp_across_pages_preserves_style) {
+    SCREEN(s, 10, 3, (size_t)1);
+
+    /* Scroll down enough to go to another page */
+    Page *start_page = s.pages.pages.last->page();
+    ASSERT_TRUE(scrollToNewPage(s, start_page));
+
+    /* We need our page to change for this test o make sense. If this
+     * assertion fails then the bug is in the test: we should be scrolling
+     * above enough for a new page to show up. */
+    {
+        Page *page = s.cursor.page_pin->node->page();
+        ASSERT_TRUE(start_page != page);
+    }
+
+    /* Go back up, set a style */
+    NOERR(s.setAttribute(attr(A::bold)));
+    {
+        Page *page = s.cursor.page_pin->node->page();
+        const style::Style *styleval = page->styles.get((const void *)page->memory, s.cursor.style_id);
+        ASSERT_TRUE(styleval->flags.bold);
+    }
+
+    /* Go back down into the prev page and we should have that style */
+    s.cursorUp(1);
+    {
+        Page *page = s.cursor.page_pin->node->page();
+        ASSERT_TRUE(start_page == page);
+
+        const style::Style *styleval = page->styles.get((const void *)page->memory, s.cursor.style_id);
+        ASSERT_TRUE(styleval->flags.bold);
+    }
+}
+
+TEST(screen, Screen__cursorAbsolute_across_pages_preserves_style) {
+    SCREEN(s, 10, 3, (size_t)1);
+
+    /* Scroll down enough to go to another page */
+    Page *start_page = s.pages.pages.last->page();
+    ASSERT_TRUE(scrollToNewPage(s, start_page));
+
+    /* We need our page to change for this test o make sense. If this
+     * assertion fails then the bug is in the test: we should be scrolling
+     * above enough for a new page to show up. */
+    {
+        Page *page = s.cursor.page_pin->node->page();
+        ASSERT_TRUE(start_page != page);
+    }
+
+    /* Go back up, set a style */
+    NOERR(s.setAttribute(attr(A::bold)));
+    {
+        Page *page = s.cursor.page_pin->node->page();
+        const style::Style *styleval = page->styles.get((const void *)page->memory, s.cursor.style_id);
+        ASSERT_TRUE(styleval->flags.bold);
+    }
+
+    /* Go back down into the prev page and we should have that style */
+    s.cursorAbsolute(1, 1);
+    {
+        Page *page = s.cursor.page_pin->node->page();
+        ASSERT_TRUE(start_page == page);
+
+        const style::Style *styleval = page->styles.get((const void *)page->memory, s.cursor.style_id);
+        ASSERT_TRUE(styleval->flags.bold);
+    }
+}
+
+TEST(screen, Screen__cursorAbsolute_to_page_with_insufficient_capacity) {
+    /* This test checks for a very specific edge case
+     * which previously resulted in memory corruption.
+     *
+     * The conditions for this edge case are as such:
+     * - The cursor has an associated style or other managed memory.
+     * - The cursor moves to a different page.
+     * - The new page is at capacity and must have its capacity adjusted. */
+    SCREEN(s, 10, 3, (size_t)1);
+
+    /* Scroll down enough to go to another page */
+    Page *start_page = s.pages.pages.last->page();
+    ASSERT_TRUE(scrollToNewPage(s, start_page));
+
+    Page *new_page = s.cursor.page_pin->node->page();
+
+    /* We need our page to change for this test to make sense. If this
+     * assertion fails then the bug is in the test: we should be scrolling
+     * above enough for a new page to show up. */
+    ASSERT_TRUE(start_page != new_page);
+
+    /* Add styles to the start page until it reaches capacity. */
+    {
+        /* Pause integrity checks because they're slow and
+         * we're not testing this, this is just setup. */
+        start_page->pauseIntegrityChecks(true);
+
+        uint32_t n = 1;
+        for (;;) {
+            style::Style st;
+            st.bg_color = style::Style::Color::makeRgb(
+                style::RGB((uint8_t)(n & 0xFF), (uint8_t)((n >> 8) & 0xFF), (uint8_t)((n >> 16) & 0xFF)));
+            style::Id id;
+            if (start_page->styles.add((const void *)start_page->memory, st, &id) != ref_counted_set::AddError::none)
+                break;
+            n += 1;
+        }
+
+        start_page->pauseIntegrityChecks(false);
+        start_page->assertIntegrity();
+    }
+
+    /* Set a style on the cursor. */
+    NOERR(s.setAttribute(attr(A::bold)));
+    {
+        const style::Style *styleval = new_page->styles.get((const void *)new_page->memory, s.cursor.style_id);
+        ASSERT_TRUE(styleval->flags.bold);
+    }
+
+    /* Go back up into the start page and we should still have that style. */
+    s.cursorAbsolute(1, 1);
+    {
+        Page *cur_page = s.cursor.page_pin->node->page();
+        /* The page we're on now should NOT equal start_page, since its
+         * capacity should have been adjusted, which invalidates our ptr. */
+        ASSERT_TRUE(start_page != cur_page);
+        /* To make sure we DID change pages we check we're not on new_page. */
+        ASSERT_TRUE(new_page != cur_page);
+
+        const style::Style *styleval = cur_page->styles.get((const void *)cur_page->memory, s.cursor.style_id);
+        ASSERT_TRUE(styleval->flags.bold);
+    }
+
+    s.cursor.page_pin->node->page()->assertIntegrity();
+    new_page->assertIntegrity();
+}
+
+TEST(screen, Screen__scrolling) {
+    SCREEN(s, 10, 3, (size_t)0);
+    NOERR(s.setAttribute(terminal::sgr::Attribute::makeRgb(A::direct_color_bg, 155, 0, 0)));
+    WRITE(s, "1ABCD\n2EFGH\n3IJKL");
+
+    /* Scroll down, should still be bottom */
+    ASSERT_TRUE(s.cursorDownScroll());
+    EXPECT_DUMP(s, viewport, "2EFGH\n3IJKL");
+    {
+        const PageList::Cell list_cell = s.pages.getCell(Point::active(0, 2)).value;
+        const Cell *cell = list_cell.cell;
+        ASSERT_TRUE(cell->content_tag() == Cell::ContentTag::bg_color_rgb);
+        ASSERT_TRUE(rgbEq(cell->contentColorRgb(), 155, 0, 0));
+    }
+
+    /* Everything is dirty because we have no scrollback */
+    ASSERT_TRUE(s.pages.isDirty(Point::active(0, 0)));
+    ASSERT_TRUE(s.pages.isDirty(Point::active(0, 1)));
+    ASSERT_TRUE(s.pages.isDirty(Point::active(0, 2)));
+
+    /* Scrolling to the bottom does nothing */
+    s.scroll(Screen::Scroll::active());
+
+    EXPECT_DUMP(s, viewport, "2EFGH\n3IJKL");
+}
+
+TEST(screen, Screen__scrolling_with_a_single_row_screen_no_scrollback) {
+    SCREEN(s, 10, 1, (size_t)0);
+    WRITE(s, "1ABCD");
+
+    /* Scroll down, should still be bottom */
+    ASSERT_TRUE(s.cursorDownScroll());
+    EXPECT_DUMP(s, viewport, "");
+
+    /* Screen should be dirty */
+    ASSERT_TRUE(s.pages.isDirty(Point::active(0, 0)));
+}
+
+TEST(screen, Screen__scrolling_with_a_single_row_screen_with_scrollback) {
+    SCREEN(s, 10, 1, (size_t)1);
+    WRITE(s, "1ABCD");
+
+    /* Scroll down, should still be bottom */
+    ASSERT_TRUE(s.cursorDownScroll());
+    EXPECT_DUMP(s, viewport, "");
+
+    /* Active should be dirty */
+    ASSERT_TRUE(s.pages.isDirty(Point::active(0, 0)));
+
+    /* Scrollback also dirty because cursor moved from there */
+    ASSERT_TRUE(s.pages.isDirty(Point::screen(0, 0)));
+
+    s.scroll(Screen::Scroll::deltaRow(-1));
+    EXPECT_DUMP(s, viewport, "1ABCD");
+}
+
+TEST(screen, Screen__scrolling_across_pages_preserves_style) {
+    SCREEN(s, 10, 3, (size_t)1);
+    NOERR(s.setAttribute(attr(A::bold)));
+    WRITE(s, "1ABCD\n2EFGH\n3IJKL");
+    Page *start_page = s.pages.pages.last->page();
+
+    /* Scroll down enough to go to another page */
+    const size_t rem = start_page->capacity.rows - start_page->size.rows + 1;
+    start_page->pauseIntegrityChecks(true);
+    for (size_t i = 0; i < rem; i++) ASSERT_TRUE(s.cursorDownOrScroll());
+    start_page->pauseIntegrityChecks(false);
+
+    /* We need our page to change for this test o make sense. If this
+     * assertion fails then the bug is in the test: we should be scrolling
+     * above enough for a new page to show up. */
+    Page *page = s.pages.pages.last->page();
+    ASSERT_TRUE(start_page != page);
+
+    const style::Style *styleval = page->styles.get((const void *)page->memory, s.cursor.style_id);
+    ASSERT_TRUE(styleval->flags.bold);
+}
+
+TEST(screen, Screen__scroll_down_from_0) {
+    SCREEN(s, 10, 3, (size_t)0);
+    WRITE(s, "1ABCD\n2EFGH\n3IJKL");
+
+    /* Scrolling up does nothing, but allows it */
+    s.scroll(Screen::Scroll::deltaRow(-1));
+    ASSERT_TRUE(s.pages.viewport == PageList::Viewport::active);
+
+    EXPECT_DUMP(s, viewport, "1ABCD\n2EFGH\n3IJKL");
+}
+
+TEST(screen, Screen__scrollback_various_cases) {
+    SCREEN(s, 10, 3, (size_t)1);
+    WRITE(s, "1ABCD\n2EFGH\n3IJKL");
+    ASSERT_TRUE(s.cursorDownScroll());
+
+    EXPECT_DUMP(s, viewport, "2EFGH\n3IJKL");
+
+    /* Scrolling to the bottom */
+    s.scroll(Screen::Scroll::active());
+    EXPECT_DUMP(s, viewport, "2EFGH\n3IJKL");
+
+    /* Scrolling back should make it visible again */
+    s.scroll(Screen::Scroll::deltaRow(-1));
+    ASSERT_TRUE(s.pages.viewport != PageList::Viewport::active);
+    EXPECT_DUMP(s, viewport, "1ABCD\n2EFGH\n3IJKL");
+
+    /* Scrolling back again should do nothing */
+    s.scroll(Screen::Scroll::deltaRow(-1));
+    EXPECT_DUMP(s, viewport, "1ABCD\n2EFGH\n3IJKL");
+
+    /* Scrolling to the bottom */
+    s.scroll(Screen::Scroll::active());
+    EXPECT_DUMP(s, viewport, "2EFGH\n3IJKL");
+
+    /* Scrolling forward with no grow should do nothing */
+    s.scroll(Screen::Scroll::deltaRow(1));
+    EXPECT_DUMP(s, viewport, "2EFGH\n3IJKL");
+
+    /* Scrolling to the top should work */
+    s.scroll(Screen::Scroll::top());
+    EXPECT_DUMP(s, viewport, "1ABCD\n2EFGH\n3IJKL");
+
+    /* Should be able to easily clear active area only */
+    s.clearRows(Point::active(), Maybe<Point>(), false);
+    EXPECT_DUMP(s, viewport, "1ABCD");
+
+    /* Scrolling to the bottom */
+    s.scroll(Screen::Scroll::active());
+    EXPECT_DUMP(s, viewport, "");
+}
+
+TEST(screen, Screen__scrollback_with_multi_row_delta) {
+    SCREEN(s, 10, 3, (size_t)3);
+    WRITE(s, "1ABCD\n2EFGH\n3IJKL\n4ABCD\n5EFGH\n6IJKL");
+
+    /* Scroll to top */
+    s.scroll(Screen::Scroll::top());
+    EXPECT_DUMP(s, viewport, "1ABCD\n2EFGH\n3IJKL");
+
+    /* Scroll down multiple */
+    s.scroll(Screen::Scroll::deltaRow(5));
+    ASSERT_TRUE(s.pages.viewport == PageList::Viewport::active);
+    EXPECT_DUMP(s, viewport, "4ABCD\n5EFGH\n6IJKL");
+}
+
+TEST(screen, Screen__scrollback_empty) {
+    SCREEN(s, 10, 3, (size_t)50);
+    WRITE(s, "1ABCD\n2EFGH\n3IJKL");
+    s.scroll(Screen::Scroll::deltaRow(1));
+    EXPECT_DUMP(s, viewport, "1ABCD\n2EFGH\n3IJKL");
+}
+
+TEST(screen, Screen__scrollback_doesn_t_move_viewport_if_not_at_bottom) {
+    SCREEN(s, 10, 3, (size_t)3);
+    WRITE(s, "1ABCD\n2EFGH\n3IJKL\n4ABCD\n5EFGH");
+
+    /* First test: we scroll up by 1, so we're not at the bottom anymore. */
+    s.scroll(Screen::Scroll::deltaRow(-1));
+    EXPECT_DUMP(s, viewport, "2EFGH\n3IJKL\n4ABCD");
+
+    /* Next, we scroll back down by 1, this grows the scrollback but we
+     * shouldn't move. */
+    ASSERT_TRUE(s.cursorDownScroll());
+    EXPECT_DUMP(s, viewport, "2EFGH\n3IJKL\n4ABCD");
+
+    /* Scroll again, this clears scrollback so we should move viewports
+     * but still see the same thing since our original view fits. */
+    ASSERT_TRUE(s.cursorDownScroll());
+    EXPECT_DUMP(s, viewport, "2EFGH\n3IJKL\n4ABCD");
+}
+
+TEST(screen, Screen__scrolling_moves_selection) {
+    SCREEN(s, 5, 3, (size_t)1);
+    WRITE(s, "1ABCD\n2EFGH\n3IJKL");
+
+    /* Select a single line */
+    ASSERT_TRUE(s.select(
+        Selection::init(pinAt(s, Point::active(0, 1)), pinAt(s, Point::active(s.pages.cols - 1, 1)), false)));
+
+    /* Scroll down, should still be bottom */
+    ASSERT_TRUE(s.cursorDownScroll());
+
+    /* Our selection should've moved up */
+    {
+        const Selection sel = s.selection.value;
+        ASSERT_TRUE(ptEq(s.pages.pointFromPin(point::Tag::active, sel.start()), Point::active(0, 0)));
+        ASSERT_TRUE(ptEq(s.pages.pointFromPin(point::Tag::active, sel.end()), Point::active(s.pages.cols - 1, 0)));
+    }
+
+    /* Test our contents rotated */
+    EXPECT_DUMP(s, viewport, "2EFGH\n3IJKL");
+
+    /* Scrolling to the bottom does nothing */
+    s.scroll(Screen::Scroll::active());
+
+    /* Our selection should've stayed the same */
+    {
+        const Selection sel = s.selection.value;
+        ASSERT_TRUE(ptEq(s.pages.pointFromPin(point::Tag::active, sel.start()), Point::active(0, 0)));
+        ASSERT_TRUE(ptEq(s.pages.pointFromPin(point::Tag::active, sel.end()), Point::active(s.pages.cols - 1, 0)));
+    }
+
+    /* Test our contents rotated */
+    EXPECT_DUMP(s, viewport, "2EFGH\n3IJKL");
+
+    /* Scroll up again */
+    ASSERT_TRUE(s.cursorDownScroll());
+
+    /* Test our contents rotated */
+    EXPECT_DUMP(s, viewport, "3IJKL");
+
+    /* Our selection should be null because it left the screen. */
+    {
+        const Selection sel = s.selection.value;
+        ASSERT_TRUE(!s.pages.pointFromPin(point::Tag::active, sel.start()).has);
+        ASSERT_TRUE(!s.pages.pointFromPin(point::Tag::active, sel.end()).has);
+    }
+}
+
+TEST(screen, Screen__cursorScrollRegionUp_simple) {
+    SCREEN(s, 5, 5, (size_t)0);
+    WRITE(s, "1ABCD\n2EFGH\n3IJKL\n4MNOP\n5QRST");
+
+    /* Scroll a region ending at row 2 (zero-indexed) up by one. This
+     * emulates a scroll region of rows 0-2 with the cursor at the
+     * region bottom. */
+    s.cursorAbsolute(1, 2);
+    ASSERT_TRUE(s.cursorScrollRegionUp(2));
+
+    /* The cursor stays in place, on the new blank row. */
+    ASSERT_TRUE(1 == s.cursor.x);
+    ASSERT_TRUE(2 == s.cursor.y);
+
+    /* Rows in the region scrolled, rows below are unchanged, and
+     * nothing was moved into scrollback. */
+    EXPECT_DUMP(s, screen, "2EFGH\n3IJKL\n\n4MNOP\n5QRST");
+}
+
+TEST(screen, Screen__cursorScrollRegionUp_renews_page_generation) {
+    SCREEN(s, 5, 5, (size_t)0);
+    WRITE(s, "1ABCD\n2EFGH\n3IJKL\n4MNOP\n5QRST");
+    s.cursorAbsolute(0, 2);
+
+    PageList::Node *node = s.cursor.page_pin->node;
+    const uint64_t serial = node->serial;
+    ASSERT_TRUE(s.cursorScrollRegionUp(2));
+
+    ASSERT_TRUE(!s.pages.nodeIsValid(node, serial));
+}
+
+TEST(screen, Screen__cursorScrollRegionUp_moves_selection) {
+    SCREEN(s, 5, 5, (size_t)0);
+    WRITE(s, "1ABCD\n2EFGH\n3IJKL\n4MNOP\n5QRST");
+
+    /* Select the second row. */
+    ASSERT_TRUE(s.select(
+        Selection::init(pinAt(s, Point::active(0, 1)), pinAt(s, Point::active(s.pages.cols - 1, 1)), false)));
+
+    s.cursorAbsolute(0, 2);
+    ASSERT_TRUE(s.cursorScrollRegionUp(2));
+
+    /* Our selection should've moved up with its row. */
+    {
+        const Selection sel = s.selection.value;
+        ASSERT_TRUE(ptEq(s.pages.pointFromPin(point::Tag::active, sel.start()), Point::active(0, 0)));
+        ASSERT_TRUE(ptEq(s.pages.pointFromPin(point::Tag::active, sel.end()), Point::active(s.pages.cols - 1, 0)));
+    }
+
+    EXPECT_DUMP(s, viewport, "2EFGH\n3IJKL\n\n4MNOP\n5QRST");
+}
+
+/* Wisp: shared setup of the cursorScrollRegionUp "spans pages" tests.
+ * We need to get the cursor to a new page. */
+static bool fillThreeToFirstPage(Screen &s) {
+    const size_t first_page_size = s.pages.pages.first->capacity().rows;
+    s.pages.pages.first->page()->pauseIntegrityChecks(true);
+    for (size_t i = 0; i < first_page_size - 3; i++)
+        if (!s.testWriteString("\n")) return false;
+    s.pages.pages.first->page()->pauseIntegrityChecks(false);
+    return s.testWriteString("1A\n2B\n3C\n4D\n5E");
+}
+
+TEST(screen, Screen__cursorScrollRegionUp_region_spans_pages) {
+    SCREEN(s, 10, 5, (size_t)10);
+
+    /* We need to get the cursor to a new page */
+    ASSERT_TRUE(fillThreeToFirstPage(s));
+
+    /* Move the cursor to the first row of the second page and give it
+     * a non-default style. This is important: it verifies that the
+     * cursor's style ref stays accounted on the correct page even
+     * though eraseRowBounded moves the cursor's tracked pin across
+     * the page boundary. */
+    s.cursorAbsolute(0, 3);
+    NOERR(s.setAttribute(attr(A::bold)));
+    ASSERT_TRUE(s.cursor.page_pin->node == s.pages.pages.last);
+    ASSERT_TRUE(0 == s.cursor.page_pin->y);
+
+    /* Scroll a region of active rows 1-3 with the cursor at the region
+     * bottom. The region spans the page boundary so this exercises the
+     * slow path. */
+    ASSERT_TRUE(s.cursorScrollRegionUp(2));
+
+    /* The cursor stays in place, on the new blank row. */
+    ASSERT_TRUE(0 == s.cursor.x);
+    ASSERT_TRUE(3 == s.cursor.y);
+
+    EXPECT_DUMP(s, viewport, "1A\n3C\n4D\n\n5E");
+
+    /* Our cursor style must remain usable: write a styled cell and
+     * verify the style ref counting is intact on the cursor's page. */
+    WRITE(s, "X");
+    {
+        Page *page = s.cursor.page_pin->node->page();
+        const size_t styles = page->styles.count();
+        ASSERT_TRUE(1 == styles);
+    }
+}
+
+TEST(screen, Screen__cursorScrollRegionUp_region_spans_pages_with_background_SGR) {
+    SCREEN(s, 10, 5, (size_t)10);
+
+    /* We need to get the cursor to a new page. See the previous test
+     * for a diagram of the page layout. */
+    ASSERT_TRUE(fillThreeToFirstPage(s));
+
+    s.cursorAbsolute(0, 3);
+    NOERR(s.setAttribute(terminal::sgr::Attribute::makeRgb(A::direct_color_bg, 0xFF, 0, 0)));
+    ASSERT_TRUE(s.cursor.page_pin->node == s.pages.pages.last);
+    ASSERT_TRUE(0 == s.cursor.page_pin->y);
+
+    ASSERT_TRUE(s.cursorScrollRegionUp(2));
+
+    EXPECT_DUMP(s, viewport, "1A\n3C\n4D\n\n5E");
+
+    /* The new blank row must be filled with our background color. */
+    for (size_t x = 0; x < s.pages.cols; x++) {
+        const PageList::Cell list_cell = s.pages.getCell(Point::active((uint32_t)x, 3)).value;
+        ASSERT_TRUE(list_cell.cell->content_tag() == Cell::ContentTag::bg_color_rgb);
+        ASSERT_TRUE(rgbEq(list_cell.cell->contentColorRgb(), 0xFF, 0, 0));
+    }
+}
+
+TEST(screen, Screen__cursorScrollRegionUp_with_styled_erased_row) {
+    SCREEN(s, 5, 3, (size_t)0);
+
+    /* Write a styled row at the top so the erased row has managed
+     * memory that must be released. */
+    NOERR(s.setAttribute(attr(A::bold)));
+    WRITE(s, "1ABCD");
+    NOERR(s.setAttribute(attr(A::unset)));
+    WRITE(s, "\n2EFGH\n3IJKL");
+
+    s.cursorAbsolute(0, 2);
+    ASSERT_TRUE(s.cursorScrollRegionUp(2));
+
+    EXPECT_DUMP(s, screen, "2EFGH\n3IJKL");
+
+    /* The style should be gone from the page since the only user
+     * was the erased row. */
+    Page *page = s.cursor.page_pin->node->page();
+    ASSERT_TRUE(0 == page->styles.count());
+}
+
+TEST(screen, Screen__scrolling_moves_viewport) {
+    SCREEN(s, 10, 3, (size_t)1);
+    WRITE(s, "1ABCD\n2EFGH\n3IJKL\n");
+    WRITE(s, "1ABCD\n2EFGH\n3IJKL");
+    s.scroll(Screen::Scroll::deltaRow(-2));
+
+    /* Test our contents rotated */
+    EXPECT_DUMP(s, viewport, "2EFGH\n3IJKL\n1ABCD");
+
+    ASSERT_TRUE(ptEq(s.pages.pointFromPin(point::Tag::screen, s.pages.getTopLeft(point::Tag::viewport)),
+                     Point::screen(0, 1)));
+}
+
+TEST(screen, Screen__scrolling_when_viewport_is_pruned) {
+    SCREEN(s, 215, 3, (size_t)1);
+
+    /* Write some to create scrollback and move back into our scrollback. */
+    WRITE(s, "1ABCD\n2EFGH\n3IJKL\n");
+    WRITE(s, "1ABCD\n2EFGH\n3IJKL");
+    s.scroll(Screen::Scroll::deltaRow(-2));
+
+    /* Our viewport is now somewhere pinned. Create so much scrollback
+     * that we prune it. */
+    WRITE(s, "\n");
+    for (int i = 0; i < 1000; i++) WRITE(s, "1ABCD\n2EFGH\n3IJKL\n");
+    WRITE(s, "1ABCD\n2EFGH\n3IJKL");
+
+    ASSERT_TRUE(ptEq(s.pages.pointFromPin(point::Tag::screen, s.pages.getTopLeft(point::Tag::viewport)),
+                     Point::screen(0, 0)));
+}
+
+TEST(screen, Screen__scroll_and_clear_full_screen) {
+    SCREEN(s, 10, 3, (size_t)5);
+    WRITE(s, "1ABCD\n2EFGH\n3IJKL");
+
+    EXPECT_DUMP(s, viewport, "1ABCD\n2EFGH\n3IJKL");
+
+    ASSERT_TRUE(s.scrollClear());
+    EXPECT_DUMP(s, viewport, "");
+    EXPECT_DUMP(s, screen, "1ABCD\n2EFGH\n3IJKL");
+}
+
+TEST(screen, Screen__scroll_and_clear_partial_screen) {
+    SCREEN(s, 10, 3, (size_t)5);
+    WRITE(s, "1ABCD\n2EFGH");
+
+    EXPECT_DUMP(s, viewport, "1ABCD\n2EFGH");
+
+    ASSERT_TRUE(s.scrollClear());
+    EXPECT_DUMP(s, viewport, "");
+    EXPECT_DUMP(s, screen, "1ABCD\n2EFGH");
+}
+
+TEST(screen, Screen__scroll_and_clear_empty_screen) {
+    SCREEN(s, 10, 3, (size_t)5);
+    ASSERT_TRUE(s.scrollClear());
+    EXPECT_DUMP(s, viewport, "");
+    EXPECT_DUMP(s, screen, "");
+}
+
+TEST(screen, Screen__scroll_and_clear_ignore_blank_lines) {
+    SCREEN(s, 10, 3, (size_t)10);
+    WRITE(s, "1ABCD\n2EFGH");
+    ASSERT_TRUE(s.scrollClear());
+    EXPECT_DUMP(s, viewport, "");
+
+    /* Move back to top-left */
+    s.cursorAbsolute(0, 0);
+
+    /* Write and clear */
+    WRITE(s, "3ABCD\n");
+    EXPECT_DUMP(s, active, "3ABCD");
+
+    ASSERT_TRUE(s.scrollClear());
+    EXPECT_DUMP(s, viewport, "");
+
+    /* Move back to top-left */
+    s.cursorAbsolute(0, 0);
+    WRITE(s, "X");
+
+    EXPECT_DUMP(s, screen, "1ABCD\n2EFGH\n3ABCD\nX");
+}
+
+/* Wisp: shared setup. Write n blank lines with the first page's
+ * integrity checks paused. */
+static bool writeBlankLines(Screen &s, size_t n) {
+    s.pages.pages.first->page()->pauseIntegrityChecks(true);
+    for (size_t i = 0; i < n; i++)
+        if (!s.testWriteString("\n")) return false;
+    s.pages.pages.first->page()->pauseIntegrityChecks(false);
+    return true;
+}
+
+#define EXPECT_BG_155(s, x, y)                                                                                         \
+    do {                                                                                                               \
+        const PageList::Cell _lc = (s).pages.getCell(Point::active((x), (y))).value;                                  \
+        ASSERT_TRUE(_lc.cell->content_tag() == Cell::ContentTag::bg_color_rgb);                                      \
+        ASSERT_TRUE(rgbEq(_lc.cell->contentColorRgb(), 155, 0, 0));                                                   \
+    } while (0)
+
+#define BG_155 terminal::sgr::Attribute::makeRgb(A::direct_color_bg, 155, 0, 0)
+
+TEST(screen, Screen__scroll_above_same_page) {
+    SCREEN(s, 10, 3, (size_t)10);
+    NOERR(s.setAttribute(BG_155));
+    WRITE(s, "1ABCD\n2EFGH\n3IJKL");
+    s.cursorAbsolute(0, 1);
+    s.pages.clearDirty();
+
+    PageList::Node *node = s.cursor.page_pin->node;
+    const uint64_t serial = node->serial;
+    ASSERT_TRUE(s.cursorScrollAbove());
+    ASSERT_TRUE(!s.pages.nodeIsValid(node, serial));
+
+    EXPECT_DUMP(s, viewport, "2EFGH\n\n3IJKL");
+    EXPECT_BG_155(s, 0, 1);
+
+    /* Page 0 row 1 (active row 0) is dirty because the cursor moved off of it. */
+    ASSERT_TRUE(s.pages.isDirty(Point::active(0, 0)));
+    /* Page 0 row 2 (active row 1) is dirty because it was cleared. */
+    ASSERT_TRUE(s.pages.isDirty(Point::active(0, 1)));
+    /* Page 0 row 3 (active row 2) is dirty because it's new. */
+    ASSERT_TRUE(s.pages.isDirty(Point::active(0, 2)));
+}
+
+TEST(screen, Screen__scroll_above_same_page_but_cursor_on_previous_page) {
+    SCREEN(s, 10, 5, (size_t)10);
+
+    /* We need to get the cursor to a new page */
+    const size_t first_page_size = s.pages.pages.first->capacity().rows;
+    ASSERT_TRUE(writeBlankLines(s, first_page_size - 3));
+
+    NOERR(s.setAttribute(BG_155));
+    WRITE(s, "1A\n2B\n3C\n4D\n5E");
+    s.cursorAbsolute(0, 1);
+    s.pages.clearDirty();
+
+    /* Ensure we're still on the first page and have a second */
+    ASSERT_TRUE(s.cursor.page_pin->node == s.pages.pages.first);
+    ASSERT_TRUE(s.pages.pages.first->next != nullptr);
+
+    PageList::Node *first_node = s.pages.pages.first;
+    PageList::Node *second_node = first_node->next;
+    const uint64_t first_serial = first_node->serial;
+    const uint64_t second_serial = second_node->serial;
+    ASSERT_TRUE(s.cursorScrollAbove());
+    ASSERT_TRUE(!s.pages.nodeIsValid(first_node, first_serial));
+    ASSERT_TRUE(!s.pages.nodeIsValid(second_node, second_serial));
+
+    EXPECT_DUMP(s, viewport, "2B\n\n3C\n4D\n5E");
+    EXPECT_BG_155(s, 0, 1);
+
+    /* Page 0's penultimate row is dirty because the cursor moved off of it. */
+    ASSERT_TRUE(s.pages.isDirty(Point::active(0, 0)));
+    /* The rest of the rows are dirty because they've been modified or are new. */
+    ASSERT_TRUE(s.pages.isDirty(Point::active(0, 1)));
+    ASSERT_TRUE(s.pages.isDirty(Point::active(0, 2)));
+    ASSERT_TRUE(s.pages.isDirty(Point::active(0, 3)));
+    ASSERT_TRUE(s.pages.isDirty(Point::active(0, 4)));
+}
+
+TEST(screen, Screen__scroll_above_same_page_but_cursor_on_previous_page_last_row) {
+    SCREEN(s, 10, 5, (size_t)10);
+
+    /* We need to get the cursor to a new page */
+    const size_t first_page_size = s.pages.pages.first->capacity().rows;
+    ASSERT_TRUE(writeBlankLines(s, first_page_size - 2));
+
+    NOERR(s.setAttribute(BG_155));
+    WRITE(s, "1A\n2B\n3C\n4D\n5E");
+    s.cursorAbsolute(0, 1);
+    s.pages.clearDirty();
+
+    /* Ensure we're still on the first page and have a second */
+    ASSERT_TRUE(s.cursor.page_pin->node == s.pages.pages.first);
+    ASSERT_TRUE(s.pages.pages.first->next != nullptr);
+
+    ASSERT_TRUE(s.cursorScrollAbove());
+
+    EXPECT_DUMP(s, viewport, "2B\n\n3C\n4D\n5E");
+    EXPECT_BG_155(s, 0, 1);
+
+    /* Page 0's final row is dirty because the cursor moved off of it. */
+    ASSERT_TRUE(s.pages.isDirty(Point::active(0, 0)));
+    /* Page 1's rows are all dirty because every row was moved. */
+    ASSERT_TRUE(s.pages.isDirty(Point::active(0, 1)));
+    ASSERT_TRUE(s.pages.isDirty(Point::active(0, 2)));
+    ASSERT_TRUE(s.pages.isDirty(Point::active(0, 3)));
+    ASSERT_TRUE(s.pages.isDirty(Point::active(0, 4)));
+
+    /* Attempt to clear the style from the cursor and
+     * then assert the integrity of both of our pages.
+     *
+     * This catches a case of memory corruption where the cursor
+     * is moved between pages without accounting for style refs. */
+    NOERR(s.setAttribute(attr(A::reset_bg)));
+    s.pages.pages.first->page()->assertIntegrity();
+    s.pages.pages.last->page()->assertIntegrity();
+}
+
+TEST(screen, Screen__scroll_above_creates_new_page) {
+    SCREEN(s, 10, 3, (size_t)10);
+
+    /* We need to get the cursor to a new page */
+    const size_t first_page_size = s.pages.pages.first->capacity().rows;
+    ASSERT_TRUE(writeBlankLines(s, first_page_size - 3));
+
+    NOERR(s.setAttribute(BG_155));
+    WRITE(s, "1ABCD\n2EFGH\n3IJKL");
+    s.cursorAbsolute(0, 1);
+    s.pages.clearDirty();
+
+    /* Ensure we're still on the first page */
+    ASSERT_TRUE(s.cursor.page_pin->node == s.pages.pages.first);
+
+    PageList::Node *node = s.pages.pages.first;
+    const uint64_t serial = node->serial;
+    ASSERT_TRUE(s.cursorScrollAbove());
+    ASSERT_TRUE(!s.pages.nodeIsValid(node, serial));
+
+    EXPECT_DUMP(s, viewport, "2EFGH\n\n3IJKL");
+    EXPECT_BG_155(s, 0, 1);
+
+    /* Page 0's penultimate row is dirty because the cursor moved off of it. */
+    ASSERT_TRUE(s.pages.isDirty(Point::active(0, 0)));
+    /* Page 0's final row is dirty because it was cleared. */
+    ASSERT_TRUE(s.pages.isDirty(Point::active(0, 1)));
+    /* Page 1's row is dirty because it's new. */
+    ASSERT_TRUE(s.pages.isDirty(Point::active(0, 2)));
+}
+
+TEST(screen, Screen__scroll_above_with_cursor_on_non_final_row) {
+    SCREEN(s, 10, 4, (size_t)10);
+
+    /* Get the cursor to be 2 rows above a new page */
+    const size_t first_page_size = s.pages.pages.first->capacity().rows;
+    ASSERT_TRUE(writeBlankLines(s, first_page_size - 3));
+
+    /* Write 3 lines of text, forcing the last line into the first
+     * row of a new page. Move our cursor onto the previous page. */
+    NOERR(s.setAttribute(BG_155));
+    WRITE(s, "1AB\n2BC\n3DE\n4FG");
+    s.cursorAbsolute(0, 1);
+    s.pages.clearDirty();
+
+    /* Ensure we're still on the first page. So our cursor is on the first
+     * page but we have two pages of data. */
+    ASSERT_TRUE(s.cursor.page_pin->node == s.pages.pages.first);
+
+    ASSERT_TRUE(s.cursorScrollAbove());
+
+    EXPECT_DUMP(s, viewport, "2BC\n\n3DE\n4FG");
+    EXPECT_BG_155(s, 0, 1);
+
+    /* Page 0's penultimate row is dirty because the cursor moved off of it. */
+    ASSERT_TRUE(s.pages.isDirty(Point::active(0, 0)));
+    /* Page 0's final row is dirty because it was cleared. */
+    ASSERT_TRUE(s.pages.isDirty(Point::active(0, 1)));
+    /* Page 1's row is dirty because it's new. */
+    ASSERT_TRUE(s.pages.isDirty(Point::active(0, 2)));
+}
+
+TEST(screen, Screen__scroll_above_no_scrollback_bottom_of_page) {
+    SCREEN(s, 10, 3, (size_t)0);
+
+    const size_t first_page_size = s.pages.pages.first->capacity().rows;
+    ASSERT_TRUE(writeBlankLines(s, first_page_size - 3));
+
+    NOERR(s.setAttribute(BG_155));
+    WRITE(s, "1ABCD\n2EFGH\n3IJKL");
+    s.cursorAbsolute(0, 1);
+    s.pages.clearDirty();
+
+    ASSERT_TRUE(s.cursorScrollAbove());
+
+    EXPECT_DUMP(s, viewport, "2EFGH\n\n3IJKL");
+    EXPECT_BG_155(s, 0, 1);
+
+    /* Page 0 row 1 (active row 0) is dirty because the cursor moved off of it. */
+    ASSERT_TRUE(s.pages.isDirty(Point::active(0, 0)));
+    /* Page 0 row 2 (active row 1) is dirty because it was cleared. */
+    ASSERT_TRUE(s.pages.isDirty(Point::active(0, 1)));
+    /* Page 0 row 3 (active row 2) is dirty because it is new. */
+    ASSERT_TRUE(s.pages.isDirty(Point::active(0, 2)));
+}
+
+/* Wisp: every cell flagged as a hyperlink must resolve to a real entry
+ * in its page's hyperlink map. */
+static bool allHyperlinksResolve(Screen &s) {
+    for (PageList::Node *node = s.pages.pages.first; node; node = node->next) {
+        Page *page = node->page();
+        page->assertIntegrity();
+        for (size_t y = 0; y < page->size.rows; y++) {
+            const Row *row = page->getRow(y);
+            if (!row->hyperlink()) continue;
+            const Cell *cells = page->getCells(row);
+            for (size_t x = 0; x < page->size.cols; x++) {
+                if (!cells[x].hyperlink()) continue;
+                hyperlink::Id id;
+                if (!page->lookupHyperlink(&cells[x], &id)) return false;
+            }
+        }
+    }
+    return true;
+}
+
+TEST(screen, Screen__scroll_above_hyperlink_dense_row_to_fresh_page) {
+    /* Regression test for https://github.com/ghostty-org/ghostty/discussions/13160
+     *
+     * When a scroll-above operation pushes a row carrying more unique
+     * hyperlinks than a fresh page's default hyperlink capacity across
+     * a page boundary, the cross-page row clone must increase the
+     * destination page's capacity (like insertLines/deleteLines do)
+     * rather than error out mid-operation, which leaves the page list
+     * half-mutated and aborts later (e.g. in clearCells). */
+    SCREEN(s, 10, 5, (size_t)10000);
+
+    /* Fill the first page so it is exactly full and the cursor is on
+     * its last row (which is also the bottom row of the active area).
+     * The next grow() will then allocate a fresh page. */
+    const size_t first_page_rows = s.pages.pages.first->capacity().rows;
+    ASSERT_TRUE(writeBlankLines(s, first_page_rows - 1));
+    ASSERT_TRUE(s.pages.pages.first == s.pages.pages.last);
+    ASSERT_TRUE(s.pages.pages.first->capacity().rows == s.pages.pages.first->page()->size.rows);
+    ASSERT_TRUE(s.pages.rows - 1 == s.cursor.y);
+
+    /* Fill the bottom row with unique hyperlinks: more than a fresh
+     * page can hold with default hyperlink capacity. */
+    for (size_t i = 0; i < s.pages.cols; i++) {
+        char buf[64];
+        snprintf(buf, sizeof buf, "http://example.com/%zu", i);
+        NOERR(startLink(s, buf));
+        WRITE(s, "A");
+        s.endHyperlink();
+    }
+    ASSERT_TRUE((size_t)s.pages.cols == s.cursor.page_pin->node->page()->hyperlink_set.count());
+
+    /* Move the cursor above the bottom row and scroll. The dense row is
+     * pushed across the page boundary into the freshly allocated page. */
+    s.cursorAbsolute(0, 1);
+    ASSERT_TRUE(s.cursorScrollAbove());
+
+    /* We must have created a second page and the dense row must now be
+     * the top row of that page. */
+    ASSERT_TRUE(s.pages.pages.first != s.pages.pages.last);
+
+    /* All hyperlinks must have survived the scroll intact: every cell
+     * flagged as a hyperlink must resolve to a real entry in its page's
+     * hyperlink map. A half-applied scroll leaves cells whose hyperlink
+     * flag is set but that have no map entry, which aborts in
+     * clearCells later. */
+    ASSERT_TRUE(allHyperlinksResolve(s));
+    {
+        Page *last_page = s.pages.pages.last->page();
+        ASSERT_TRUE((size_t)s.pages.cols == last_page->hyperlink_set.count());
+    }
+
+    /* The dense row is still the bottom row of the active area. */
+    for (size_t x = 0; x < s.pages.cols; x++) {
+        const PageList::Cell list_cell = s.pages.getCell(Point::active((uint32_t)x, 4)).value;
+        ASSERT_TRUE(list_cell.cell->hyperlink());
+        Page *page = list_cell.node->page();
+        hyperlink::Id id;
+        ASSERT_TRUE(page->lookupHyperlink(list_cell.cell, &id));
+        const hyperlink::PageEntry *link = page->hyperlink_set.get((const void *)page->memory, id);
+        char buf[64];
+        snprintf(buf, sizeof buf, "http://example.com/%zu", x);
+        EXPECT_STR(buf, std::string((const char *)link->uri.slice((const void *)page->memory), link->uri.len));
+    }
+}
+
+TEST(screen, Screen__scroll_above_hyperlink_dense_row_to_existing_page) {
+    /* Same as the fresh page variant above but the destination page
+     * already exists (fresh_node == null path in cursorScrollAboveRotate). */
+    SCREEN(s, 10, 5, (size_t)10000);
+
+    /* Fill the first page so it is exactly full and the cursor is on
+     * its last row. */
+    const size_t first_page_rows = s.pages.pages.first->capacity().rows;
+    ASSERT_TRUE(writeBlankLines(s, first_page_rows - 1));
+    ASSERT_TRUE(s.pages.rows - 1 == s.cursor.y);
+
+    /* Fill the last row of the first page with unique hyperlinks:
+     * more than a page can hold with default hyperlink capacity. */
+    for (size_t i = 0; i < s.pages.cols; i++) {
+        char buf[64];
+        snprintf(buf, sizeof buf, "http://example.com/%zu", i);
+        NOERR(startLink(s, buf));
+        WRITE(s, "A");
+        s.endHyperlink();
+    }
+
+    /* Scroll twice so the active area straddles the page boundary:
+     * the last two active rows are on a second page while the dense
+     * row remains the last row of the first page. */
+    WRITE(s, "\n\n");
+    ASSERT_TRUE(s.pages.pages.first != s.pages.pages.last);
+    ASSERT_TRUE(s.cursor.page_pin->node == s.pages.pages.last);
+
+    /* Move the cursor to an active row that is still on the first page
+     * and above the dense row, then scroll. grow() has capacity in the
+     * last page so no fresh page is allocated, but the dense row still
+     * crosses the page boundary during the rotate. */
+    s.cursorAbsolute(0, 0);
+    ASSERT_TRUE(s.cursor.page_pin->node == s.pages.pages.first);
+    ASSERT_TRUE(s.cursorScrollAbove());
+
+    /* All hyperlinks must have survived the scroll intact: every cell
+     * flagged as a hyperlink must resolve to a real entry in its page's
+     * hyperlink map. */
+    ASSERT_TRUE(allHyperlinksResolve(s));
+    {
+        Page *last_page = s.pages.pages.last->page();
+        ASSERT_TRUE((size_t)s.pages.cols == last_page->hyperlink_set.count());
+    }
 }
 
 /* @@TESTS@@ */
