@@ -54,6 +54,23 @@ struct Allocator {
         free((uint8_t *)p, n * sizeof(T), alignof(T));
     }
 
+    /* Allocator.realloc: this vtable has no in-place resize, so this is
+     * always the allocate-copy-free path. Null is OutOfMemory, and the old
+     * memory is then left untouched. */
+    template <typename T>
+    T *realloc(T *old, size_t old_n, size_t new_n) const {
+        if (new_n == 0) {
+            freeT(old, old_n);
+            return (T *)(uintptr_t)alignof(T);
+        }
+        T *n = allocT<T>(new_n);
+        if (!n) return nullptr;
+        const size_t keep = old_n < new_n ? old_n : new_n;
+        if (keep) memcpy((void *)n, (const void *)old, keep * sizeof(T));
+        freeT(old, old_n);
+        return n;
+    }
+
     /* Allocator.create / destroy: storage only, no constructor run. */
     template <typename T>
     T *create() const {
