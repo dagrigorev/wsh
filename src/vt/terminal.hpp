@@ -497,6 +497,14 @@ struct Terminal {
     /* Insert amount spaces at the current cursor position. */
     void insertBlanks(size_t count);
 
+    void deleteChars(size_t count_req);
+    void eraseChars(size_t count_req);
+    void eraseLine(terminal::csi::EraseLine mode, bool protected_req);
+    void eraseDisplay(terminal::csi::EraseDisplay mode, bool protected_req);
+
+    /* Resets all margins and fills the whole screen with the character 'E' */
+    bool decaln();
+
     void setCursorPos(size_t row_req, size_t col_req);
     void setTopAndBottomMargin(size_t top_req, size_t bottom_req);
     void setLeftAndRightMargin(size_t left_req, size_t right_req);

@@ -1894,6 +1894,456 @@ inline void Terminal::deleteLines(size_t count) {
     }
 }
 
+/* Inserts spaces at current cursor position moving existing cell contents
+ * to the right. The contents of the count right-most columns in the scroll
+ * region are lost. The cursor position is not changed.
+ *
+ * This unsets the pending wrap state without wrapping.
+ *
+ * The inserted cells are colored according to the current SGR state. */
+inline void Terminal::insertBlanks(size_t count) {
+    /* Unset pending wrap state without wrapping. Note: this purposely
+     * happens BEFORE the scroll region check below, because that's what
+     * xterm does. */
+    screens.active->cursor.pending_wrap = false;
+
+    /* If we're given a zero then we do nothing. The rest of this function
+     * assumes count > 0 and will crash if zero so return early. Note that
+     * this shouldn't be possible with real CSI sequences because the value
+     * is clamped to 1 min. */
+    if (count == 0) return;
+
+    /* If our cursor is outside the margins then do nothing. We DO reset
+     * wrap state still so this must remain below the above logic. */
+    if (screens.active->cursor.x < scrolling_region.left || screens.active->cursor.x > scrolling_region.right)
+        return;
+
+    /* If our count is larger than the remaining amount, we just erase right.
+     * We only do this if we can erase the entire line (no right margin).
+     * if (right_limit == self.cols and
+     *     count > right_limit - self.screens.active.cursor.x)
+     * {
+     *     self.eraseLine(.right, false);
+     *     return;
+     * } */
+
+    /* left is just the cursor position but as a multi-pointer */
+    Cell *left = screens.active->cursor.page_cell;
+    Page *page = screens.active->cursor.page_pin->node->page();
+
+    /* If our X is a wide spacer tail then we need to erase the
+     * previous cell too so we don't split a multi-cell character. */
+    if (screens.active->cursor.page_cell->wide() == Cell::Wide::spacer_tail) {
+        assert(screens.active->cursor.x > 0);
+        screens.active->clearCells(page, screens.active->cursor.page_row, left - 1, 2);
+    }
+
+    /* Remaining cols from our cursor to the right margin. */
+    const size_t rem = (size_t)(scrolling_region.right - screens.active->cursor.x + 1);
+
+    /* If the cell at the right margin is wide, its spacer tail is
+     * outside the scroll region and would be orphaned by either the
+     * shift or the clear. Clean up both halves up front. */
+    {
+        Cell *right_cell = left + (rem - 1);
+        if (right_cell->wide() == Cell::Wide::wide)
+            screens.active->clearCells(page, screens.active->cursor.page_row, right_cell, 2);
+    }
+
+    /* We can only insert blanks up to our remaining cols */
+    const size_t adjusted_count = count < rem ? count : rem;
+
+    /* This is the amount of space at the right of the scroll region
+     * that will NOT be blank, so we need to shift the correct cols right.
+     * "scroll_amount" is the number of such cols. */
+    const size_t scroll_amount = rem - adjusted_count;
+    if (scroll_amount > 0) {
+        page->pauseIntegrityChecks(true);
+
+        Cell *x = left + (scroll_amount - 1);
+
+        /* If our last cell we're shifting is wide, then we need to clear
+         * it to be empty so we don't split the multi-cell char. */
+        Cell *end = x;
+        if (end->wide() == Cell::Wide::wide) {
+            assert(end[1].wide() == Cell::Wide::spacer_tail);
+            screens.active->clearCells(page, screens.active->cursor.page_row, end, 2);
+        }
+
+        /* We work backwards so we don't overwrite data. */
+        for (; x >= left; x -= 1) {
+            Cell *src = x;
+            Cell *dst = x + adjusted_count;
+            page->swapCells(src, dst);
+        }
+
+        page->pauseIntegrityChecks(false);
+    }
+
+    /* Insert blanks. The blanks preserve the background color. */
+    screens.active->clearCells(page, screens.active->cursor.page_row, left, adjusted_count);
+
+    /* Our row is always dirty */
+    screens.active->cursorMarkDirty();
+}
+
+/* Removes amount characters from the current cursor position to the right.
+ * The remaining characters are shifted to the left and space from the right
+ * margin is filled with spaces.
+ *
+ * If amount is greater than the remaining number of characters in the
+ * scrolling region, it is adjusted down.
+ *
+ * Does not change the cursor position. */
+inline void Terminal::deleteChars(size_t count_req) {
+    if (count_req == 0) return;
+
+    /* If our cursor is outside the margins then do nothing. We DO reset
+     * wrap state still so this must remain below the above logic. */
+    if (screens.active->cursor.x < scrolling_region.left || screens.active->cursor.x > scrolling_region.right)
+        return;
+
+    /* left is just the cursor position but as a multi-pointer */
+    Cell *left = screens.active->cursor.page_cell;
+    Page *page = screens.active->cursor.page_pin->node->page();
+
+    /* Remaining cols from our cursor to the right margin. */
+    const size_t rem = (size_t)(scrolling_region.right - screens.active->cursor.x + 1);
+
+    /* We can only insert blanks up to our remaining cols */
+    const size_t count = count_req < rem ? count_req : rem;
+
+    screens.active->splitCellBoundary(screens.active->cursor.x);
+    screens.active->splitCellBoundary((size::CellCountInt)(screens.active->cursor.x + count));
+    screens.active->splitCellBoundary((size::CellCountInt)(scrolling_region.right + 1));
+
+    /* This is the amount of space at the right of the scroll region
+     * that will NOT be blank, so we need to shift the correct cols right.
+     * "scroll_amount" is the number of such cols. */
+    const size_t scroll_amount = rem - count;
+    Cell *x = left;
+    if (scroll_amount > 0) {
+        page->pauseIntegrityChecks(true);
+
+        Cell *right = left + (scroll_amount - 1);
+
+        for (; x <= right; x += 1) {
+            Cell *src = x + count;
+            Cell *dst = x;
+            page->swapCells(src, dst);
+        }
+
+        page->pauseIntegrityChecks(false);
+    }
+
+    /* Insert blanks. The blanks preserve the background color. */
+    screens.active->clearCells(page, screens.active->cursor.page_row, x, rem - scroll_amount);
+
+    /* Our row's soft-wrap is always reset. */
+    screens.active->cursorResetWrap();
+
+    /* Our row is always dirty */
+    screens.active->cursorMarkDirty();
+}
+
+inline void Terminal::eraseChars(size_t count_req) {
+    size_t count;
+    {
+        const size_t remaining = (size_t)(cols - screens.active->cursor.x);
+        const size_t req = count_req > 1 ? count_req : 1;
+        size_t end = remaining < req ? remaining : req;
+
+        /* If our last cell is a wide char then we need to also clear the
+         * cell beyond it since we can't just split a wide char. */
+        if (end != remaining) {
+            const Cell *last = screens.active->cursorCellRight((size::CellCountInt)(end - 1));
+            if (last->wide() == Cell::Wide::wide) end += 1;
+        }
+
+        count = end;
+    }
+
+    /* Handle any boundary conditions on the edges of the erased area.
+     *
+     * TODO(qwerasd): This isn't actually correct if you take in to account
+     * protected modes. We need to figure out how to make `clearCells` or at
+     * least `clearUnprotectedCells` handle boundary conditions... */
+    screens.active->splitCellBoundary(screens.active->cursor.x);
+    screens.active->splitCellBoundary((size::CellCountInt)(screens.active->cursor.x + count));
+
+    /* Reset our row's soft-wrap. */
+    screens.active->cursorResetWrap();
+
+    /* Mark our cursor row as dirty */
+    screens.active->cursorMarkDirty();
+
+    /* Clear the cells */
+    Cell *cells = screens.active->cursor.page_cell;
+
+    /* If we never had a protection mode, then we can assume no cells
+     * are protected and go with the fast path. If the last protection
+     * mode was not ISO we also always ignore protection attributes. */
+    if (screens.active->protected_mode != terminal::ansi::ProtectedMode::iso) {
+        screens.active->clearCells(screens.active->cursor.page_pin->node->page(), screens.active->cursor.page_row,
+                                   cells, count);
+        return;
+    }
+
+    screens.active->clearUnprotectedCells(screens.active->cursor.page_pin->node->page(),
+                                          screens.active->cursor.page_row, cells, count);
+}
+
+/* Erase the line. */
+inline void Terminal::eraseLine(terminal::csi::EraseLine mode, bool protected_req) {
+    typedef terminal::csi::EraseLine EraseLine;
+
+    /* Get our start/end positions depending on mode. */
+    size::CellCountInt start, end;
+    switch (mode) {
+    case EraseLine::right: {
+        size::CellCountInt x = screens.active->cursor.x;
+
+        /* If our X is a wide spacer tail then we need to erase the
+         * previous cell too so we don't split a multi-cell character. */
+        if (x > 0 && screens.active->cursor.page_cell->wide() == Cell::Wide::spacer_tail) {
+            x -= 1;
+        }
+
+        /* Reset our row's soft-wrap. */
+        screens.active->cursorResetWrap();
+
+        start = x;
+        end = cols;
+        break;
+    }
+
+    case EraseLine::left: {
+        size::CellCountInt x = screens.active->cursor.x;
+
+        /* If our x is a wide char we need to delete the tail too. */
+        if (screens.active->cursor.page_cell->wide() == Cell::Wide::wide) {
+            x += 1;
+        }
+
+        start = 0;
+        end = (size::CellCountInt)(x + 1);
+        break;
+    }
+
+    case EraseLine::complete:
+        /* Xterm preserves this flag for EL2, but it also doesn't reflow
+         * rows when resizing. Since we do, the erased row must no longer
+         * continue onto the next row. */
+        screens.active->cursorResetWrap();
+
+        start = 0;
+        end = cols;
+        break;
+
+    default:
+        /* log.err("unimplemented erase line mode: {}") */
+        return;
+    }
+
+    /* All modes will clear the pending wrap state and we know we have
+     * a valid mode at this point. */
+    screens.active->cursor.pending_wrap = false;
+
+    /* We always mark our row as dirty */
+    screens.active->cursorMarkDirty();
+
+    /* Start of our cells */
+    Cell *cells = screens.active->cursor.page_cell - screens.active->cursor.x;
+
+    /* We respect protected attributes if explicitly requested (probably
+     * a DECSEL sequence) or if our last protected mode was ISO even if its
+     * not currently set. */
+    const bool protected_ = screens.active->protected_mode == terminal::ansi::ProtectedMode::iso || protected_req;
+
+    /* If we're not respecting protected attributes, we can use a fast-path
+     * to fill the entire line. */
+    if (!protected_) {
+        screens.active->clearCells(screens.active->cursor.page_pin->node->page(), screens.active->cursor.page_row,
+                                   cells + start, (size_t)(end - start));
+        return;
+    }
+
+    screens.active->clearUnprotectedCells(screens.active->cursor.page_pin->node->page(),
+                                          screens.active->cursor.page_row, cells + start, (size_t)(end - start));
+}
+
+/* Erase the display. */
+inline void Terminal::eraseDisplay(terminal::csi::EraseDisplay mode, bool protected_req) {
+    typedef terminal::csi::EraseDisplay EraseDisplay;
+
+    /* We respect protected attributes if explicitly requested (probably
+     * a DECSEL sequence) or if our last protected mode was ISO even if its
+     * not currently set. */
+    const bool protected_ = screens.active->protected_mode == terminal::ansi::ProtectedMode::iso || protected_req;
+
+    switch (mode) {
+    case EraseDisplay::scroll_complete: {
+        if (!screens.active->scrollClear()) {
+            /* log.warn("scroll clear failed, doing a normal clear err={}") */
+            eraseDisplay(EraseDisplay::complete, protected_req);
+            return;
+        }
+
+        /* Unsets pending wrap state */
+        screens.active->cursor.pending_wrap = false;
+        break;
+    }
+
+    case EraseDisplay::complete: {
+        /* If we're on the primary screen and our last non-empty row is
+         * a prompt, then we do a scroll_complete instead. This is a
+         * heuristic to get the generally desirable behavior that ^L
+         * at a prompt scrolls the screen contents prior to clearing.
+         * Most shells send `ESC [ H ESC [ 2 J` so we can't just check
+         * our current cursor position. See #905 */
+        if (screens.active_key == ScreenSet::Key::primary) {
+            do { /* at_prompt */
+                /* Go from the bottom of the active up and see if we're
+                 * at a prompt. */
+                const Maybe<Pin> active_br = screens.active->pages.getBottomRight(point::Tag::active);
+                if (!active_br.has) break;
+                PageList::RowIterator it = active_br.value.rowIterator(
+                    PageList::Direction::left_up, screens.active->pages.getTopLeft(point::Tag::active));
+                bool at_prompt = false;
+                Pin p;
+                while (it.next(&p)) {
+                    const Row *row = p.rowAndCell().row;
+                    const Row::SemanticPrompt sp = row->semantic_prompt();
+                    /* If we're at a prompt or input area, then we are at a prompt. */
+                    if (sp == Row::SemanticPrompt::prompt || sp == Row::SemanticPrompt::prompt_continuation) {
+                        at_prompt = true;
+                        break;
+                    }
+                    /* If we have command output, then we're most certainly not
+                     * at a prompt. */
+                    break;
+                }
+                if (!at_prompt) break;
+
+                /* If we fail, we just fall back to doing a normal clear
+                 * so we don't worry about the error. */
+                (void)screens.active->scrollClear();
+            } while (false);
+        }
+
+        /* All active area */
+        screens.active->clearRows(point::Point::active(), Maybe<point::Point>(), protected_);
+
+        /* Unsets pending wrap state */
+        screens.active->cursor.pending_wrap = false;
+
+        /* Cleared screen dirty bit */
+        flags.dirty.clear = true;
+        break;
+    }
+
+    case EraseDisplay::below: {
+        /* All lines to the right (including the cursor) */
+        eraseLine(terminal::csi::EraseLine::right, protected_req);
+
+        /* All lines below */
+        if (screens.active->cursor.y + 1 < rows) {
+            screens.active->clearRows(point::Point::active(0, (uint32_t)(screens.active->cursor.y + 1)),
+                                      Maybe<point::Point>(), protected_);
+        }
+
+        /* Unsets pending wrap state. Should be done by eraseLine. */
+        assert(!screens.active->cursor.pending_wrap);
+        break;
+    }
+
+    case EraseDisplay::above: {
+        /* Erase to the left (including the cursor) */
+        eraseLine(terminal::csi::EraseLine::left, protected_req);
+
+        /* All lines above */
+        if (screens.active->cursor.y > 0) {
+            screens.active->clearRows(point::Point::active(0, 0),
+                                      point::Point::active(0, (uint32_t)(screens.active->cursor.y - 1)), protected_);
+        }
+
+        /* Unsets pending wrap state */
+        assert(!screens.active->cursor.pending_wrap);
+        break;
+    }
+
+    case EraseDisplay::scrollback: screens.active->eraseHistory(Maybe<point::Point>()); break;
+    }
+}
+
+/* Resets all margins and fills the whole screen with the character 'E'
+ *
+ * Sets the cursor to the top left corner. */
+inline bool Terminal::decaln() {
+    /* Clear our stylistic attributes. This is the only thing that can
+     * fail so we do it first so we can undo it. */
+    const style::Style old_style = screens.active->cursor.style;
+    {
+        style::Style s;
+        s.bg_color = screens.active->cursor.style.bg_color;
+        s.fg_color = screens.active->cursor.style.fg_color;
+        screens.active->cursor.style = s;
+    }
+    if (screens.active->manualStyleUpdate() != PageList::IncreaseCapacityError::none) {
+        screens.active->cursor.style = old_style;
+        return false;
+    }
+
+    /* Reset margins, also sets cursor to top-left */
+    scrolling_region.top = 0;
+    scrolling_region.bottom = (size::CellCountInt)(rows - 1);
+    scrolling_region.left = 0;
+    scrolling_region.right = (size::CellCountInt)(cols - 1);
+
+    /* Origin mode is disabled */
+    modes.set(terminal::modes::Mode::origin, false);
+
+    /* Move our cursor to the top-left */
+    setCursorPos(1, 1);
+
+    /* Use clearRows instead of eraseDisplay because we must NOT respect
+     * protected attributes here. */
+    screens.active->clearRows(point::Point::active(), Maybe<point::Point>(), false);
+
+    /* Fill with Es by moving the cursor but reset it after. */
+    for (;;) {
+        Page *page = screens.active->cursor.page_pin->node->page();
+        Row *row = screens.active->cursor.page_row;
+        Cell *cells = row->cells.ptr(page->memory);
+        const size_t cells_len = page->size.cols;
+        {
+            Cell v = Cell::init('E');
+            v.setStyleId(screens.active->cursor.style_id);
+            /* DECALN does not respect protected state. Verified with xterm. */
+            v.setProtected(false);
+            for (size_t i = 0; i < cells_len; i++) cells[i] = v;
+        }
+
+        /* If we have a ref-counted style, increase */
+        if (screens.active->cursor.style_id != style::default_id) {
+            page->styles.useMultiple((const void *)page->memory, screens.active->cursor.style_id,
+                                     (size::CellCountInt)cells_len);
+            row->setStyled(true);
+        }
+
+        /* We messed with the page so assert its integrity here. */
+        page->assertIntegrity();
+
+        screens.active->cursorMarkDirty();
+        if (screens.active->cursor.y == rows - 1) break;
+        screens.active->cursorDown(1);
+    }
+
+    /* Reset the cursor to the top-left */
+    setCursorPos(1, 1);
+    return true;
+}
+
 } /* namespace vt */
 } /* namespace wisp */
 
