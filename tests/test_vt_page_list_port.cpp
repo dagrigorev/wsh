@@ -1857,6 +1857,594 @@ TEST(page_list, PageList_scroll_top) {
     ASSERT_TRUE(sbEq(s->scrollbar(), s->totalRows(), s->total_rows - s->rows, s->rows));
 }
 
+/* Wisp: `s.getCell(.{ .viewport = .{} }).?.screenPoint() == .{ .screen = .{ .x = 0, .y = y } }` */
+static bool vpAt(PageList &s, uint32_t y) { return cellScreenPoint(s, Point::viewport()).eql(Point::screen(0, y)); }
+typedef PageList::Scroll Scroll;
+
+TEST(page_list, PageList_scroll_delta_row_back) {
+    ListHolder s(opts(80, 24));
+    ASSERT_TRUE(s->growRows(10));
+
+    ASSERT_TRUE(vpAt(*s, 10));
+
+    s->scroll(Scroll::deltaRow(-1));
+
+    ASSERT_TRUE(sbEq(s->scrollbar(), s->totalRows(), s->total_rows - s->rows - 1, s->rows));
+
+    ASSERT_TRUE(vpAt(*s, 9));
+
+    ASSERT_TRUE(s->growRows(10));
+    ASSERT_TRUE(vpAt(*s, 9));
+
+    ASSERT_TRUE(sbEq(s->scrollbar(), s->totalRows(), s->total_rows - s->rows - 11, s->rows));
+
+    s->scroll(Scroll::deltaRow(-1));
+
+    ASSERT_TRUE(sbEq(s->scrollbar(), s->totalRows(), s->total_rows - s->rows - 12, s->rows));
+}
+
+TEST(page_list, PageList_scroll_delta_row_back_overflow) {
+    ListHolder s(opts(80, 24));
+    ASSERT_TRUE(s->growRows(10));
+
+    ASSERT_TRUE(vpAt(*s, 10));
+
+    s->scroll(Scroll::deltaRow(-100));
+
+    ASSERT_TRUE(vpAt(*s, 0));
+
+    ASSERT_TRUE(sbEq(s->scrollbar(), s->totalRows(), 0, s->rows));
+
+    ASSERT_TRUE(s->growRows(10));
+    ASSERT_TRUE(vpAt(*s, 0));
+
+    ASSERT_TRUE(sbEq(s->scrollbar(), s->totalRows(), 0, s->rows));
+}
+
+TEST(page_list, PageList_scroll_minimum_row_delta) {
+    ListHolder s(opts(10, 3));
+
+    /* Create one row of history so scrolling all the way back has an
+     * observable result. */
+    ASSERT_TRUE(s->growRows(1));
+    s->scroll(Scroll::deltaRow(PTRDIFF_MIN));
+
+    ASSERT_TRUE(Viewport::top == s->viewport);
+}
+
+TEST(page_list, PageList_scroll_delta_row_forward) {
+    ListHolder s(opts(80, 24));
+    ASSERT_TRUE(s->growRows(10));
+
+    ASSERT_TRUE(vpAt(*s, 10));
+
+    s->scroll(Scroll::top());
+    s->scroll(Scroll::deltaRow(2));
+
+    ASSERT_TRUE(sbEq(s->scrollbar(), s->totalRows(), 2, s->rows));
+
+    ASSERT_TRUE(vpAt(*s, 2));
+
+    ASSERT_TRUE(s->growRows(10));
+    ASSERT_TRUE(vpAt(*s, 2));
+
+    ASSERT_TRUE(sbEq(s->scrollbar(), s->totalRows(), 2, s->rows));
+}
+
+TEST(page_list, PageList_scroll_delta_row_forward_into_active) {
+    ListHolder s(opts(80, 24));
+
+    s->scroll(Scroll::deltaRow(2));
+
+    ASSERT_TRUE(vpAt(*s, 0));
+
+    ASSERT_TRUE(sbEq(s->scrollbar(), s->totalRows(), s->total_rows - s->rows, s->rows));
+}
+
+TEST(page_list, PageList_scroll_delta_row_back_without_space_preserves_active) {
+    ListHolder s(opts(80, 24));
+    s->scroll(Scroll::deltaRow(-1));
+
+    ASSERT_TRUE(vpAt(*s, 0));
+
+    ASSERT_TRUE(s->viewport == Viewport::active);
+
+    ASSERT_TRUE(sbEq(s->scrollbar(), s->totalRows(), s->total_rows - s->rows, s->rows));
+}
+
+TEST(page_list, PageList_scroll_to_pin) {
+    ListHolder s(opts(80, 24));
+    ASSERT_TRUE(s->growRows(10));
+
+    s->scroll(Scroll::pinAt(s->pin(Point::screen(2, 4)).value));
+
+    ASSERT_TRUE(sbEq(s->scrollbar(), s->totalRows(), 4, s->rows));
+
+    ASSERT_TRUE(vpAt(*s, 4));
+
+    s->scroll(Scroll::pinAt(s->pin(Point::screen(2, 5)).value));
+
+    ASSERT_TRUE(sbEq(s->scrollbar(), s->totalRows(), 5, s->rows));
+
+    ASSERT_TRUE(vpAt(*s, 5));
+}
+
+TEST(page_list, PageList_scroll_to_pin_in_active) {
+    ListHolder s(opts(80, 24));
+    ASSERT_TRUE(s->growRows(10));
+
+    s->scroll(Scroll::pinAt(s->pin(Point::screen(2, 30)).value));
+
+    ASSERT_TRUE(sbEq(s->scrollbar(), s->totalRows(), s->total_rows - s->rows, s->rows));
+
+    ASSERT_TRUE(vpAt(*s, 10));
+}
+
+TEST(page_list, PageList_scroll_to_pin_at_top) {
+    ListHolder s(opts(80, 24));
+    ASSERT_TRUE(s->growRows(10));
+
+    s->scroll(Scroll::pinAt(s->pin(Point::screen(2, 0)).value));
+
+    ASSERT_TRUE(s->viewport == Viewport::top);
+
+    ASSERT_TRUE(sbEq(s->scrollbar(), s->totalRows(), 0, s->rows));
+
+    ASSERT_TRUE(vpAt(*s, 0));
+}
+
+TEST(page_list, PageList_scroll_to_row_0) {
+    ListHolder s(opts(80, 24));
+    ASSERT_TRUE(s->growRows(10));
+
+    ASSERT_TRUE(vpAt(*s, 10));
+
+    s->scroll(Scroll::rowAt(0));
+    ASSERT_TRUE(s->viewport == Viewport::top);
+
+    ASSERT_TRUE(vpAt(*s, 0));
+
+    ASSERT_TRUE(sbEq(s->scrollbar(), s->total_rows, 0, s->rows));
+
+    ASSERT_TRUE(s->growRows(10));
+    ASSERT_TRUE(vpAt(*s, 0));
+
+    ASSERT_TRUE(sbEq(s->scrollbar(), s->total_rows, 0, s->rows));
+}
+
+TEST(page_list, PageList_scroll_to_row_in_scrollback) {
+    ListHolder s(opts(80, 24));
+    ASSERT_TRUE(s->growRows(20));
+
+    ASSERT_TRUE(vpAt(*s, 20));
+
+    s->scroll(Scroll::rowAt(5));
+    ASSERT_TRUE(s->viewport == Viewport::pin);
+    ASSERT_TRUE(sbEq(s->scrollbar(), s->total_rows, 5, s->rows));
+
+    ASSERT_TRUE(vpAt(*s, 5));
+
+    ASSERT_TRUE(s->growRows(10));
+    ASSERT_TRUE(vpAt(*s, 5));
+
+    ASSERT_TRUE(sbEq(s->scrollbar(), s->total_rows, 5, s->rows));
+}
+
+TEST(page_list, PageList_scroll_to_row_in_middle) {
+    ListHolder s(opts(80, 24));
+    ASSERT_TRUE(s->growRows(50));
+
+    const size_t total = s->total_rows;
+    const size_t midpoint = total / 2;
+    s->scroll(Scroll::rowAt(midpoint));
+
+    ASSERT_TRUE(s->viewport == Viewport::pin);
+    ASSERT_TRUE(sbEq(s->scrollbar(), s->total_rows, midpoint, s->rows));
+
+    ASSERT_TRUE(vpAt(*s, (uint32_t)midpoint));
+
+    ASSERT_TRUE(s->growRows(10));
+    ASSERT_TRUE(vpAt(*s, (uint32_t)midpoint));
+
+    ASSERT_TRUE(sbEq(s->scrollbar(), s->total_rows, midpoint, s->rows));
+}
+
+TEST(page_list, PageList_scroll_to_row_at_active_boundary) {
+    ListHolder s(opts(80, 24));
+    ASSERT_TRUE(s->growRows(20));
+
+    const size_t active_start = s->total_rows - s->rows;
+
+    s->scroll(Scroll::rowAt(active_start));
+
+    ASSERT_TRUE(s->viewport == Viewport::active);
+
+    ASSERT_TRUE(vpAt(*s, (uint32_t)active_start));
+
+    ASSERT_TRUE(sbEq(s->scrollbar(), s->total_rows, s->total_rows - s->rows, s->rows));
+
+    ASSERT_TRUE(s->growRows(10));
+
+    ASSERT_TRUE(s->viewport == Viewport::active);
+
+    ASSERT_TRUE(sbEq(s->scrollbar(), s->total_rows, s->total_rows - s->rows, s->rows));
+}
+
+TEST(page_list, PageList_scroll_to_row_beyond_active) {
+    ListHolder s(opts(80, 24));
+    ASSERT_TRUE(s->growRows(10));
+
+    s->scroll(Scroll::rowAt(1000));
+
+    ASSERT_TRUE(s->viewport == Viewport::active);
+
+    ASSERT_TRUE(vpAt(*s, 10));
+
+    ASSERT_TRUE(sbEq(s->scrollbar(), s->total_rows, s->total_rows - s->rows, s->rows));
+}
+
+TEST(page_list, PageList_scroll_to_row_without_scrollback) {
+    ListHolder s(opts(80, 24));
+
+    s->scroll(Scroll::rowAt(5));
+
+    ASSERT_TRUE(s->viewport == Viewport::active);
+
+    ASSERT_TRUE(vpAt(*s, 0));
+
+    ASSERT_TRUE(sbEq(s->scrollbar(), s->total_rows, s->total_rows - s->rows, s->rows));
+}
+
+TEST(page_list, PageList_scroll_to_row_then_delta) {
+    ListHolder s(opts(80, 24));
+    ASSERT_TRUE(s->growRows(30));
+
+    s->scroll(Scroll::rowAt(10));
+
+    ASSERT_TRUE(s->viewport == Viewport::pin);
+
+    ASSERT_TRUE(vpAt(*s, 10));
+
+    ASSERT_TRUE(sbEq(s->scrollbar(), s->total_rows, 10, s->rows));
+
+    s->scroll(Scroll::deltaRow(5));
+
+    ASSERT_TRUE(s->viewport == Viewport::pin);
+
+    ASSERT_TRUE(vpAt(*s, 15));
+
+    ASSERT_TRUE(sbEq(s->scrollbar(), s->total_rows, 15, s->rows));
+
+    s->scroll(Scroll::deltaRow(-3));
+
+    ASSERT_TRUE(s->viewport == Viewport::pin);
+
+    ASSERT_TRUE(vpAt(*s, 12));
+
+    ASSERT_TRUE(sbEq(s->scrollbar(), s->total_rows, 12, s->rows));
+}
+
+TEST(page_list, PageList_scroll_to_row_with_cache_fast_path_down) {
+    ListHolder s(opts(80, 24));
+    ASSERT_TRUE(s->growRows(50));
+
+    s->scroll(Scroll::rowAt(10));
+
+    ASSERT_TRUE(s->viewport == Viewport::pin);
+    ASSERT_TRUE(sbEq(s->scrollbar(), s->total_rows, 10, s->rows));
+
+    ASSERT_TRUE(vpAt(*s, 10));
+
+    /* Verify cache is populated */
+    ASSERT_TRUE(s->viewport_pin_row_offset.has);
+    ASSERT_TRUE(10 == s->viewport_pin_row_offset.value);
+
+    /* Now scroll to a different row - this should use the fast path */
+    s->scroll(Scroll::rowAt(20));
+
+    ASSERT_TRUE(s->viewport == Viewport::pin);
+    ASSERT_TRUE(sbEq(s->scrollbar(), s->total_rows, 20, s->rows));
+
+    ASSERT_TRUE(vpAt(*s, 20));
+
+    ASSERT_TRUE(s->growRows(10));
+    ASSERT_TRUE(vpAt(*s, 20));
+
+    ASSERT_TRUE(sbEq(s->scrollbar(), s->total_rows, 20, s->rows));
+}
+
+TEST(page_list, PageList_scroll_to_row_with_cache_fast_path_up) {
+    ListHolder s(opts(80, 24));
+    ASSERT_TRUE(s->growRows(50));
+
+    s->scroll(Scroll::rowAt(30));
+
+    ASSERT_TRUE(s->viewport == Viewport::pin);
+    ASSERT_TRUE(sbEq(s->scrollbar(), s->total_rows, 30, s->rows));
+
+    ASSERT_TRUE(vpAt(*s, 30));
+
+    /* Verify cache is populated */
+    ASSERT_TRUE(s->viewport_pin_row_offset.has);
+    ASSERT_TRUE(30 == s->viewport_pin_row_offset.value);
+
+    /* Now scroll up to a different row - this should use the fast path */
+    s->scroll(Scroll::rowAt(15));
+
+    ASSERT_TRUE(s->viewport == Viewport::pin);
+    ASSERT_TRUE(sbEq(s->scrollbar(), s->total_rows, 15, s->rows));
+
+    ASSERT_TRUE(vpAt(*s, 15));
+
+    ASSERT_TRUE(s->growRows(10));
+    ASSERT_TRUE(vpAt(*s, 15));
+
+    ASSERT_TRUE(sbEq(s->scrollbar(), s->total_rows, 15, s->rows));
+}
+
+TEST(page_list, PageList_scroll_clear) {
+    ListHolder s(opts(80, 24));
+
+    *s->getCell(Point::active(0, 0)).value.cell = page::Cell::init('A');
+    *s->getCell(Point::active(0, 1)).value.cell = page::Cell::init('A');
+
+    ASSERT_TRUE(s->scrollClear());
+
+    ASSERT_TRUE(vpAt(*s, 2));
+}
+
+static void setPrompt(Page *page, size_t y, page::Row::SemanticPrompt sp) {
+    page->getRowAndCell(0, y).row->setSemanticPrompt(sp);
+}
+
+TEST(page_list, PageList_jump_zero_prompts) {
+    ListHolder s(opts(5, 3));
+    ASSERT_TRUE(s->growRows(3));
+    ASSERT_TRUE(s->pages.first == s->pages.last);
+    Page *page = s->pages.first->page();
+    setPrompt(page, 1, page::Row::SemanticPrompt::prompt);
+    setPrompt(page, 5, page::Row::SemanticPrompt::prompt);
+
+    s->scroll(Scroll::deltaPrompt(0));
+    ASSERT_TRUE(s->viewport == Viewport::active);
+
+    ASSERT_TRUE(sbEq(s->scrollbar(), s->total_rows, s->total_rows - s->rows, s->rows));
+}
+
+TEST(page_list, PageList_jump_minimum_prompt_delta) {
+    ListHolder s(opts(10, 3));
+
+    s->scroll(Scroll::deltaPrompt(PTRDIFF_MIN));
+    ASSERT_TRUE(Viewport::active == s->viewport);
+}
+
+static bool viewportScreenIs(PageList &s, uint32_t y) {
+    return pointEq(s.pointFromPin(point::Tag::screen, s.pin(Point::viewport()).value), Point::screen(0, y));
+}
+
+TEST(page_list, Screen_jump_back_one_prompt) {
+    ListHolder s(opts(5, 3));
+    ASSERT_TRUE(s->growRows(3));
+    ASSERT_TRUE(s->pages.first == s->pages.last);
+    Page *page = s->pages.first->page();
+    setPrompt(page, 1, page::Row::SemanticPrompt::prompt);
+    setPrompt(page, 5, page::Row::SemanticPrompt::prompt);
+
+    /* Jump back */
+    {
+        s->scroll(Scroll::deltaPrompt(-1));
+        ASSERT_TRUE(s->viewport == Viewport::pin);
+        ASSERT_TRUE(viewportScreenIs(*s, 1));
+
+        ASSERT_TRUE(sbEq(s->scrollbar(), s->total_rows, 1, s->rows));
+    }
+    {
+        s->scroll(Scroll::deltaPrompt(-1));
+        ASSERT_TRUE(s->viewport == Viewport::pin);
+        ASSERT_TRUE(viewportScreenIs(*s, 1));
+
+        ASSERT_TRUE(sbEq(s->scrollbar(), s->total_rows, 1, s->rows));
+    }
+
+    /* Jump forward */
+    {
+        s->scroll(Scroll::deltaPrompt(1));
+        ASSERT_TRUE(s->viewport == Viewport::active);
+        ASSERT_TRUE(sbEq(s->scrollbar(), s->total_rows, s->total_rows - s->rows, s->rows));
+    }
+    {
+        s->scroll(Scroll::deltaPrompt(1));
+        ASSERT_TRUE(s->viewport == Viewport::active);
+        ASSERT_TRUE(sbEq(s->scrollbar(), s->total_rows, s->total_rows - s->rows, s->rows));
+    }
+}
+
+TEST(page_list, Screen_jump_forward_prompt_skips_multiline_continuation) {
+    ListHolder s(opts(5, 3));
+    ASSERT_TRUE(s->growRows(7));
+
+    /* Multiline prompt on rows 1-3. */
+    s->pin(Point::screen(0, 1)).value.rowAndCell().row->setSemanticPrompt(page::Row::SemanticPrompt::prompt);
+    s->pin(Point::screen(0, 2))
+        .value.rowAndCell()
+        .row->setSemanticPrompt(page::Row::SemanticPrompt::prompt_continuation);
+    s->pin(Point::screen(0, 3))
+        .value.rowAndCell()
+        .row->setSemanticPrompt(page::Row::SemanticPrompt::prompt_continuation);
+
+    /* Next prompt after command output. */
+    s->pin(Point::screen(0, 6)).value.rowAndCell().row->setSemanticPrompt(page::Row::SemanticPrompt::prompt);
+
+    /* Starting at the first prompt line should jump to the next prompt,
+     * not to continuation lines. */
+    s->scroll(Scroll::rowAt(1));
+    s->scroll(Scroll::deltaPrompt(1));
+    ASSERT_TRUE(s->viewport == Viewport::pin);
+    ASSERT_TRUE(viewportScreenIs(*s, 6));
+
+    /* Starting in the middle of continuation lines should also jump to
+     * the next prompt. */
+    s->scroll(Scroll::rowAt(2));
+    s->scroll(Scroll::deltaPrompt(1));
+    ASSERT_TRUE(s->viewport == Viewport::pin);
+    ASSERT_TRUE(viewportScreenIs(*s, 6));
+}
+
+TEST(page_list, PageList_grow_fit_in_capacity) {
+    ListHolder s(opts(80, 24));
+
+    /* So we know we're using capacity to grow */
+    Page *last = s->pages.last->page();
+    ASSERT_TRUE(last->size.rows < last->capacity.rows);
+
+    /* Grow */
+    ASSERT_TRUE(growNode(&*s) == nullptr);
+    ASSERT_TRUE(cellScreenPoint(*s, Point::active()).eql(Point::screen(0, 1)));
+}
+
+TEST(page_list, PageList_grow_allocate) {
+    ListHolder s(opts(80, 24));
+
+    /* Grow to capacity */
+    Node *last_node = s->pages.last;
+    Page *last = s->pages.last->page();
+    const size_t n = (size_t)last->capacity.rows - last->size.rows;
+    for (size_t i = 0; i < n; i++) {
+        ASSERT_TRUE(growNode(&*s) == nullptr);
+    }
+
+    /* Grow, should allocate */
+    Node *new_ = growNode(&*s);
+    ASSERT_TRUE(new_ != nullptr);
+    ASSERT_TRUE(s->pages.last == new_);
+    ASSERT_TRUE(last_node->next == new_);
+    {
+        const PageList::Cell cell = s->getCell(Point::active(0, (uint32_t)(s->rows - 1))).value;
+        ASSERT_TRUE(cell.node == new_);
+        ASSERT_TRUE(Point::screen(0, last->capacity.rows).eql(cell.screenPoint()));
+    }
+}
+
+TEST(page_list, PageList_Cell_screenPoint_supports_long_scrollback) {
+    /* A modest number of full-size page nodes is enough to exceed the u16
+     * row range without allocating any page backing memory. screenPoint only
+     * reads the linked metadata while calculating the absolute coordinate. */
+    const size_t page_count = 307;
+    const size::CellCountInt rows_per_page = page::std_capacity().rows;
+    Node *nodes = (Node *)calloc(page_count, sizeof(Node));
+
+    for (size_t i = 0; i < page_count; i++) {
+        Node *node = &nodes[i];
+        node->prev = i > 0 ? &nodes[i - 1] : nullptr;
+        node->next = i + 1 < page_count ? &nodes[i + 1] : nullptr;
+        node->data.tag = Node::Data::Tag::resident;
+        node->serial = i;
+        node->owned = Node::Owned::heap;
+        node->data.resident().size.cols = 1;
+        node->data.resident().size.rows = rows_per_page;
+    }
+
+    const uint32_t expected_y = (uint32_t)(page_count - 1) * (uint32_t)rows_per_page;
+    ASSERT_TRUE(expected_y > 0xFFFF);
+
+    PageList::Cell cell;
+    cell.node = &nodes[page_count - 1];
+    cell.row = nullptr;
+    cell.cell = nullptr;
+    cell.row_idx = 0;
+    cell.col_idx = 0;
+    ASSERT_TRUE(Point::screen(0, expected_y).eql(cell.screenPoint()));
+    free(nodes);
+}
+
+TEST(page_list, PageList_set_max_bytes_prunes_immediately_and_can_be_raised) {
+    const size::CellCountInt cols = 80;
+    const size_t page_rows = PageList::initialCapacity(cols).rows;
+    const size_t item = PageList::PagePool::item_size;
+
+    ListHolder s(opts(cols, 1));
+
+    /* Build four complete pages of history followed by the active row. */
+    ASSERT_TRUE(s->growRows(4 * page_rows));
+    ASSERT_TRUE(5 == s->totalPages());
+
+    Node *removed = s->pages.first;
+    Node *retained = s->pages.last->prev;
+    Pin *removed_pin = s->trackPin(Pin(removed));
+    Pin *retained_pin = s->trackPin(Pin(retained));
+
+    s->scroll(Scroll::pinAt(*retained_pin));
+    ASSERT_TRUE(3 * page_rows == s->scrollbar().offset);
+
+    /* The active-area minimum is two pages. Lowering below that immediately
+     * removes all older complete historical pages. */
+    s->setMaxBytes(item);
+    ASSERT_TRUE(item == s->limits.bytes.explicit_);
+    ASSERT_TRUE(2 * item == s->limits.max(PageList::Limits::Key::bytes));
+    ASSERT_TRUE(s->limits.max(PageList::Limits::Key::bytes) == s->page_size);
+    ASSERT_TRUE(2 == s->totalPages());
+    ASSERT_TRUE(page_rows == s->total_rows - s->rows);
+    ASSERT_TRUE(retained == s->pages.first);
+    ASSERT_TRUE(retained == removed_pin->node);
+    ASSERT_TRUE(removed_pin->garbage);
+    ASSERT_TRUE(retained == retained_pin->node);
+    ASSERT_FALSE(retained_pin->garbage);
+    ASSERT_TRUE(0 == s->scrollbar().offset);
+
+    /* Raising the limit doesn't allocate or otherwise change retained data,
+     * but subsequent growth can exceed the previous effective limit. */
+    const size_t limited_size = s->page_size;
+    const size_t limited_rows = s->total_rows;
+    s->setMaxBytes(8 * item);
+    ASSERT_TRUE(limited_size == s->page_size);
+    ASSERT_TRUE(limited_rows == s->total_rows);
+    ASSERT_TRUE(s->growRows(2 * page_rows));
+    ASSERT_TRUE(s->page_size > limited_size);
+
+    /* Null restores unlimited growth and likewise preserves current data. */
+    const size_t raised_size = s->page_size;
+    const size_t raised_rows = s->total_rows;
+    s->setMaxBytes(Maybe<size_t>());
+    ASSERT_TRUE(SIZE_MAX == s->limits.bytes.explicit_);
+    ASSERT_TRUE(raised_size == s->page_size);
+    ASSERT_TRUE(raised_rows == s->total_rows);
+    ASSERT_TRUE(s->growRows(5 * page_rows));
+    ASSERT_TRUE(s->page_size > 8 * item);
+
+    s->untrackPin(retained_pin);
+    s->untrackPin(removed_pin);
+}
+
+TEST(page_list, PageList_set_max_bytes_zero_preserves_active_boundary) {
+    ListHolder s(opts(80, 1));
+
+    /* Make the sole page larger than the effective zero-byte limit. Its first
+     * row will be history, but the same indivisible page also contains active. */
+    while (s->page_size <= s->limits.bytes.min) {
+        Node *n;
+        ASSERT_TRUE(s->increaseCapacity(s->pages.first, PageList::IncreaseCapacity::grapheme_bytes, &n) ==
+                    PageList::IncreaseCapacityError::none);
+    }
+    (void)growNode(&*s);
+    ASSERT_TRUE(1 == s->totalPages());
+    ASSERT_TRUE(s->pages.first == s->getTopLeft(point::Tag::active).node);
+    ASSERT_TRUE(s->getTopLeft(point::Tag::active).y > 0);
+
+    s->scroll(Scroll::top());
+    ASSERT_TRUE(s->viewport == Viewport::top);
+
+    s->setMaxBytes((size_t)0);
+    ASSERT_TRUE(0 == s->limits.bytes.explicit_);
+    ASSERT_TRUE(s->page_size > s->limits.max(PageList::Limits::Key::bytes));
+    ASSERT_TRUE(1 == s->totalPages());
+    ASSERT_TRUE(s->viewport == Viewport::active);
+    ASSERT_TRUE(sbEq(s->scrollbar(), s->rows, 0, s->rows));
+
+    /* No-scrollback mode cannot be moved back into the retained boundary row. */
+    s->scroll(Scroll::top());
+    ASSERT_TRUE(s->viewport == Viewport::active);
+}
+
 /* @@TESTS@@ */
 
 /* Wisp: std.testing.allocator's leak check. Runs last (registration order). */

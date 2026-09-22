@@ -3801,7 +3801,7 @@ struct PageList {
         case Scroll::Tag::delta_prompt: scrollPrompt(behavior.delta); break;
         case Scroll::Tag::delta_row: {
             const ptrdiff_t n = behavior.delta;
-            const size_t amount = (size_t)(n < 0 ? -n : n);
+            const size_t amount = n < 0 ? (size_t)0 - (size_t)n : (size_t)n; /* @abs */
 
             switch (viewport) {
             /* If we're at the top and we're scrolling backwards,
@@ -3897,7 +3897,7 @@ struct PageList {
     void scrollPrompt(ptrdiff_t delta) {
         /* If we aren't jumping any prompts then we don't need to do anything. */
         if (delta == 0) return;
-        const size_t delta_start = (size_t)(delta < 0 ? -delta : delta);
+        const size_t delta_start = delta < 0 ? (size_t)0 - (size_t)delta : (size_t)delta;
         size_t delta_rem = delta_start;
 
         /* We start at the row before or after our viewport depending on the
