@@ -1280,6 +1280,620 @@ inline void Terminal::reverseIndex() {
     scrollDown(1);
 }
 
+/* Set Cursor Position. Move cursor to the position indicated
+ * by row and column (1-indexed). If column is 0, it is adjusted to 1.
+ * If column is greater than the right-most column it is adjusted to
+ * the right-most column. If row is 0, it is adjusted to 1. If row is
+ * greater than the bottom-most row it is adjusted to the bottom-most
+ * row. */
+inline void Terminal::setCursorPos(size_t row_req, size_t col_req) {
+    /* If cursor origin mode is set the cursor row will be moved relative to
+     * the top margin row and adjusted to be above or at bottom-most row in
+     * the current scroll region.
+     *
+     * If origin mode is set and left and right margin mode is set the cursor
+     * will be moved relative to the left margin column and adjusted to be on
+     * or left of the right margin column. */
+    struct Params {
+        size::CellCountInt x_offset;
+        size::CellCountInt y_offset;
+        size::CellCountInt x_max;
+        size::CellCountInt y_max;
+    } params;
+    if (modes.get(terminal::modes::Mode::origin)) {
+        params.x_offset = scrolling_region.left;
+        params.y_offset = scrolling_region.top;
+        params.x_max = (size::CellCountInt)(scrolling_region.right + 1); /* We need this 1-indexed */
+        params.y_max = (size::CellCountInt)(scrolling_region.bottom + 1); /* We need this 1-indexed */
+    } else {
+        params.x_offset = 0;
+        params.y_offset = 0;
+        params.x_max = cols;
+        params.y_max = rows;
+    }
+
+    /* Unset pending wrap state */
+    screens.active->cursor.pending_wrap = false;
+
+    /* Calculate our new x/y. Wisp: +| and -| are saturating. */
+    const size_t row = row_req == 0 ? 1 : row_req;
+    const size_t col = col_req == 0 ? 1 : col_req;
+    const size_t col_off = col + params.x_offset < col ? SIZE_MAX : col + params.x_offset;
+    const size_t row_off = row + params.y_offset < row ? SIZE_MAX : row + params.y_offset;
+    const size_t x_sat = (size_t)params.x_max < col_off ? (size_t)params.x_max : col_off;
+    const size_t y_sat = (size_t)params.y_max < row_off ? (size_t)params.y_max : row_off;
+    const size::CellCountInt x = (size::CellCountInt)(x_sat > 0 ? x_sat - 1 : 0);
+    const size::CellCountInt y = (size::CellCountInt)(y_sat > 0 ? y_sat - 1 : 0);
+
+    /* If the y is unchanged then this is fast pointer math */
+    if (y == screens.active->cursor.y) {
+        if (x > screens.active->cursor.x) {
+            screens.active->cursorRight((size::CellCountInt)(x - screens.active->cursor.x));
+        } else {
+            screens.active->cursorLeft((size::CellCountInt)(screens.active->cursor.x - x));
+        }
+
+        return;
+    }
+
+    /* If everything changed we do an absolute change which is slightly slower */
+    screens.active->cursorAbsolute(x, y);
+}
+
+/* Set Top and Bottom Margins If bottom is not specified, 0 or bigger than
+ * the number of the bottom-most row, it is adjusted to the number of the
+ * bottom most row.
+ *
+ * If top < bottom set the top and bottom row of the scroll region according
+ * to top and bottom and move the cursor to the top-left cell of the display
+ * (when in cursor origin mode is set to the top-left cell of the scroll region).
+ *
+ * Otherwise: Set the top and bottom row of the scroll region to the top-most
+ * and bottom-most line of the screen.
+ *
+ * Top and bottom are 1-indexed. */
+inline void Terminal::setTopAndBottomMargin(size_t top_req, size_t bottom_req) {
+    const size_t top = top_req > 1 ? top_req : 1;
+    const size_t bottom_in = bottom_req == 0 ? (size_t)rows : bottom_req;
+    const size_t bottom = (size_t)rows < bottom_in ? (size_t)rows : bottom_in;
+    if (top >= bottom) return;
+
+    scrolling_region.top = (size::CellCountInt)(top - 1);
+    scrolling_region.bottom = (size::CellCountInt)(bottom - 1);
+    setCursorPos(1, 1);
+}
+
+/* DECSLRM */
+inline void Terminal::setLeftAndRightMargin(size_t left_req, size_t right_req) {
+    /* We must have this mode enabled to do anything */
+    if (!modes.get(terminal::modes::Mode::enable_left_and_right_margin)) return;
+
+    const size_t left = left_req > 1 ? left_req : 1;
+    const size_t right_in = right_req == 0 ? (size_t)cols : right_req;
+    const size_t right = (size_t)cols < right_in ? (size_t)cols : right_in;
+    if (left >= right) return;
+
+    scrolling_region.left = (size::CellCountInt)(left - 1);
+    scrolling_region.right = (size::CellCountInt)(right - 1);
+    setCursorPos(1, 1);
+}
+
+/* Scroll the text down by one row. */
+inline void Terminal::scrollDown(size_t count) {
+    /* Preserve our x/y to restore. */
+    struct Restore {
+        Terminal *t;
+        size::CellCountInt old_x;
+        size::CellCountInt old_y;
+        bool old_wrap;
+        ~Restore() {
+            t->screens.active->cursorAbsolute(old_x, old_y);
+            t->screens.active->cursor.pending_wrap = old_wrap;
+        }
+    } restore = {this, screens.active->cursor.x, screens.active->cursor.y, screens.active->cursor.pending_wrap};
+    (void)restore;
+
+    /* Move to the top of the scroll region */
+    screens.active->cursorAbsolute(scrolling_region.left, scrolling_region.top);
+    insertLines(count);
+}
+
+/* Removes amount lines from the top of the scroll region. The remaining lines
+ * to the bottom margin are shifted up and space from the bottom margin up
+ * is filled with empty lines.
+ *
+ * The new lines are created according to the current SGR state.
+ *
+ * Does not change the (absolute) cursor position. */
+inline bool Terminal::scrollUp(size_t count) {
+    /* Preserve our x/y to restore. */
+    struct Restore {
+        Terminal *t;
+        size::CellCountInt old_x;
+        size::CellCountInt old_y;
+        bool old_wrap;
+        ~Restore() {
+            t->screens.active->cursorAbsolute(old_x, old_y);
+            t->screens.active->cursor.pending_wrap = old_wrap;
+        }
+    } restore = {this, screens.active->cursor.x, screens.active->cursor.y, screens.active->cursor.pending_wrap};
+    (void)restore;
+
+    /* If our scroll region is at the top and we have no left/right
+     * margins then we move the scrolled out text into the scrollback.
+     *
+     * If our screen doesn't retain scrollback (e.g. the alternate
+     * screen) then creating scrollback is pure overhead, so we use the
+     * deleteLines path below instead, unless the region is the full
+     * screen where cursorScrollAbove has a specialized fast path
+     * (cursorDownScroll) for scrolling without scrollback. */
+    if (scrolling_region.top == 0 && scrolling_region.left == 0 && scrolling_region.right == cols - 1 &&
+        (!screens.active->no_scrollback || scrolling_region.bottom == rows - 1)) {
+        /* Clamp count to the scroll region height. */
+        const size_t region_height = (size_t)(scrolling_region.bottom + 1);
+        const size_t adjusted_count = count < region_height ? count : region_height;
+
+        /* TODO: Create an optimized version that can scroll N times
+         * This isn't critical because in most cases, scrollUp is used
+         * with count=1, but it's still a big optimization opportunity.
+         *
+         * Move our cursor to the bottom of the scroll region so we can
+         * use the cursorScrollAbove function to create scrollback */
+        screens.active->cursorAbsolute(0, scrolling_region.bottom);
+        for (size_t i = 0; i < adjusted_count; i++) {
+            if (!screens.active->cursorScrollAbove()) return false;
+        }
+        return true;
+    }
+
+    /* Move to the top of the scroll region */
+    screens.active->cursorAbsolute(scrolling_region.left, scrolling_region.top);
+    deleteLines(count);
+    return true;
+}
+
+/* Scroll the viewport of the terminal grid. */
+inline void Terminal::scrollViewport(const ScrollViewport &behavior) {
+    switch (behavior.tag) {
+    case ScrollViewport::Tag::top: screens.active->scroll(PageList::Scroll::top()); break;
+    case ScrollViewport::Tag::bottom: screens.active->scroll(PageList::Scroll::active()); break;
+    case ScrollViewport::Tag::delta: screens.active->scroll(PageList::Scroll::deltaRow(behavior.delta)); break;
+    case ScrollViewport::Tag::row: screens.active->scroll(PageList::Scroll::rowAt(behavior.row)); break;
+    }
+}
+
+/* Return the current compression activity value.
+ *
+ * Callers should schedule a `compress` call whenever this value changes. The
+ * direction of the change has no meaning; this is an opaque change token
+ * rather than a monotonic sequence exposed by Terminal.
+ *
+ * It is up to the terminal what it decides to compress, but currently
+ * we compress cold (non-viewed, non-editable) scrollback history on
+ * the primary screen.
+ *
+ * Note that compression requires specific system features, namely
+ * the ability to retain virtual memory allocations while discarding their
+ * physical memory backings. Callers must still use `compress` to determine
+ * whether compression is supported on the current target. */
+inline uint64_t Terminal::compressionActivity() const {
+    const PageList::IncrementalCompressionState *state = &screens.all[(size_t)ScreenSet::Key::primary]->pages.page_compression;
+    /* For now we don't use the extra 16 bits. */
+    return (uint64_t)state->activity_serial;
+}
+
+/* Compress cold memory to save resident memory space.
+ *
+ * Full compression does a full pass compressing everything it can before
+ * returning. This is not recommended for interactive terminals because
+ * compression is relatively slow and with large scrollbacks this can cause
+ * stalls.
+ *
+ * Incremental compression bounds itself on how much data it can look
+ * up to compress and how much compression work it does before returning.
+ * It is stateful (we maintain the state) and the return value tells callers
+ * whether they should continue calling it in the future.
+ *
+ * Callers should schedule compression when it doesn't impact user
+ * experience, for example during idle times. */
+inline Terminal::CompressionResult Terminal::compress(CompressionMode mode) {
+    PageList *pages = &screens.get(ScreenSet::Key::primary)->pages;
+    const PageList::IncrementalCompressionResult result = mode == CompressionMode::incremental
+                                                              ? pages->compress(PageList::CompressMode::incremental)
+                                                              : pages->compress(PageList::CompressMode::full);
+
+    switch (result) {
+    case PageList::IncrementalCompressionResult::unsupported: return CompressionResult::unsupported;
+    case PageList::IncrementalCompressionResult::pending: return CompressionResult::pending;
+    default: return CompressionResult::complete;
+    }
+}
+
+/* To be called before shifting a row (as in insertLines and deleteLines)
+ *
+ * Takes care of boundary conditions such as potentially split wide chars
+ * across scrolling region boundaries and orphaned spacer heads at line
+ * ends. */
+inline void Terminal::rowWillBeShifted(Page *page, Row *row) {
+    Cell *cells = row->cells.ptr(page->memory);
+
+    /* If our scrolling region includes the rightmost column then we
+     * need to turn any spacer heads in to normal empty cells, since
+     * once we move them they no longer correspond with soft-wrapped
+     * wide characters.
+     *
+     * If it contains either of the 2 leftmost columns, then the wide
+     * characters in the first column which may be associated with a
+     * spacer head will be either moved or cleared, so we also need
+     * to turn the spacer heads in to empty cells in that case. */
+    if (scrolling_region.right == cols - 1 || scrolling_region.left < 2) {
+        Cell *end_cell = &cells[page->size.cols - 1];
+        if (end_cell->wide() == Cell::Wide::spacer_head) {
+            end_cell->setWide(Cell::Wide::narrow);
+        }
+    }
+
+    /* If the leftmost or rightmost cells of our scrolling region
+     * are parts of wide chars, we need to clear the cells' contents
+     * since they'd be split by the move. */
+    Cell *left_cell = &cells[scrolling_region.left];
+    Cell *right_cell = &cells[scrolling_region.right];
+
+    if (left_cell->wide() == Cell::Wide::spacer_tail) {
+        Cell *wide_cell = &cells[scrolling_region.left - 1];
+        if (wide_cell->hasGrapheme()) {
+            page->clearGrapheme(wide_cell);
+            page->updateRowGraphemeFlag(row);
+        }
+        wide_cell->setContentCodepoint(0);
+        wide_cell->setWide(Cell::Wide::narrow);
+        left_cell->setWide(Cell::Wide::narrow);
+    }
+
+    if (right_cell->wide() == Cell::Wide::wide) {
+        Cell *tail_cell = &cells[scrolling_region.right + 1];
+        if (right_cell->hasGrapheme()) {
+            page->clearGrapheme(right_cell);
+            page->updateRowGraphemeFlag(row);
+        }
+        right_cell->setContentCodepoint(0);
+        right_cell->setWide(Cell::Wide::narrow);
+        tail_cell->setWide(Cell::Wide::narrow);
+    }
+}
+
+/* Renew every live page generation in an inclusive range before a full-width
+ * line operation moves logical rows between their coordinates. */
+inline void Terminal::invalidateFullWidthRowRange(PageList::Node *first, PageList::Node *last) {
+    PageList::Node *node = first;
+    for (;;) {
+        /* Full-width line movement remaps cached row coordinates in this page. */
+        screens.active->pages.invalidateNodeLayout(node);
+        if (node == last) break;
+        node = node->next;
+    }
+}
+
+/* TODO(qwerasd): `insertLines` and `deleteLines` are 99% identical,
+ * the majority of their logic can (and should) be abstracted in to
+ * a single shared helper function, probably on `Screen` not here.
+ * I'm just too lazy to do that rn :p */
+
+/* Insert amount lines at the current cursor row. The contents of the line
+ * at the current cursor row and below (to the bottom-most line in the
+ * scrolling region) are shifted down by amount lines. The contents of the
+ * amount bottom-most lines in the scroll region are lost.
+ *
+ * This unsets the pending wrap state without wrapping. If the current cursor
+ * position is outside of the current scroll region it does nothing.
+ *
+ * If amount is greater than the remaining number of lines in the scrolling
+ * region it is adjusted down (still allowing for scrolling out every remaining
+ * line in the scrolling region)
+ *
+ * In left and right margin mode the margins are respected; lines are only
+ * scrolled in the scroll region.
+ *
+ * All cleared space is colored according to the current SGR state.
+ *
+ * Moves the cursor to the left margin. */
+inline void Terminal::insertLines(size_t count) {
+    /* Rare, but happens */
+    if (count == 0) return;
+
+    /* If the cursor is outside the scroll region we do nothing. */
+    if (screens.active->cursor.y < scrolling_region.top || screens.active->cursor.y > scrolling_region.bottom ||
+        screens.active->cursor.x < scrolling_region.left || screens.active->cursor.x > scrolling_region.right)
+        return;
+
+    /* At the end we need to return the cursor to the row it started on. */
+    struct Restore {
+        Terminal *t;
+        size::CellCountInt start_y;
+        ~Restore() {
+            t->screens.active->cursorAbsolute(t->scrolling_region.left, start_y);
+
+            /* Always unset pending wrap */
+            t->screens.active->cursor.pending_wrap = false;
+        }
+    } restore = {this, screens.active->cursor.y};
+    (void)restore;
+
+    /* We have a slower path if we have left or right scroll margins. */
+    const bool left_right = scrolling_region.left > 0 || scrolling_region.right < cols - 1;
+
+    /* Remaining rows from our cursor to the bottom of the scroll region. */
+    const size_t rem = (size_t)(scrolling_region.bottom - screens.active->cursor.y + 1);
+
+    /* We can only insert lines up to our remaining lines in the scroll
+     * region. So we take whichever is smaller. */
+    const size_t adjusted_count = count < rem ? count : rem;
+
+    /* Create a new tracked pin which we'll use to navigate the page list
+     * so that if we need to adjust capacity it will be properly tracked. */
+    Pin *cur_p = screens.active->pages.trackPin(
+        screens.active->cursor.page_pin->down((size::CellCountInt)(rem - 1)).value);
+    if (!cur_p) {
+        /* This error scenario means that our GPA is OOM. This is not a
+         * situation we can gracefully handle. We can't just ignore insertLines
+         * because it'll result in a corrupted screen. Ideally in the future
+         * we flag the state as broken and show an error message to the user.
+         * For now, we panic.
+         * log.err("insertLines trackPin error err={}") */
+        abort();
+    }
+    struct Untrack {
+        PageList *pl;
+        Pin *p;
+        ~Untrack() { pl->untrackPin(p); }
+    } untrack = {&screens.active->pages, cur_p};
+    (void)untrack;
+
+    /* Partial-width margins edit cells in stable rows; full-width moves rows. */
+    if (!left_right) invalidateFullWidthRowRange(screens.active->cursor.page_pin->node, cur_p->node);
+
+    /* Our current y position relative to the cursor */
+    size_t y = rem;
+
+    /* Traverse from the bottom up */
+    while (y > 0) {
+        const Page::RowAndCell cur_rac = cur_p->rowAndCell();
+        Row *cur_row = cur_rac.row;
+
+        /* If this is one of the lines we need to shift, do so */
+        if (y > adjusted_count) {
+            const Pin off_p = cur_p->up((size::CellCountInt)adjusted_count).value;
+            const Page::RowAndCell off_rac = off_p.rowAndCell();
+            Row *off_row = off_rac.row;
+
+            rowWillBeShifted(cur_p->node->page(), cur_row);
+            rowWillBeShifted(off_p.node->page(), off_row);
+
+            /* If our scrolling region is full width, then we unset wrap. */
+            if (!left_right) {
+                off_row->setWrap(false);
+                cur_row->setWrap(false);
+                off_row->setWrapContinuation(false);
+                cur_row->setWrapContinuation(false);
+            }
+
+            const Pin src_p = off_p;
+            Row *src_row = off_row;
+            const Pin dst_p = *cur_p;
+            Row *dst_row = cur_row;
+
+            /* If our page doesn't match, then we need to do a copy from
+             * one page to another. This is the slow path. */
+            if (src_p.node != dst_p.node) {
+                /* The copy may replace the destination node in order
+                 * to increase its capacity. Our pins are tracked so
+                 * they update automatically; we can discard the
+                 * replacement because the remainder of this iteration
+                 * only accesses rows through the pins. */
+                (void)screens.active->clonePartialRowGrowCapacity(dst_p.node, dst_p.y, src_p.node->page(), src_row,
+                                                                  scrolling_region.left,
+                                                                  (size_t)(scrolling_region.right + 1));
+            } else {
+                if (!left_right) {
+                    /* Swap the src/dst cells. This ensures that our dst gets the
+                     * proper shifted rows and src gets non-garbage cell data that
+                     * we can clear. */
+                    const Row dst = *dst_row;
+                    *dst_row = *src_row;
+                    *src_row = dst;
+
+                    /* Ensure what we did didn't corrupt the page */
+                    cur_p->node->page()->assertIntegrity();
+                } else {
+                    /* Left/right scroll margins we have to
+                     * copy cells, which is much slower... */
+                    Page *page = cur_p->node->page();
+                    page->moveCells(src_row, scrolling_region.left, dst_row, scrolling_region.left,
+                                    (size_t)((scrolling_region.right - scrolling_region.left) + 1));
+                }
+            }
+        } else {
+            /* Clear the cells for this row, it has been shifted. */
+            rowWillBeShifted(cur_p->node->page(), cur_row);
+            Page *page = cur_p->node->page();
+            Cell *cells = page->getCells(cur_row);
+            screens.active->clearCells(page, cur_row, cells + scrolling_region.left,
+                                       (size_t)(scrolling_region.right + 1 - scrolling_region.left));
+
+            /* With a full-width scroll region the entire row is a
+             * fresh blank row: reset the metadata so nothing (wrap
+             * state, semantic prompt) is retained from the row whose
+             * storage it recycles. With left/right margins the row
+             * keeps content outside the margins so the metadata is
+             * preserved, matching the shift case above. */
+            if (!left_right) cur_row->reset();
+        }
+
+        /* Mark the row as dirty */
+        cur_p->markDirty();
+
+        /* We have successfully processed a line. */
+        y -= 1;
+        /* Move our pin up to the next row. */
+        const Maybe<Pin> p = cur_p->up(1);
+        if (p.has) *cur_p = p.value;
+    }
+}
+
+/* Removes amount lines from the current cursor row down. The remaining lines
+ * to the bottom margin are shifted up and space from the bottom margin up is
+ * filled with empty lines.
+ *
+ * If the current cursor position is outside of the current scroll region it
+ * does nothing. If amount is greater than the remaining number of lines in the
+ * scrolling region it is adjusted down.
+ *
+ * In left and right margin mode the margins are respected; lines are only
+ * scrolled in the scroll region.
+ *
+ * If the cell movement splits a multi cell character that character cleared,
+ * by replacing it by spaces, keeping its current attributes. All other
+ * cleared space is colored according to the current SGR state.
+ *
+ * Moves the cursor to the left margin. */
+inline void Terminal::deleteLines(size_t count) {
+    /* Rare, but happens */
+    if (count == 0) return;
+
+    /* If the cursor is outside the scroll region we do nothing. */
+    if (screens.active->cursor.y < scrolling_region.top || screens.active->cursor.y > scrolling_region.bottom ||
+        screens.active->cursor.x < scrolling_region.left || screens.active->cursor.x > scrolling_region.right)
+        return;
+
+    /* At the end we need to return the cursor to the row it started on. */
+    struct Restore {
+        Terminal *t;
+        size::CellCountInt start_y;
+        ~Restore() {
+            t->screens.active->cursorAbsolute(t->scrolling_region.left, start_y);
+            /* Always unset pending wrap */
+            t->screens.active->cursor.pending_wrap = false;
+        }
+    } restore = {this, screens.active->cursor.y};
+    (void)restore;
+
+    /* We have a slower path if we have left or right scroll margins. */
+    const bool left_right = scrolling_region.left > 0 || scrolling_region.right < cols - 1;
+
+    /* Remaining rows from our cursor to the bottom of the scroll region. */
+    const size_t rem = (size_t)(scrolling_region.bottom - screens.active->cursor.y + 1);
+
+    /* We can only insert lines up to our remaining lines in the scroll
+     * region. So we take whichever is smaller. */
+    const size_t adjusted_count = count < rem ? count : rem;
+
+    /* Create a new tracked pin which we'll use to navigate the page list
+     * so that if we need to adjust capacity it will be properly tracked. */
+    Pin *cur_p = screens.active->pages.trackPin(*screens.active->cursor.page_pin);
+    if (!cur_p) {
+        /* See insertLines
+         * log.err("deleteLines trackPin error err={}") */
+        abort();
+    }
+    struct Untrack {
+        PageList *pl;
+        Pin *p;
+        ~Untrack() { pl->untrackPin(p); }
+    } untrack = {&screens.active->pages, cur_p};
+    (void)untrack;
+
+    /* Partial-width margins edit cells in stable rows; full-width moves rows. */
+    if (!left_right)
+        invalidateFullWidthRowRange(cur_p->node, cur_p->down((size::CellCountInt)(rem - 1)).value.node);
+
+    /* Our current y position relative to the cursor */
+    size_t y = 0;
+
+    /* Traverse from the top down */
+    while (y < rem) {
+        const Page::RowAndCell cur_rac = cur_p->rowAndCell();
+        Row *cur_row = cur_rac.row;
+
+        /* If this is one of the lines we need to shift, do so */
+        if (y < rem - adjusted_count) {
+            const Pin off_p = cur_p->down((size::CellCountInt)adjusted_count).value;
+            const Page::RowAndCell off_rac = off_p.rowAndCell();
+            Row *off_row = off_rac.row;
+
+            rowWillBeShifted(cur_p->node->page(), cur_row);
+            rowWillBeShifted(off_p.node->page(), off_row);
+
+            /* If our scrolling region is full width, then we unset wrap. */
+            if (!left_right) {
+                off_row->setWrap(false);
+                cur_row->setWrap(false);
+                off_row->setWrapContinuation(false);
+                cur_row->setWrapContinuation(false);
+            }
+
+            const Pin src_p = off_p;
+            Row *src_row = off_row;
+            const Pin dst_p = *cur_p;
+            Row *dst_row = cur_row;
+
+            /* If our page doesn't match, then we need to do a copy from
+             * one page to another. This is the slow path. */
+            if (src_p.node != dst_p.node) {
+                /* The copy may replace the destination node in order
+                 * to increase its capacity. Our pins are tracked so
+                 * they update automatically; we can discard the
+                 * replacement because the remainder of this iteration
+                 * only accesses rows through the pins. */
+                (void)screens.active->clonePartialRowGrowCapacity(dst_p.node, dst_p.y, src_p.node->page(), src_row,
+                                                                  scrolling_region.left,
+                                                                  (size_t)(scrolling_region.right + 1));
+            } else {
+                if (!left_right) {
+                    /* Swap the src/dst cells. This ensures that our dst gets the
+                     * proper shifted rows and src gets non-garbage cell data that
+                     * we can clear. */
+                    const Row dst = *dst_row;
+                    *dst_row = *src_row;
+                    *src_row = dst;
+
+                    /* Ensure what we did didn't corrupt the page */
+                    cur_p->node->page()->assertIntegrity();
+                } else {
+                    /* Left/right scroll margins we have to
+                     * copy cells, which is much slower... */
+                    Page *page = cur_p->node->page();
+                    page->moveCells(src_row, scrolling_region.left, dst_row, scrolling_region.left,
+                                    (size_t)((scrolling_region.right - scrolling_region.left) + 1));
+                }
+            }
+        } else {
+            /* Clear the cells for this row, it's from out of bounds. */
+            rowWillBeShifted(cur_p->node->page(), cur_row);
+            Page *page = cur_p->node->page();
+            Cell *cells = page->getCells(cur_row);
+            screens.active->clearCells(page, cur_row, cells + scrolling_region.left,
+                                       (size_t)(scrolling_region.right + 1 - scrolling_region.left));
+
+            /* With a full-width scroll region the entire row is a
+             * fresh blank row: reset the metadata so nothing (wrap
+             * state, semantic prompt) is retained from the row whose
+             * storage it recycles. With left/right margins the row
+             * keeps content outside the margins so the metadata is
+             * preserved, matching the shift case above. */
+            if (!left_right) cur_row->reset();
+        }
+
+        /* Mark the row as dirty */
+        cur_p->markDirty();
+
+        /* We have successfully processed a line. */
+        y += 1;
+        /* Move our pin down to the next row. */
+        const Maybe<Pin> p = cur_p->down(1);
+        if (p.has) *cur_p = p.value;
+    }
+}
+
 } /* namespace vt */
 } /* namespace wisp */
 

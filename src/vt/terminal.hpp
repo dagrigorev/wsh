@@ -497,6 +497,63 @@ struct Terminal {
     /* Insert amount spaces at the current cursor position. */
     void insertBlanks(size_t count);
 
+    void setCursorPos(size_t row_req, size_t col_req);
+    void setTopAndBottomMargin(size_t top_req, size_t bottom_req);
+    void setLeftAndRightMargin(size_t left_req, size_t right_req);
+
+    /* Options for scrolling the viewport of the terminal grid. */
+    struct ScrollViewport {
+        enum class Tag : uint8_t {
+            /* Scroll to the top of the scrollback */
+            top,
+            /* Scroll to the bottom, i.e. the top of the active area */
+            bottom,
+            /* Scroll by some delta amount, up is negative. */
+            delta,
+            /* Scroll to the given absolute row offset from the top of the
+             * scrollable area. A value of zero is the top row. The requested
+             * row becomes the first visible row of the viewport, clamped so
+             * the viewport never scrolls beyond the top of the active area.
+             * This is the same row space as PageList.Scrollbar offset. */
+            row,
+        } tag;
+        ptrdiff_t delta;
+        size_t row;
+
+        static ScrollViewport makeTop() { ScrollViewport v; v.tag = Tag::top; v.delta = 0; v.row = 0; return v; }
+        static ScrollViewport makeBottom() { ScrollViewport v; v.tag = Tag::bottom; v.delta = 0; v.row = 0; return v; }
+        static ScrollViewport makeDelta(ptrdiff_t d) { ScrollViewport v; v.tag = Tag::delta; v.delta = d; v.row = 0; return v; }
+        static ScrollViewport makeRow(size_t r) { ScrollViewport v; v.tag = Tag::row; v.delta = 0; v.row = r; return v; }
+    };
+
+    /* Scroll the viewport of the terminal grid. */
+    void scrollViewport(const ScrollViewport &behavior);
+
+    /* Return the current compression activity value. */
+    uint64_t compressionActivity() const;
+
+    /* The amount of compression work performed by `compress` before returning. */
+    enum class CompressionMode : uint8_t { incremental, full };
+
+    /* The scheduling result of a `compress` call. */
+    enum class CompressionResult : uint8_t { unsupported, pending, complete };
+
+    /* Compress cold memory to save resident memory space. */
+    CompressionResult compress(CompressionMode mode);
+
+    /* To be called before shifting a row (as in insertLines and deleteLines) */
+    void rowWillBeShifted(Page *page, Row *row);
+
+    /* Renew every live page generation in an inclusive range before a full-width
+     * line operation moves logical rows between their coordinates. */
+    void invalidateFullWidthRowRange(PageList::Node *first, PageList::Node *last);
+
+    /* Insert amount lines at the current cursor row. */
+    void insertLines(size_t count);
+
+    /* Removes amount lines from the current cursor row down. */
+    void deleteLines(size_t count);
+
     /* Perform a semantic prompt command. Wisp: false is OutOfMemory. */
     bool semanticPrompt(const terminal::osc::semantic_prompt::Command &cmd);
     bool semanticPromptFreshLine();
