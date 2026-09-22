@@ -5332,6 +5332,396 @@ TEST(page_list, PageList_resize_no_reflow_more_cols_forces_smaller_cap) {
     }
 }
 
+/* Wisp: `s.pin(.{ .active = .{ .y = y } }).?` row and cells. */
+static page::Row *activeRow(PageList &s, uint32_t y) { return s.pin(Point::active(0, y)).value.rowAndCell().row; }
+static page::Cell *activeCells(PageList &s, uint32_t y) {
+    size_t len;
+    return s.pin(Point::active(0, y)).value.cells(Pin::CellSubset::all, &len);
+}
+
+/* Wisp: rows alternate wrap / wrap_continuation, every cell 'A'. */
+static void wrapPairsA(PageList &s, Page *page) {
+    for (size_t y = 0; y < s.rows; y++) {
+        const Page::RowAndCell rac = page->getRowAndCell(0, y);
+        if (y % 2 == 0) {
+            rac.row->setWrap(true);
+        } else {
+            rac.row->setWrapContinuation(true);
+        }
+        for (size_t x = 0; x < s.cols; x++) *page->getRowAndCell(x, y).cell = page::Cell::init('A');
+    }
+}
+
+/* Wisp: set row y wrap/continuation flag and cells to their x index. */
+static void rowX(PageList &s, Page *page, size_t y, bool wrap, bool cont) {
+    const Page::RowAndCell rac = page->getRowAndCell(0, y);
+    if (wrap) rac.row->setWrap(true);
+    if (cont) rac.row->setWrapContinuation(true);
+    for (size_t x = 0; x < s.cols; x++) *page->getRowAndCell(x, y).cell = page::Cell::init((uint32_t)x);
+}
+
+/* Wisp: "Grow to the capacity of the first page" then growRows(n). */
+static bool growFirstPageThen(PageList &s, size_t n) {
+    Page *page = s.pages.first->page();
+    page->pauseIntegrityChecks(true);
+    for (size_t i = page->size.rows; i < page->capacity.rows; i++) (void)growNode(&s);
+    page->pauseIntegrityChecks(false);
+    if (1 != s.totalPages()) return false;
+    if (!s.growRows(n)) return false;
+    return 2 == s.totalPages();
+}
+
+TEST(page_list, PageList_resize_no_reflow_more_rows_adds_blank_rows_if_cursor_at_bottom) {
+    ListHolder s(opts(5, 3));
+
+    /* Grow to 5 total rows, simulating 3 active + 2 scrollback */
+    ASSERT_TRUE(s->growRows(2));
+    ASSERT_TRUE(s->pages.first == s->pages.last);
+    Page *page = s->pages.first->page();
+    for (size_t y = 0; y < s->totalRows(); y++) *page->getRowAndCell(0, y).cell = page::Cell::init((uint32_t)y);
+
+    /* Active should be on row 3 */
+    ASSERT_TRUE(activeScreenIs(*s, 2));
+
+    /* Put a tracked pin in the history */
+    Pin *p = s->trackPin(s->pin(Point::active(0, (uint32_t)(s->rows - 2))).value);
+    const Point original_cursor = s->pointFromPin(point::Tag::active, *p).value;
+    ASSERT_TRUE(3 == s->getCell(Point::active(original_cursor.c.x, original_cursor.c.y)).value.cell->contentCodepoint());
+
+    /* Resize */
+    ASSERT_TRUE(s->resizeWithoutReflow(rzc(-1, 10, false, 0, (size::CellCountInt)(s->rows - 2))));
+    ASSERT_TRUE(5 == s->cols);
+    ASSERT_TRUE(10 == s->rows);
+
+    /* Our cursor should not change */
+    ASSERT_TRUE(original_cursor.eql(s->pointFromPin(point::Tag::active, *p).value));
+
+    /* 12 because we have our 10 rows in the active + 2 in the scrollback
+     * because we're preserving the cursor. */
+    ASSERT_TRUE(12 == s->totalRows());
+
+    /* Active should be at the same place it was. */
+    ASSERT_TRUE(activeScreenIs(*s, 2));
+
+    /* Go through our active, we should get only 3,4,5 */
+    for (uint32_t y = 0; y < 3; y++) {
+        ASSERT_TRUE(y + 2 == s->getCell(Point::active(0, y)).value.cell->contentCodepoint());
+    }
+    s->untrackPin(p);
+}
+
+TEST(page_list, PageList_resize_reflow_more_cols_no_wrapped_rows) {
+    ListHolder s(opts(5, 3, (size_t)0));
+    ASSERT_TRUE(s->pages.first == s->pages.last);
+    Page *page = s->pages.first->page();
+    for (size_t y = 0; y < s->rows; y++) {
+        for (size_t x = 0; x < s->cols; x++) *page->getRowAndCell(x, y).cell = page::Cell::init('A');
+    }
+
+    /* Resize */
+    ASSERT_TRUE(s->resize(rz(10, -1, true)));
+    ASSERT_TRUE(10 == s->cols);
+    ASSERT_TRUE(3 == s->totalRows());
+
+    PageList::RowIterator it = s->rowIterator(Dir::right_down, Point::screen());
+    Pin offset;
+    while (it.next(&offset)) {
+        const Page::RowAndCell rac = offset.rowAndCell();
+        const page::Cell *cells = offset.node->page()->getCells(rac.row);
+        ASSERT_TRUE(10 == offset.node->page()->size.cols);
+        ASSERT_TRUE('A' == cells[0].contentCodepoint());
+    }
+}
+
+TEST(page_list, PageList_resize_reflow_more_cols_wrapped_rows) {
+    ListHolder s(opts(2, 4, (size_t)0));
+    ASSERT_TRUE(s->pages.first == s->pages.last);
+    wrapPairsA(*s, s->pages.first->page());
+
+    /* Resize */
+    ASSERT_TRUE(s->resize(rz(4, -1, true)));
+    ASSERT_TRUE(4 == s->cols);
+    ASSERT_TRUE(4 == s->totalRows());
+
+    /* Active should still be on top */
+    ASSERT_TRUE(activeScreenIs(*s, 0));
+
+    PageList::RowIterator it = s->rowIterator(Dir::right_down, Point::screen());
+    {
+        /* First row should be unwrapped */
+        Pin offset;
+        ASSERT_TRUE(it.next(&offset));
+        const Page::RowAndCell rac = offset.rowAndCell();
+        const page::Cell *cells = offset.node->page()->getCells(rac.row);
+        ASSERT_FALSE(rac.row->wrap());
+        ASSERT_TRUE(4 == offset.node->page()->size.cols);
+        ASSERT_TRUE('A' == cells[0].contentCodepoint());
+        ASSERT_TRUE('A' == cells[2].contentCodepoint());
+    }
+}
+
+TEST(page_list, PageList_resize_reflow_invalidates_viewport_offset_cache) {
+    ListHolder s(opts(2, 4));
+    ASSERT_TRUE(s->growRows(20));
+
+    wrapPairsA(*s, s->pages.last->page());
+
+    /* Scroll to a pinned viewport in history */
+    const size_t pin_y = 10;
+    s->scroll(Scroll::pinAt(s->pin(Point::screen(0, (uint32_t)pin_y)).value));
+    ASSERT_TRUE(s->viewport == Viewport::pin);
+    ASSERT_TRUE(sbEq(s->scrollbar(), s->total_rows, pin_y, s->rows));
+
+    /* Resize with reflow - unwrapping rows changes total_rows */
+    ASSERT_TRUE(s->resize(rz(4, -1, true)));
+    ASSERT_TRUE(4 == s->cols);
+
+    /* Verify scrollbar cache was invalidated during reflow */
+    ASSERT_TRUE(sbEq(s->scrollbar(), s->total_rows, 5, s->rows));
+}
+
+TEST(page_list, PageList_resize_reflow_more_cols_creates_multiple_pages) {
+    /* We want a wide viewport so our row limit is rather small. This will
+     * force the reflow below to create multiple pages, which we assert. */
+    Capacity cap;
+    for (size::CellCountInt current = 100;; current += 100) {
+        cap = stdAdjust(current);
+        if (cap.rows < 100) break;
+    }
+
+    ListHolder s(opts(cap.cols, cap.rows));
+
+    /* Wrap every other row so every line is wrapped for reflow */
+    {
+        ASSERT_TRUE(s->pages.first == s->pages.last);
+        Page *page = s->pages.first->page();
+        for (size_t y = 0; y < s->rows; y++) {
+            const Page::RowAndCell rac = page->getRowAndCell(0, y);
+            if (y % 2 == 0) {
+                rac.row->setWrap(true);
+            } else {
+                rac.row->setWrapContinuation(true);
+            }
+            *rac.cell = page::Cell::init('A');
+        }
+    }
+
+    /* Resize */
+    Capacity newcap;
+    ASSERT_TRUE(cap.adjust(Capacity::Adjustment::withCols((size::CellCountInt)(cap.cols + 100)), &newcap));
+    ASSERT_TRUE(newcap.rows < cap.rows);
+    ASSERT_TRUE(s->resize(rz(newcap.cols, -1, true)));
+    ASSERT_TRUE(newcap.cols == s->cols);
+    ASSERT_TRUE(cap.rows == s->totalRows());
+
+    {
+        size_t count = 0;
+        for (Node *page = s->pages.first; page; page = page->next) {
+            count += 1;
+
+            /* All pages should have the new capacity */
+            ASSERT_TRUE(newcap.cols == page->capacity().cols);
+            ASSERT_TRUE(newcap.rows == page->capacity().rows);
+        }
+
+        /* We should have more than one page, meaning we created at least
+         * one page. This is the critical aspect of this test so if this
+         * ever goes false we need to adjust this test. */
+        ASSERT_TRUE(count > 1);
+    }
+}
+
+TEST(page_list, PageList_resize_reflow_more_cols_wrap_across_page_boundary) {
+    ListHolder s(opts(2, 10, (size_t)0));
+    ASSERT_TRUE(1 == s->totalPages());
+
+    /* Grow to the capacity of the first page. */
+    ASSERT_TRUE(growFirstPageThen(*s, 1));
+
+    /* At this point, we have some rows on the first page, and some on the second.
+     * We can now wrap across the boundary condition. */
+    {
+        Page *page = s->pages.first->page();
+        rowX(*s, page, page->size.rows - 1, true, false);
+    }
+    rowX(*s, s->pages.last->page(), 0, false, true);
+
+    /* We expect one fewer rows since we unwrapped a row. */
+    const size_t end_rows = s->totalRows() - 1;
+
+    /* Resize */
+    ASSERT_TRUE(s->resize(rz(4, -1, true)));
+    ASSERT_TRUE(4 == s->cols);
+    ASSERT_TRUE(end_rows == s->totalRows());
+
+    {
+        /* PAGE 1 ROW 6280, ACTIVE 8 */
+        const page::Row *row = activeRow(*s, 8);
+        ASSERT_FALSE(row->wrap());
+        ASSERT_FALSE(row->wrap_continuation());
+
+        const page::Cell *cells = activeCells(*s, 8);
+        for (int i = 0; i < 4; i++) ASSERT_FALSE(cells[i].hasText());
+    }
+    {
+        /* PAGE 1 ROW 6281, ACTIVE 9 */
+        const page::Row *row = activeRow(*s, 9);
+        ASSERT_FALSE(row->wrap());
+        ASSERT_FALSE(row->wrap_continuation());
+
+        const page::Cell *cells = activeCells(*s, 9);
+        ASSERT_TRUE(0 == cells[0].contentCodepoint());
+        ASSERT_TRUE(1 == cells[1].contentCodepoint());
+        ASSERT_TRUE(0 == cells[2].contentCodepoint());
+        ASSERT_TRUE(1 == cells[3].contentCodepoint());
+    }
+}
+
+TEST(page_list, PageList_resize_reflow_more_cols_wrap_across_page_boundary_cursor_in_second_page) {
+    ListHolder s(opts(2, 10, (size_t)0));
+    ASSERT_TRUE(1 == s->totalPages());
+
+    /* Grow to the capacity of the first page. */
+    ASSERT_TRUE(growFirstPageThen(*s, 1));
+
+    /* At this point, we have some rows on the first page, and some on the second.
+     * We can now wrap across the boundary condition. */
+    {
+        Page *page = s->pages.first->page();
+        rowX(*s, page, page->size.rows - 1, true, false);
+    }
+    rowX(*s, s->pages.last->page(), 0, false, true);
+
+    /* Put a tracked pin in wrapped row on the last page */
+    Pin *p = s->trackPin(s->pin(Point::active(1, 9)).value);
+    ASSERT_TRUE(p->node == s->pages.last);
+
+    /* We expect one fewer rows since we unwrapped a row. */
+    const size_t end_rows = s->totalRows() - 1;
+
+    /* Resize */
+    ASSERT_TRUE(s->resize(rz(4, -1, true)));
+    ASSERT_TRUE(4 == s->cols);
+    ASSERT_TRUE(end_rows == s->totalRows());
+
+    /* Our cursor should move to the first row */
+    ASSERT_TRUE(activeAt(*s, p, 3, 9));
+
+    {
+        const page::Row *row = activeRow(*s, 9);
+        ASSERT_FALSE(row->wrap());
+
+        const page::Cell *cells = activeCells(*s, 9);
+        ASSERT_TRUE(0 == cells[0].contentCodepoint());
+        ASSERT_TRUE(1 == cells[1].contentCodepoint());
+        ASSERT_TRUE(0 == cells[2].contentCodepoint());
+        ASSERT_TRUE(1 == cells[3].contentCodepoint());
+    }
+    s->untrackPin(p);
+}
+
+TEST(page_list, PageList_resize_reflow_less_cols_wrap_across_page_boundary_cursor_in_second_page) {
+    ListHolder s(opts(5, 10));
+    ASSERT_TRUE(1 == s->totalPages());
+
+    /* Grow to the capacity of the first page. */
+    ASSERT_TRUE(growFirstPageThen(*s, 5));
+
+    /* At this point, we have some rows on the first page, and some on the second.
+     * We can now wrap across the boundary condition. */
+    {
+        Page *page = s->pages.first->page();
+        rowX(*s, page, page->size.rows - 1, true, false);
+    }
+    rowX(*s, s->pages.last->page(), 0, false, true);
+
+    /* Put a tracked pin in wrapped row on the last page */
+    Pin *p = s->trackPin(s->pin(Point::active(2, 5)).value);
+    ASSERT_TRUE(p->node == s->pages.last);
+    ASSERT_TRUE(p->y == 0);
+
+    /* Resize */
+    ASSERT_TRUE(s->resize(rzc(4, -1, true, 2, 5)));
+    ASSERT_TRUE(4 == s->cols);
+
+    /* Our cursor should remain on the same cell */
+    ASSERT_TRUE(activeAt(*s, p, 3, 5));
+
+    {
+        /* PAGE 0 ROW 7895, ACTIVE 3 */
+        const page::Row *row = activeRow(*s, 3);
+        ASSERT_FALSE(row->wrap());
+        ASSERT_FALSE(row->wrap_continuation());
+
+        const page::Cell *cells = activeCells(*s, 3);
+        for (int i = 0; i < 4; i++) ASSERT_FALSE(cells[i].hasText());
+    }
+    {
+        /* PAGE 0 ROW 7896, ACTIVE 4 */
+        const page::Row *row = activeRow(*s, 4);
+        ASSERT_TRUE(row->wrap());
+        ASSERT_FALSE(row->wrap_continuation());
+
+        const page::Cell *cells = activeCells(*s, 4);
+        ASSERT_TRUE(0 == cells[0].contentCodepoint());
+        ASSERT_TRUE(1 == cells[1].contentCodepoint());
+        ASSERT_TRUE(2 == cells[2].contentCodepoint());
+        ASSERT_TRUE(3 == cells[3].contentCodepoint());
+    }
+    {
+        /* PAGE 0 ROW 7897, ACTIVE 5 */
+        const page::Row *row = activeRow(*s, 5);
+        ASSERT_TRUE(row->wrap());
+        ASSERT_TRUE(row->wrap_continuation());
+
+        const page::Cell *cells = activeCells(*s, 5);
+        ASSERT_TRUE(4 == cells[0].contentCodepoint());
+        ASSERT_TRUE(0 == cells[1].contentCodepoint());
+        ASSERT_TRUE(1 == cells[2].contentCodepoint());
+        ASSERT_TRUE(2 == cells[3].contentCodepoint());
+    }
+    {
+        /* PAGE 0 ROW 7898, ACTIVE 6 */
+        const page::Row *row = activeRow(*s, 6);
+        ASSERT_FALSE(row->wrap());
+        ASSERT_TRUE(row->wrap_continuation());
+
+        const page::Cell *cells = activeCells(*s, 6);
+        ASSERT_TRUE(3 == cells[0].contentCodepoint());
+        ASSERT_TRUE(4 == cells[1].contentCodepoint());
+    }
+    {
+        /* PAGE 0 ROW 7899, ACTIVE 7 */
+        const page::Row *row = activeRow(*s, 7);
+        ASSERT_FALSE(row->wrap());
+        ASSERT_FALSE(row->wrap_continuation());
+
+        const page::Cell *cells = activeCells(*s, 7);
+        for (int i = 0; i < 4; i++) ASSERT_FALSE(cells[i].hasText());
+    }
+    s->untrackPin(p);
+}
+
+TEST(page_list, PageList_resize_reflow_more_cols_cursor_in_wrapped_row) {
+    ListHolder s(opts(2, 4, (size_t)0));
+    ASSERT_TRUE(s->pages.first == s->pages.last);
+    Page *page = s->pages.first->page();
+    rowX(*s, page, 0, true, false);
+    rowX(*s, page, 1, false, true);
+
+    /* Put a tracked pin in the history */
+    Pin *p = s->trackPin(s->pin(Point::active(1, 1)).value);
+
+    /* Resize */
+    ASSERT_TRUE(s->resize(rz(4, -1, true)));
+    ASSERT_TRUE(4 == s->cols);
+    ASSERT_TRUE(4 == s->totalRows());
+
+    /* Our cursor should move to the first row */
+    ASSERT_TRUE(activeAt(*s, p, 3, 0));
+    s->untrackPin(p);
+}
+
 /* @@TESTS@@ */
 
 /* Wisp: std.testing.allocator's leak check. Runs last (registration order). */
