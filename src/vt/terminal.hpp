@@ -448,9 +448,59 @@ struct Terminal {
         Screen *primary = screens.get(ScreenSet::Key::primary);
         primary->pages.setMaxLines(max);
     }
+
+    /* ------------------------------------------------------------------ */
+    /* Wisp: defined in terminal_impl.hpp. */
+
+    /* Set the charset into the given slot. */
+    void configureCharset(terminal::charsets::Slots slot, terminal::charsets::Charset set);
+
+    /* Invoke the charset in slot into the active slot. If single is true,
+     * then this will only be invoked for a single character. */
+    void invokeCharset(terminal::charsets::ActiveSlot active, terminal::charsets::Slots slot, bool single);
+
+    /* Carriage return moves the cursor to the first column. */
+    void carriageReturn();
+
+    /* Linefeed moves the cursor to the next line. Wisp: false is OutOfMemory. */
+    bool linefeed();
+
+    /* Backspace moves the cursor back a column (but not less than 0). */
+    void backspace();
+
+    void cursorUp(size_t count_req);
+    void cursorDown(size_t count_req);
+    void cursorRight(size_t count_req);
+    void cursorLeft(size_t count_req);
+
+    /* Save cursor position and further state. */
+    void saveCursor();
+
+    /* Restore cursor position and other state. */
+    void restoreCursor();
+
+    /* Set the character protection mode for the terminal. */
+    void setProtectedMode(terminal::ansi::ProtectedMode mode);
+
+    /* Print UTF-8 encoded string to the terminal. */
+    bool printString(const char *str, size_t len);
+    bool printString(const char *str) { return printString(str, strlen(str)); }
+
+    bool print(uint32_t c);
+    void printCell(uint32_t unmapped_c, Cell::Wide wide);
+    bool printWrap();
+
+    /* Move the cursor to the next line in the scrolling region, scrolling if
+     * necessary. */
+    bool index();
+
+    /* Insert amount spaces at the current cursor position. */
+    void insertBlanks(size_t count);
 };
 
 } /* namespace vt */
 } /* namespace wisp */
+
+#include "terminal_impl.hpp"
 
 #endif /* WISP_VT_TERMINAL_HPP */
