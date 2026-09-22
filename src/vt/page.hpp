@@ -41,6 +41,7 @@
 extern "C" __declspec(dllimport) void *__stdcall VirtualAlloc(void *, size_t, unsigned long, unsigned long);
 extern "C" __declspec(dllimport) int __stdcall VirtualFree(void *, size_t, unsigned long);
 
+#include "../zigstd/allocator.hpp"
 #include "bitmap_allocator.hpp"
 #include "fastmem.hpp"
 #include "hash_map.hpp"
@@ -622,7 +623,7 @@ typedef hash_map::AutoOffsetHashMap<size::Offset<page::Cell>, Id, 80>::Type Map;
  * on the context so users should check with the source of the
  * hyperlink.
  *
- * Wisp: slices are pointer plus length; deinit/dupe take malloc'd copies. */
+ * Wisp: slices are pointer plus length. */
 struct Hyperlink {
     /* See PageEntry.Id */
     struct Id {
@@ -660,28 +661,33 @@ struct Hyperlink {
      * WARNING: This should only be called if the hyperlink was
      * heap-allocated. This DOES NOT need to be unconditionally
      * called. */
-    void deinit() const {
-        free((void *)uri);
-        if (id.tag == Id::Tag::explicit_) free((void *)id.explicit_ptr);
+    void deinit(zigstd::Allocator alloc) const {
+        alloc.free((uint8_t *)uri, uri_len);
+        switch (id.tag) {
+        case Id::Tag::implicit: break;
+        case Id::Tag::explicit_: alloc.free((uint8_t *)id.explicit_ptr, id.explicit_len); break;
+        }
     }
 
     /* Duplicate a hyperlink by allocating all values with the
      * given allocator. The returned hyperlink should have deinit
      * called. Wisp: false is OutOfMemory. */
-    bool dupe(Hyperlink *out) const {
-        uint8_t *u = (uint8_t *)malloc(uri_len ? uri_len : 1);
+    bool dupe(zigstd::Allocator alloc, Hyperlink *out) const {
+        uint8_t *u = alloc.dupe(uri, uri_len);
         if (!u) return false;
-        memcpy(u, uri, uri_len);
 
         Id nid = id;
-        if (id.tag == Id::Tag::explicit_) {
-            uint8_t *e = (uint8_t *)malloc(id.explicit_len ? id.explicit_len : 1);
+        switch (id.tag) {
+        case Id::Tag::implicit: break;
+        case Id::Tag::explicit_: {
+            uint8_t *e = alloc.dupe(id.explicit_ptr, id.explicit_len);
             if (!e) {
-                free(u);
+                alloc.free(u, uri_len);
                 return false;
             }
-            memcpy(e, id.explicit_ptr, id.explicit_len);
             nid.explicit_ptr = e;
+            break;
+        }
         }
 
         out->id = nid;

@@ -169,10 +169,10 @@ struct Screen {
               semantic_content(Cell::SemanticContent::output), semantic_content_clear_eol(false),
               page_pin(nullptr), page_row(nullptr), page_cell(nullptr) {}
 
-        void deinit() {
+        void deinit(zigstd::Allocator alloc) {
             if (hyperlink) {
-                hyperlink->deinit();
-                delete hyperlink;
+                hyperlink->deinit(alloc);
+                alloc.destroy(hyperlink);
             }
         }
     };
@@ -354,7 +354,7 @@ struct Screen {
     }
 
     void deinit() {
-        cursor.deinit();
+        cursor.deinit(alloc);
         pages.deinit();
     }
 
@@ -420,7 +420,7 @@ struct Screen {
         assert(cursor_pin->y == 0);
         cursor_pin->garbage = false;
         const Page::RowAndCell cursor_rac = cursor_pin->rowAndCell();
-        cursor.deinit();
+        cursor.deinit(alloc);
         cursor = Cursor();
         cursor.page_pin = cursor_pin;
         cursor.page_row = cursor_rac.row;
@@ -1238,8 +1238,8 @@ struct Screen {
          * will be called. */
         Page *page = cursor.page_pin->node->page();
         page->hyperlink_set.release((const void *)page->memory, cursor.hyperlink_id);
-        cursor.hyperlink->deinit();
-        delete cursor.hyperlink;
+        cursor.hyperlink->deinit(alloc);
+        alloc.destroy(cursor.hyperlink);
         cursor.hyperlink_id = 0;
         cursor.hyperlink = nullptr;
     }

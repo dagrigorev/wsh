@@ -3947,6 +3947,171 @@ TEST(screen, Screen__selectionString_trim_space) {
     }
 }
 
+TEST(screen, Screen__selectionString_trim_empty_line) {
+
+    SCREEN(s, 5, 5, (size_t)0);
+    const char *str = "1AB  \n\n2EFGH\n3IJKL";
+    WRITE(s, str);
+
+    const Selection sel = Selection::init(pinAt(s, Point::screen(0, 0)), pinAt(s, Point::screen(2, 2)), false);
+
+    {
+        EXPECT_STR("1AB\n\n2EF", s.selectionString(Screen::SelectionString(sel, true)));
+    }
+
+    /* No trim */
+    {
+        EXPECT_STR("1AB  \n\n2EF", s.selectionString(Screen::SelectionString(sel, false)));
+    }
+}
+
+TEST(screen, Screen__selectionString_soft_wrap) {
+
+    SCREEN(s, 5, 3, (size_t)0);
+    const char *str = "1ABCD2EFGH3IJKL";
+    WRITE(s, str);
+
+    {
+        const Selection sel = Selection::init(pinAt(s, Point::screen(0, 1)), pinAt(s, Point::screen(2, 2)), false);
+        EXPECT_STR("2EFGH3IJ", s.selectionString(Screen::SelectionString(sel, true)));
+    }
+}
+
+TEST(screen, Screen__selectionString_wide_char) {
+
+    SCREEN(s, 5, 3, (size_t)0);
+    const char *str = "1A\xE2\x9A\xA1";
+    WRITE(s, str);
+
+    {
+        const Selection sel = Selection::init(pinAt(s, Point::screen(0, 0)), pinAt(s, Point::screen(3, 0)), false);
+        EXPECT_STR(str, s.selectionString(Screen::SelectionString(sel, true)));
+    }
+
+    {
+        const Selection sel = Selection::init(pinAt(s, Point::screen(0, 0)), pinAt(s, Point::screen(2, 0)), false);
+        EXPECT_STR(str, s.selectionString(Screen::SelectionString(sel, true)));
+    }
+
+    {
+        const Selection sel = Selection::init(pinAt(s, Point::screen(3, 0)), pinAt(s, Point::screen(3, 0)), false);
+        EXPECT_STR("\xE2\x9A\xA1", s.selectionString(Screen::SelectionString(sel, true)));
+    }
+}
+
+TEST(screen, Screen__selectionString_wide_char_with_header) {
+
+    SCREEN(s, 5, 3, (size_t)0);
+    const char *str = "1ABC\xE2\x9A\xA1";
+    WRITE(s, str);
+
+    {
+        const Selection sel = Selection::init(pinAt(s, Point::screen(0, 0)), pinAt(s, Point::screen(4, 0)), false);
+        EXPECT_STR(str, s.selectionString(Screen::SelectionString(sel, true)));
+    }
+}
+
+/* https://github.com/mitchellh/ghostty/issues/289 */
+TEST(screen, Screen__selectionString_empty_with_soft_wrap) {
+
+    SCREEN(s, 5, 2, (size_t)0);
+
+    /* Let me describe the situation that caused this because this
+     * test is not obvious. By writing an emoji below, we introduce
+     * one cell with the emoji and one cell as a "wide char spacer".
+     * We then soft wrap the line by writing spaces.
+     *
+     * By selecting only the tail, we'd select nothing and we had
+     * a logic error that would cause a crash. */
+    WRITE(s, "\xF0\x9F\x91\xA8");
+    WRITE(s, "      ");
+
+    {
+        const Selection sel = Selection::init(pinAt(s, Point::screen(1, 0)), pinAt(s, Point::screen(2, 0)), false);
+        EXPECT_STR("\xF0\x9F\x91\xA8", s.selectionString(Screen::SelectionString(sel, true)));
+    }
+}
+
+TEST(screen, Screen__selectionString_with_zero_width_joiner) {
+
+    SCREEN(s, 10, 1, (size_t)0);
+    /* this has a ZWJ */
+    const char *str = "\xF0\x9F\x91\xA8\xE2\x80\x8D";
+    WRITE(s, str);
+
+    /* Integrity check */
+    {
+        const Pin pin = pinAt(s, Point::screen(0, 0));
+        Cell *cell = pin.rowAndCell().cell;
+        ASSERT_TRUE(0x1F468 == cell->contentCodepoint());
+        ASSERT_TRUE(Cell::Wide::wide == cell->wide());
+        size_t cps_len = 0;
+        const uint32_t *cps = pin.node->page()->lookupGrapheme(cell, &cps_len);
+        ASSERT_TRUE(cps != nullptr);
+        ASSERT_TRUE(1 == cps_len);
+    }
+
+    /* The real test */
+    {
+        const Selection sel = Selection::init(pinAt(s, Point::screen(0, 0)), pinAt(s, Point::screen(1, 0)), false);
+        EXPECT_STR("\xF0\x9F\x91\xA8\xE2\x80\x8D", s.selectionString(Screen::SelectionString(sel, true)));
+    }
+}
+
+TEST(screen, Screen__selectionString__rectangle__basic) {
+
+    SCREEN(s, 30, 5, (size_t)0);
+    const char *str = "Lorem ipsum dolor\nsit amet, consectetur\nadipiscing elit, sed do\neiusmod tempor incididunt\nut labore et dolore";
+    const Selection sel = Selection::init(pinAt(s, Point::screen(2, 1)), pinAt(s, Point::screen(6, 3)), true);
+    const char *expected = "t ame\nipisc\nusmod";
+    WRITE(s, str);
+
+    EXPECT_STR(expected, s.selectionString(Screen::SelectionString(sel, true)));
+}
+
+TEST(screen, Screen__selectionString__rectangle__w_EOL) {
+
+    SCREEN(s, 30, 5, (size_t)0);
+    const char *str = "Lorem ipsum dolor\nsit amet, consectetur\nadipiscing elit, sed do\neiusmod tempor incididunt\nut labore et dolore";
+    const Selection sel = Selection::init(pinAt(s, Point::screen(12, 0)), pinAt(s, Point::screen(26, 4)), true);
+    const char *expected = "dolor\nnsectetur\nlit, sed do\nor incididunt\n dolore";
+    WRITE(s, str);
+
+    EXPECT_STR(expected, s.selectionString(Screen::SelectionString(sel, true)));
+}
+
+TEST(screen, Screen__selectionString__rectangle__more_complex_w_breaks) {
+
+    SCREEN(s, 30, 8, (size_t)0);
+    const char *str = "Lorem ipsum dolor\nsit amet, consectetur\nadipiscing elit, sed do\neiusmod tempor incididunt\nut labore et dolore\n\nmagna aliqua. Ut enim\nad minim veniam, quis";
+    const Selection sel = Selection::init(pinAt(s, Point::screen(11, 2)), pinAt(s, Point::screen(26, 7)), true);
+    const char *expected = "elit, sed do\npor incididunt\nt dolore\n\na. Ut enim\nniam, quis";
+    WRITE(s, str);
+
+    EXPECT_STR(expected, s.selectionString(Screen::SelectionString(sel, true)));
+}
+
+TEST(screen, Screen__selectionString_multi_page) {
+
+    SCREEN(s, 10, 3, (size_t)2048);
+
+    const size_t first_page_size = s.pages.pages.first->capacity().rows;
+
+    /* Lazy way to seek to the first page boundary. */
+    s.pages.pages.first->page()->pauseIntegrityChecks(true);
+    for (size_t i_ = 0; i_ < (size_t)(first_page_size - 1); i_++) {
+        WRITE(s, "\n");
+    }
+    s.pages.pages.first->page()->pauseIntegrityChecks(false);
+
+    WRITE(s, "123456789\n!@#$%^&*(\n123456789");
+
+    {
+        const Selection sel = Selection::init(pinAt(s, Point::active(0, 0)), pinAt(s, Point::active(2, 2)), false);
+        EXPECT_STR("123456789\n!@#$%^&*(\n123", s.selectionString(Screen::SelectionString(sel, true)));
+    }
+}
+
 /* @@TESTS@@ */
 
 /* Wisp: std.testing.allocator's leak check. Runs last (registration order). */

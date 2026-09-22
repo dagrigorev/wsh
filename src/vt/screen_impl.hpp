@@ -460,8 +460,8 @@ inline PageList::IncreaseCapacityError Screen::increaseCapacity(PageList::Node *
         (void)startHyperlinkOnce(*link);
 
         /* Remove our old link */
-        link->deinit();
-        delete link;
+        link->deinit(alloc);
+        alloc.destroy(link);
     }
 
     /* Reload the cursor information because the pin changed.
@@ -1021,8 +1021,8 @@ inline void Screen::cursorChangePin(const Pin &new_) {
                              explicit_ ? link->id.explicit_len : 0);
 
         /* Remove our old link */
-        link->deinit();
-        delete link;
+        link->deinit(alloc);
+        alloc.destroy(link);
     }
 }
 
@@ -1196,8 +1196,8 @@ inline bool Screen::resize(const Resize &opts) {
                              explicit_ ? cursor_hyperlink->id.explicit_len : 0);
 
         /* Remove our old link */
-        cursor_hyperlink->deinit();
-        delete cursor_hyperlink;
+        cursor_hyperlink->deinit(alloc);
+        alloc.destroy(cursor_hyperlink);
     }
 
     /* A tracked pin follows its content when PageList moves or replaces a
@@ -1563,9 +1563,10 @@ inline PageList::IncreaseCapacityError Screen::startHyperlink(const uint8_t *uri
 inline page::PageError Screen::startHyperlinkOnce(const hyperlink::Hyperlink &source) {
     /* Allocate our new Hyperlink entry in non-page memory. This
      * lets us quickly get access to URI, ID. */
-    hyperlink::Hyperlink *link = new hyperlink::Hyperlink();
-    if (!source.dupe(link)) {
-        delete link;
+    hyperlink::Hyperlink *link = alloc.create<hyperlink::Hyperlink>();
+    if (!link) return page::PageError::OutOfMemory;
+    if (!source.dupe(alloc, link)) {
+        alloc.destroy(link);
         return page::PageError::OutOfMemory;
     }
 
@@ -1578,8 +1579,8 @@ inline page::PageError Screen::startHyperlinkOnce(const hyperlink::Hyperlink &so
     hyperlink::Id id;
     const page::PageError e = page->insertHyperlink(*link, &id);
     if (e != page::PageError::none) {
-        link->deinit();
-        delete link;
+        link->deinit(alloc);
+        alloc.destroy(link);
         return e;
     }
 
