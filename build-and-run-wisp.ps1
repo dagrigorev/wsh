@@ -111,7 +111,12 @@ if (-not (Test-Path -LiteralPath $BuildDir)) {
 }
 
 Write-Host "Configuring Wisp ($Configuration, $generator)..."
-cmake.exe -S . -B $BuildDir -G $generator -DCMAKE_BUILD_TYPE=$Configuration
+# The build type must be quoted: PowerShell does not expand a variable inside
+# a bare argument that starts with a dash, so an unquoted
+# -DCMAKE_BUILD_TYPE=$Configuration reaches CMake literally. CMake then sees a
+# build type it knows nothing about, applies no per-configuration flags, and
+# Debug and Release produce the same unoptimized binary with no debug checks.
+cmake.exe -S . -B $BuildDir -G $generator "-DCMAKE_BUILD_TYPE=$Configuration"
 if ($LASTEXITCODE -ne 0) {
     throw "CMake configure failed with exit code $LASTEXITCODE."
 }
