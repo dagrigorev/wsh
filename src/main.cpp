@@ -21,8 +21,7 @@
 #include "platform/config.h"
 #include "platform/pty.h"
 #include "platform/input.h"
-#include "terminal/screen.h"
-#include "terminal/vt_parser.h"
+#include "terminal/vt_pane.hpp"
 #include "terminal/renderer.h"
 #include "terminal/layout.h"
 #include "window.h"
@@ -41,8 +40,7 @@
 /* ─── Model ──────────────────────────────────────────────────────────────── */
 
 typedef struct {
-    ScreenBuffer screen;
-    VtParser     vt;
+    wisp::terminal::VtPane term;   /* the ported terminal and its view */
     PtySession   pty;
     RECT         rect;        /* pixel rect inside the client area */
     bool         initialized;
@@ -135,11 +133,20 @@ static Pane *active_pane(void) {
 
 /* ─── PTY plumbing ───────────────────────────────────────────────────────── */
 
+/* The terminal's replies to the hosted program: device attributes, cursor
+ * position reports, XTGETTCAP answers and the like. Called from inside a feed,
+ * so g_lock is already held. */
+static void pane_pty_reply(void *ctx, const char *data, size_t len) {
+    Pane *pane = (Pane *)ctx;
+    if (!pane || !pane->initialized || len == 0) return;
+    pty_write(&pane->pty, data, (int)len);
+}
+
 static void on_pty_data(const char *buf, int len, void *ud) {
     Pane *pane = (Pane *)ud;
     if (!pane) return;
     EnterCriticalSection(&g_lock);
-    if (pane->initialized) vt_parser_feed(&pane->vt, buf, len);
+    if (pane->initialized) pane->term.feed(buf, (size_t)len);
     LeaveCriticalSection(&g_lock);
     InvalidateRect(g_hwnd, NULL, FALSE);
 }
@@ -235,9 +242,12 @@ static const wchar_t *shell_command_line(wchar_t *buf, size_t cap) {
 static bool pane_start(Pane *pane) {
     if (!pane) return false;
 
-    RECT rc = pane->rect;
-    memset(pane, 0, sizeof(*pane));
-    pane->rect = rc;
+    /* Reset the plain fields. The terminal is not memset: it owns heap state
+     * (pin pools, pages) that init/deinit manage, and clearing its bytes
+     * underneath would leave those pointers dangling. */
+    pane->initialized = false;
+    pane->wheel_accum = 0;
+    const RECT rc = pane->rect;
 
     int cols = g_renderer.cols > 0 ? g_renderer.cols : 80;
     int rows = g_renderer.rows > 0 ? g_renderer.rows : 24;
@@ -248,12 +258,22 @@ static bool pane_start(Pane *pane) {
     if (cols < 1) cols = 1;
     if (rows < 1) rows = 1;
 
-    screen_init(&pane->screen, cols, rows, g_cfg.general.scrollback);
-    vt_parser_init(&pane->vt, &pane->screen);
+    /* The scrollback config is in lines; the port budgets it in bytes.
+     * A row costs roughly one cell per column plus row overhead, so this is
+     * the same order of magnitude as the old per-line ring. */
+    const size_t scrollback_bytes =
+        (size_t)(g_cfg.general.scrollback > 0 ? g_cfg.general.scrollback : 0) *
+        (size_t)cols * sizeof(wisp::vt::page::Cell);
+    if (!pane->term.init((unsigned)cols, (unsigned)rows, scrollback_bytes)) {
+        WISP_LOG_ERROR("terminal init failed");
+        return false;
+    }
+    pane->term.ctx = pane;
+    pane->term.write_fn = &pane_pty_reply;
 
     if (!pty_create(&pane->pty, cols, rows)) {
         WISP_LOG_ERROR("pty_create failed");
-        screen_free(&pane->screen);
+        pane->term.deinit();
         return false;
     }
 
@@ -264,7 +284,7 @@ static bool pane_start(Pane *pane) {
     if (!pty_spawn(&pane->pty, shell_command_line(cmd, 512), wcwd, on_pty_data, pane)) {
         WISP_LOG_ERROR("pty_spawn failed");
         pty_close(&pane->pty);
-        screen_free(&pane->screen);
+        pane->term.deinit();
         return false;
     }
 
@@ -278,12 +298,12 @@ static void pane_stop(Pane *pane) {
     pane->initialized = false;
     LeaveCriticalSection(&g_lock);
     pty_close(&pane->pty);
-    screen_free(&pane->screen);
+    pane->term.deinit();
 }
 
 static void pane_write(Pane *pane, const char *bytes, int len) {
     if (!pane || !pane->initialized || len <= 0) return;
-    screen_reset_viewport(&pane->screen);
+    pane->term.resetViewport();
     pty_write(&pane->pty, bytes, len);
 }
 
@@ -369,10 +389,10 @@ static void pane_apply_rect(Pane *p, RECT rc) {
     int rows = (int)((rc.bottom - rc.top) / g_renderer.cell_h);
     if (cols < 1) cols = 1;
     if (rows < 1) rows = 1;
-    if (cols == p->screen.cols && rows == p->screen.rows) return;
+    if (cols == p->term.view.cols && rows == p->term.view.rows) return;
 
     EnterCriticalSection(&g_lock);
-    screen_resize(&p->screen, cols, rows);
+    (void)p->term.resize((unsigned)cols, (unsigned)rows);
     LeaveCriticalSection(&g_lock);
     pty_resize(&p->pty, cols, rows);
 }
@@ -446,8 +466,8 @@ static void draw_tab_bar(void) {
         const char *title = "shell";
         Tab *t = &g_tabs[i];
         if (t->initialized && t->pane_count > 0 &&
-            t->panes[t->active_pane].screen.title[0])
-            title = t->panes[t->active_pane].screen.title;
+            t->panes[t->active_pane].term.view.title[0])
+            title = t->panes[t->active_pane].term.view.title;
 
         wchar_t label[128];
         int wlen = 0;
@@ -485,7 +505,7 @@ static void sync_window_title(void) {
     Pane *p = active_pane();
 
     char buf[320];
-    if (p && p->screen.title[0]) _snprintf(buf, sizeof(buf), "%s — Wisp", p->screen.title);
+    if (p && p->term.view.title[0]) _snprintf(buf, sizeof(buf), "%s — Wisp", p->term.view.title);
     else                         _snprintf(buf, sizeof(buf), "Wisp");
     buf[sizeof(buf) - 1] = '\0';
 
@@ -513,16 +533,16 @@ static void copy_selection(void) {
     EnterCriticalSection(&g_lock);
     for (int r = sr; r <= er && ti < 65520; r++) {
         int c0 = (r == sr) ? sc : 0;
-        int c1 = (r == er) ? ec : p->screen.cols - 1;
+        int c1 = (r == er) ? ec : p->term.view.cols - 1;
 
         /* Trailing blanks are padding, not content — stop at the last glyph. */
         int last_ns = c0 - 1;
         for (int c = c0; c <= c1; c++) {
-            const ScreenCell *cell = screen_visible_cell(&p->screen, r, c);
+            const ScreenCell *cell = screen_visible_cell(&p->term.view, r, c);
             if (cell && !cell->wide_cont && cell->ch > ' ') last_ns = c;
         }
         for (int c = c0; c <= last_ns && ti < 65512; c++) {
-            const ScreenCell *cell = screen_visible_cell(&p->screen, r, c);
+            const ScreenCell *cell = screen_visible_cell(&p->term.view, r, c);
             if (cell && cell->wide_cont) continue;
             uint32_t ch = cell ? cell->ch : ' ';
             if (!ch) ch = ' ';
@@ -565,7 +585,7 @@ static void paste_clipboard(void) {
             if (txt) {
                 /* Bracketed paste lets the hosted program tell pasted text from
                    typed text, so a multi-line paste is not auto-executed. */
-                if (p->screen.bracketed_paste) {
+                if (p->term.view.bracketed_paste) {
                     pane_write(p, "\x1b[200~", 6);
                     pane_write(p, txt, u8len);
                     pane_write(p, "\x1b[201~", 6);
@@ -632,10 +652,10 @@ static void handle_input_action(InputAction action) {
             Pane *p = active_pane();
             if (!p) break;
             EnterCriticalSection(&g_lock);
-            if      (action == INPUT_SCROLL_UP)        screen_scroll_viewport(&p->screen, 1);
-            else if (action == INPUT_SCROLL_DOWN)      screen_scroll_viewport(&p->screen, -1);
-            else if (action == INPUT_SCROLL_PAGE_UP)   screen_page_viewport(&p->screen, 1);
-            else                                       screen_page_viewport(&p->screen, -1);
+            if      (action == INPUT_SCROLL_UP)        p->term.scrollViewport(1);
+            else if (action == INPUT_SCROLL_DOWN)      p->term.scrollViewport(-1);
+            else if (action == INPUT_SCROLL_PAGE_UP)   p->term.pageViewport(1);
+            else                                       p->term.pageViewport(-1);
             LeaveCriticalSection(&g_lock);
             InvalidateRect(g_hwnd, NULL, FALSE);
             break;
@@ -684,11 +704,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     Pane *p = &t->panes[i];
                     if (!p->initialized) continue;
                     bool active = (i == t->active_pane);
-                    bool cursor_shown = active && p->screen.cursor_visible &&
-                                        p->screen.viewport_offset == 0;
-                    renderer_paint_region(&g_renderer, &p->screen, &p->rect, active,
+                    bool cursor_shown = active && p->term.view.cursor_visible &&
+                                        p->term.view.viewport_offset == 0;
+                    renderer_paint_region(&g_renderer, &p->term.view, &p->rect, active,
                                           cursor_shown,
-                                          p->screen.cursor_x, p->screen.cursor_y);
+                                          p->term.view.cursor_x, p->term.view.cursor_y);
                 }
                 LeaveCriticalSection(&g_lock);
             }
@@ -726,7 +746,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         case WM_KEYDOWN:
         case WM_SYSKEYDOWN: {
             Pane *p = active_pane();
-            bool app_cursor = p && p->screen.app_cursor_keys;
+            bool app_cursor = p && p->term.view.app_cursor_keys;
 
             /* Splits: Ctrl+Shift+E vertical, Ctrl+Shift+O horizontal,
                Ctrl+Shift+] / [ to cycle panes — matching Ghostty's defaults. */
@@ -857,7 +877,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             p->wheel_accum -= lines * WHEEL_DELTA;
             if (lines) {
                 EnterCriticalSection(&g_lock);
-                screen_scroll_viewport(&p->screen, lines * 3);
+                p->term.scrollViewport(lines * 3);
                 LeaveCriticalSection(&g_lock);
                 InvalidateRect(hwnd, NULL, FALSE);
             }
@@ -866,7 +886,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
         case WM_SETFOCUS: {
             Pane *p = active_pane();
-            if (p) p->screen.cursor_visible = true;
+            /* Cursor visibility is terminal state (mode 25); nothing to force here. */
             InvalidateRect(hwnd, NULL, FALSE);
             return 0;
         }

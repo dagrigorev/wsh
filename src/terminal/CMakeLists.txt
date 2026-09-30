@@ -2,8 +2,8 @@
 # Single Responsibility: VT/ANSI emulation, screen buffer, rendering.
 # Knows nothing about shell semantics or ConPTY.
 add_library(wisp_terminal STATIC
-    screen.c
-    vt_parser.c
+    screen_view.c
+    vt_pane.cpp
     layout.c
     renderer.cpp
     font.cpp

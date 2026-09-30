@@ -8,7 +8,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include "renderer.h"
-#include "screen.h"
+#include "screen_view.h"
 #include "../platform/config.h"
 #include "font.h"
 #include "layout.h"

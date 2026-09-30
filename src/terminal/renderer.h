@@ -6,7 +6,7 @@
 #include <d2d1.h>
 #include <dwrite.h>
 #include "wisp_bool.h"
-#include "screen.h"
+#include "screen_view.h"
 #include "../platform/config.h"
 #include "font.h"
 

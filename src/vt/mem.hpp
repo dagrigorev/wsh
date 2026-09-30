@@ -28,8 +28,12 @@
 
 #include "page.hpp"
 
-/* Wisp: declared directly rather than through <windows.h> (see page.hpp). */
+/* Wisp: declared directly rather than through <windows.h> (see page.hpp),
+ * unless a translation unit already pulled windows.h in, which declares it
+ * with its own types. */
+#ifndef _WINDOWS_
 extern "C" __declspec(dllimport) unsigned long __stdcall DiscardVirtualMemory(void *, size_t);
+#endif
 
 namespace wisp {
 namespace vt {
