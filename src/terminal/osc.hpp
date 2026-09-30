@@ -664,13 +664,20 @@ enum class Operation : uint8_t {
     write,
 };
 
-inline bool Operation_init(const char *str, size_t len, Operation *out) {
+inline const char *const *Operation_names() {
     static const char *const names[] = { "read", "walias", "wdata", "write" };
+    return names;
+}
+
+inline bool Operation_init(const char *str, size_t len, Operation *out) {
     size_t i;
-    if (!name_to_index(names, 4, str, len, &i)) return false;
+    if (!name_to_index(Operation_names(), 4, str, len, &i)) return false;
     *out = (Operation)i;
     return true;
 }
+
+/* Wisp: the `{t}` format of an Operation. */
+inline const char *Operation_name(Operation op) { return Operation_names()[(size_t)op]; }
 
 /* Wisp: errno.h defines EBUSY, EFBIG, EINVAL, EIO, ENOSYS and EPERM as
  * macros, so those members carry a trailing underscore. */
@@ -686,15 +693,23 @@ enum class Status : uint8_t {
     OK,
 };
 
-inline bool Status_init(const char *str, size_t len, Status *out) {
+inline const char *const *Status_names() {
     static const char *const names[] = {
         "DATA", "DONE", "EBUSY", "EFBIG", "EINVAL", "EIO", "ENOSYS", "EPERM", "OK",
     };
+    return names;
+}
+
+inline bool Status_init(const char *str, size_t len, Status *out) {
     size_t i;
-    if (!name_to_index(names, 9, str, len, &i)) return false;
+    if (!name_to_index(Status_names(), 9, str, len, &i)) return false;
     *out = (Status)i;
     return true;
 }
+
+/* Wisp: the `{t}` format of a Status. The trailing underscore the errno
+ * macros force is not part of the name. */
+inline const char *Status_name(Status st) { return Status_names()[(size_t)st]; }
 
 enum class Option : uint8_t {
     id,

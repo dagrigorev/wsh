@@ -24,6 +24,7 @@
 #include "../terminal/color.hpp"
 #include "../terminal/modes.hpp"
 #include "../terminal/mouse.hpp"
+#include "../terminal/kitty/dnd_drop.hpp"
 #include "../terminal/osc.hpp"
 #include "../terminal/sgr.hpp"
 #include "screen_set.hpp"
@@ -143,6 +144,54 @@ struct Terminal {
               default_modes(), default_cursor_style(Screen::CursorStyle::block), default_cursor_blink(false) {}
     };
 
+    /* Wisp: std.ArrayList(u8). Only the operations Terminal uses are
+     * provided, with upstream's names, so the allocation failure paths
+     * upstream tests are the same here. */
+    struct ByteList {
+        uint8_t *items;
+        size_t len;
+        size_t capacity;
+
+        ByteList() : items(nullptr), len(0), capacity(0) {}
+
+        void deinit(zigstd::Allocator alloc) {
+            if (capacity > 0) alloc.free(items, capacity);
+            items = nullptr;
+            len = 0;
+            capacity = 0;
+        }
+
+        void clearRetainingCapacity() { len = 0; }
+
+        /* Wisp: false is OutOfMemory. */
+        bool ensureTotalCapacity(zigstd::Allocator alloc, size_t new_capacity) {
+            if (capacity >= new_capacity) return true;
+            /* std.ArrayList grows geometrically; the exact growth is not
+             * observable, only that the capacity is at least what was asked
+             * for and that a failure leaves the list untouched. */
+            size_t better = capacity;
+            while (better < new_capacity) better = better + (better / 2) + 8;
+            uint8_t *n = alloc.alloc(better);
+            if (!n) return false;
+            if (len) memcpy(n, items, len);
+            if (capacity > 0) alloc.free(items, capacity);
+            items = n;
+            capacity = better;
+            return true;
+        }
+
+        bool ensureTotalCapacityPrecise(zigstd::Allocator alloc, size_t new_capacity) {
+            if (capacity >= new_capacity) return true;
+            uint8_t *n = alloc.alloc(new_capacity);
+            if (!n) return false;
+            if (len) memcpy(n, items, len);
+            if (capacity > 0) alloc.free(items, capacity);
+            items = n;
+            capacity = new_capacity;
+            return true;
+        }
+    };
+
     /* The set of screens behind this terminal (e.g. primary vs alternate). */
     ScreenSet screens;
 
@@ -150,6 +199,10 @@ struct Terminal {
      * We don't support a status line currently so we just black hole this
      * data so that it doesn't mess up our main display. */
     terminal::ansi::StatusDisplay status_display; /* = .main */
+
+    /* Kitty drag and drop protocol (OSC 72) state, allocated when a
+     * client registers to accept drops and freed when it unregisters. */
+    terminal::kitty::dnd::State *kitty_dnd; /* = null */
 
     /* Where the tabstops are. */
     Tabstops tabstops;
@@ -165,11 +218,11 @@ struct Terminal {
     /* The current scrolling region. */
     ScrollingRegion scrolling_region;
 
-    /* The last reported pwd, if any. Wisp: std.ArrayList(u8). */
-    std::string pwd;
+    /* The last reported pwd, if any. */
+    ByteList pwd;
 
     /* The title of the terminal as set by escape sequences (e.g. OSC 0/2). */
-    std::string title;
+    ByteList title;
 
     /* The color state for this terminal. */
     Colors colors;
@@ -343,7 +396,7 @@ struct Terminal {
     }
 
     Terminal()
-        : status_display(terminal::ansi::StatusDisplay::main), rows(0), cols(0), width_px(0), height_px(0),
+        : status_display(terminal::ansi::StatusDisplay::main), kitty_dnd(nullptr), rows(0), cols(0), width_px(0), height_px(0),
           previous_char(), mouse_shape(terminal::mouse::Shape::text) {
         scrolling_region.top = 0;
         scrolling_region.bottom = 0;
@@ -356,8 +409,9 @@ struct Terminal {
         tabstops.deinit(alloc);
         screens.deinit(alloc);
         colors.palette.deinit();
-        pwd.clear();
-        title.clear();
+        pwd.deinit(alloc);
+        title.deinit(alloc);
+        if (kitty_dnd != nullptr) kitty_dnd->destroy(alloc);
     }
 
     /* The general allocator we should use for this terminal. */

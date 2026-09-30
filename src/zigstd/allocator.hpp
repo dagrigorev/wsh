@@ -146,6 +146,90 @@ struct FixedBufferAllocator {
     }
 };
 
+/* std.heap.ArenaAllocator: bump allocation out of chunks from a child
+ * allocator, freed all at once by deinit. free is a no-op except for the
+ * most recent allocation, as upstream's is.
+ *
+ * Wisp: upstream keeps its buffer list threaded through the buffers
+ * themselves; here each chunk carries its header in a separate small
+ * allocation so the chunk's own alignment stays the child allocator's. */
+struct ArenaAllocator {
+    struct Chunk {
+        Chunk *next;
+        uint8_t *buf;
+        size_t len;
+        size_t used;
+    };
+
+    Allocator child_allocator;
+    Chunk *first;
+
+    static const size_t min_chunk_size = 4096;
+
+    explicit ArenaAllocator(Allocator child) : child_allocator(child), first(nullptr) {}
+
+    void deinit() {
+        Chunk *c = first;
+        while (c != nullptr) {
+            Chunk *next = c->next;
+            child_allocator.free(c->buf, c->len, 16);
+            child_allocator.destroy(c);
+            c = next;
+        }
+        first = nullptr;
+    }
+
+    static uint8_t *allocFn(void *ctx, size_t len, size_t alignment) {
+        ArenaAllocator *self = (ArenaAllocator *)ctx;
+
+        for (Chunk *c = self->first; c != nullptr; c = c->next) {
+            const uintptr_t base = (uintptr_t)c->buf + c->used;
+            const uintptr_t aligned = (base + alignment - 1) & ~(uintptr_t)(alignment - 1);
+            const size_t adjusted = c->used + (size_t)(aligned - base);
+            if (adjusted + len <= c->len) {
+                c->used = adjusted + len;
+                return c->buf + adjusted;
+            }
+            /* Only the newest chunk is worth retrying; older ones are full
+             * enough that upstream's arena does not revisit them either. */
+            break;
+        }
+
+        size_t want = min_chunk_size;
+        while (want < len + alignment) want *= 2;
+        uint8_t *buf = self->child_allocator.alignedAlloc(want, 16);
+        if (buf == nullptr) return nullptr;
+        Chunk *c = self->child_allocator.create<Chunk>();
+        if (c == nullptr) {
+            self->child_allocator.free(buf, want, 16);
+            return nullptr;
+        }
+        c->next = self->first;
+        c->buf = buf;
+        c->len = want;
+        c->used = 0;
+        self->first = c;
+
+        const uintptr_t base = (uintptr_t)buf;
+        const uintptr_t aligned = (base + alignment - 1) & ~(uintptr_t)(alignment - 1);
+        const size_t adjusted = (size_t)(aligned - base);
+        c->used = adjusted + len;
+        return buf + adjusted;
+    }
+
+    static void freeFn(void *ctx, uint8_t *memory, size_t len, size_t) {
+        ArenaAllocator *self = (ArenaAllocator *)ctx;
+        Chunk *c = self->first;
+        if (c != nullptr && memory + len == c->buf + c->used) c->used -= len;
+    }
+
+    Allocator allocator() {
+        static const Allocator::VTable vt = {allocFn, freeFn};
+        Allocator a = {this, &vt};
+        return a;
+    }
+};
+
 /* std.testing.FailingAllocator: fails the allocation at `fail_index`
  * (counting from zero) and every one after. */
 struct FailingAllocator {

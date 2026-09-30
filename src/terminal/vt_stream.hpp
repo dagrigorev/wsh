@@ -43,6 +43,7 @@
 #include "sgr.hpp"
 #include "utf8_decoder.hpp"
 #include "../simd/vt.hpp"
+#include "../zigstd/unicode.hpp"
 
 namespace wisp {
 namespace terminal {
@@ -341,35 +342,9 @@ private:
     }
 };
 
-/* Wisp: std.unicode.utf8ValidateSlice — well-formed UTF-8, rejecting
- * overlong forms, surrogates and values above U+10FFFF. */
-inline bool utf8ValidateSlice(const char *s, size_t len) {
-    const uint8_t *p = (const uint8_t *)s;
-    size_t i = 0;
-    while (i < len) {
-        const uint8_t b0 = p[i];
-        if (b0 < 0x80) { i += 1; continue; }
-        size_t n;
-        uint8_t lo = 0x80, hi = 0xBF;
-        if (b0 >= 0xC2 && b0 <= 0xDF) n = 2;
-        else if (b0 >= 0xE0 && b0 <= 0xEF) {
-            n = 3;
-            if (b0 == 0xE0) lo = 0xA0;
-            if (b0 == 0xED) hi = 0x9F;
-        } else if (b0 >= 0xF0 && b0 <= 0xF4) {
-            n = 4;
-            if (b0 == 0xF0) lo = 0x90;
-            if (b0 == 0xF4) hi = 0x8F;
-        } else return false;
-        if (i + n > len) return false;
-        if (p[i + 1] < lo || p[i + 1] > hi) return false;
-        for (size_t k = 2; k < n; k++) {
-            if (p[i + k] < 0x80 || p[i + k] > 0xBF) return false;
-        }
-        i += n;
-    }
-    return true;
-}
+/* Wisp: std.unicode.utf8ValidateSlice lives in zigstd so the kitty
+ * clipboard protocol can share it. */
+using ::wisp::zigstd::utf8ValidateSlice;
 
 /* Returns a type that can process a stream of tty control characters.
  * This will call the `vt` function on type T with the following signature:

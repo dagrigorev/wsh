@@ -9,7 +9,8 @@ add_library(wisp_terminal STATIC
     font.cpp
     guid_init.cpp
     style_table.cpp
+    sys.cpp
 )
 
 target_include_directories(wisp_terminal PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
-target_link_libraries(wisp_terminal PUBLIC wisp_core d2d1 dwrite)
+target_link_libraries(wisp_terminal PUBLIC wisp_core d2d1 dwrite bcrypt)

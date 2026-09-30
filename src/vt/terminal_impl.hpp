@@ -1515,7 +1515,7 @@ inline Terminal::CompressionResult Terminal::compress(CompressionMode mode) {
  * across scrolling region boundaries and orphaned spacer heads at line
  * ends. */
 inline void Terminal::rowWillBeShifted(Page *page, Row *row) {
-    Cell *cells = row->cells.ptr(page->memory);
+    Cell *cells = page->getCells(row);
 
     /* If our scrolling region includes the rightmost column then we
      * need to turn any spacer heads in to normal empty cells, since
@@ -2314,7 +2314,7 @@ inline bool Terminal::decaln() {
     for (;;) {
         Page *page = screens.active->cursor.page_pin->node->page();
         Row *row = screens.active->cursor.page_row;
-        Cell *cells = row->cells.ptr(page->memory);
+        Cell *cells = page->getCells(row);
         const size_t cells_len = page->size.cols;
         {
             Cell v = Cell::init('E');
@@ -2678,44 +2678,52 @@ inline Terminal::ResizeError Terminal::resize(zigstd::Allocator alloc, const Res
     return ResizeError::none;
 }
 
-/* Set the pwd for the terminal.
- *
- * Wisp: std.ArrayList(u8) with an explicit sentinel is a std::string; the
- * sentinel is std::string's own terminator so the stored length is the
- * text length, not text + 1. */
+/* Set the pwd for the terminal. */
 inline bool Terminal::setPwd(const char *pwd_new, size_t len) {
     if (len == 0) {
-        pwd.clear();
+        pwd.clearRetainingCapacity();
         return true;
     }
 
-    pwd.assign(pwd_new, len);
+    const size_t capacity = len + 1;
+    if (capacity < len) return false; /* std.math.add overflow */
+    if (!pwd.ensureTotalCapacity(gpa(), capacity)) return false;
+
+    pwd.len = capacity;
+    memmove(pwd.items, pwd_new, len);
+    pwd.items[len] = 0;
     return true;
 }
 
 /* Returns the pwd for the terminal, if any. The memory is owned by the
  * Terminal and is not copied. It is safe until a reset or setPwd. */
 inline const char *Terminal::getPwd() const {
-    if (pwd.size() == 0) return nullptr;
-    return pwd.c_str();
+    if (pwd.len == 0) return nullptr;
+    return (const char *)pwd.items;
 }
 
 /* Set the title for the terminal, as set by escape sequences (e.g. OSC 0/2). */
 inline bool Terminal::setTitle(const char *t, size_t len) {
     if (len == 0) {
-        title.clear();
+        title.clearRetainingCapacity();
         return true;
     }
 
-    title.assign(t, len);
+    const size_t capacity = len + 1;
+    if (capacity < len) return false; /* std.math.add overflow */
+    if (!title.ensureTotalCapacity(gpa(), capacity)) return false;
+
+    title.len = capacity;
+    memmove(title.items, t, len);
+    title.items[len] = 0;
     return true;
 }
 
 /* Returns the title for the terminal, if any. The memory is owned by the
  * Terminal and is not copied. It is safe until a reset or setTitle. */
 inline const char *Terminal::getTitle() const {
-    if (title.size() == 0) return nullptr;
-    return title.c_str();
+    if (title.len == 0) return nullptr;
+    return (const char *)title.items;
 }
 
 /* Switch to the given screen. The screen will be initialized if it
@@ -2886,8 +2894,11 @@ inline void Terminal::fullReset() {
 
     tabstops.reset(TABSTOP_INTERVAL);
     previous_char = Maybe<uint32_t>::none();
-    pwd.clear();
-    title.clear();
+    pwd.clearRetainingCapacity();
+    title.clearRetainingCapacity();
+    /* A reset only interrupts an in-progress chunked OSC 72 command;
+     * drag and drop registration survives, matching kitty. */
+    if (kitty_dnd != nullptr) kitty_dnd->chunking = terminal::kitty::dnd::Chunking();
     status_display = terminal::ansi::StatusDisplay::main;
     scrolling_region.top = 0;
     scrolling_region.bottom = (size::CellCountInt)(rows - 1);
@@ -3392,7 +3403,7 @@ inline bool Terminal::printSliceFill(PrintSliceWidth width, const uint32_t *cps,
                     }
                     if (style_id != style::default_id) {
                         page->styles.useMultiple((const void *)page->memory, style_id,
-                                                 (ref_counted_set::RefCountInt)n);
+                                                 (size::CellCountInt)n);
                     }
 
                     printSliceStoreRun(cells, cps + printed, k, m, template_bits);

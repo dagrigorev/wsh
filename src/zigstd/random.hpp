@@ -192,6 +192,22 @@ struct Random {
         return h;
     }
 
+    /* Returns an evenly distributed random unsigned integer `0 <= i <= at_most`. */
+    template <typename T>
+    T uintAtMost(T at_most) {
+        if (at_most == (T)~(T)0) return int_<T>();
+        return uintLessThan<T>((T)(at_most + 1));
+    }
+
+    template <typename T>
+    T intRangeAtMost(T at_least, T at_most) {
+        /* assert(at_least <= at_most) */
+        return (T)(at_least + uintAtMost<T>((T)(at_most - at_least)));
+    }
+
+    /* Wisp: int(u1) reads one byte and truncates to its low bit. */
+    bool boolean() { return (int_<uint8_t>() & 1) != 0; }
+
     template <typename T>
     T intRangeLessThan(T at_least, T less_than) {
         /* assert(at_least < less_than)
